@@ -154,15 +154,24 @@ fn resolve_target(root: &Path, raw: &str) -> Result<PathBuf, AstError> {
     Ok(normalized)
 }
 
-/// Search for a syntactic pattern under `root`.
+/// Search for a syntactic pattern under `root` (or within `path` if specified).
 ///
 /// `lang` is the target language alias (e.g. `"ts"`, `"js"`, `"python"`, `"rs"`).
 /// Files whose language does not match `lang` are skipped.
-pub fn ast_search(root: &Path, pattern: &str, lang: &str) -> Result<Vec<Match>, AstError> {
+pub fn ast_search(
+    root: &Path,
+    pattern: &str,
+    lang: &str,
+    path: Option<&str>,
+) -> Result<Vec<Match>, AstError> {
     if pattern.trim().is_empty() {
         return Err(AstError::InvalidArgs("AST search requires a non-empty pattern".into()));
     }
-    let target = resolve_target(root, &root.to_string_lossy())?;
+    let raw = match path {
+        Some(p) if !p.trim().is_empty() => p.trim(),
+        _ => &root.to_string_lossy(),
+    };
+    let target = resolve_target(root, raw)?;
     let files = resolve_files(&target)?;
 
     let target_lang = parse_lang(lang)?;
@@ -205,8 +214,8 @@ pub fn ast_search(root: &Path, pattern: &str, lang: &str) -> Result<Vec<Match>, 
     Ok(matches)
 }
 
-/// Replace a syntactic pattern under `root`, applying the rewrite per file
-/// with a syntax gate (reparse + ERROR-node check) and per-file rollback.
+/// Replace a syntactic pattern under `root` (or within `path` if specified), applying
+/// the rewrite per file with a syntax gate (reparse + ERROR-node check) and per-file rollback.
 ///
 /// `lang` is the target language alias. Files whose language does not match
 /// `lang` are skipped.
@@ -215,11 +224,16 @@ pub fn ast_replace(
     pattern: &str,
     replacement: &str,
     lang: &str,
+    path: Option<&str>,
 ) -> Result<ReplaceSummary, AstError> {
     if pattern.trim().is_empty() {
         return Err(AstError::InvalidArgs("AST replace requires a non-empty pattern".into()));
     }
-    let target = resolve_target(root, &root.to_string_lossy())?;
+    let raw = match path {
+        Some(p) if !p.trim().is_empty() => p.trim(),
+        _ => &root.to_string_lossy(),
+    };
+    let target = resolve_target(root, raw)?;
     let files = resolve_files(&target)?;
     let target_lang = parse_lang(lang)?;
 
@@ -364,7 +378,7 @@ mod tests {
         )
         .unwrap();
 
-        let matches = ast_search(&root, "function $NAME($$$ARGS) { $$$BODY }", "ts").unwrap();
+        let matches = ast_search(&root, "function $NAME($$$ARGS) { $$$BODY }", "ts", None).unwrap();
         assert!(!matches.is_empty(), "expected at least one match");
         let m = &matches[0];
         assert_eq!(m.file, file.to_string_lossy());
@@ -384,7 +398,7 @@ mod tests {
         )
         .unwrap();
 
-        let matches = ast_search(&root, "fn $NAME($$$ARGS) -> $RET { $$$BODY }", "rs").unwrap();
+        let matches = ast_search(&root, "fn $NAME($$$ARGS) -> $RET { $$$BODY }", "rs", None).unwrap();
         assert!(!matches.is_empty(), "expected at least one match");
         let m = &matches[0];
         assert_eq!(m.file, file.to_string_lossy());
@@ -410,15 +424,38 @@ mod tests {
 
         // Searching Rust pattern must succeed across mixed dir, ignoring the .ts file without error.
         let rs_matches =
-            ast_search(&root, "fn $NAME($$$ARGS) -> $RET { $$$BODY }", "rs").unwrap();
+            ast_search(&root, "fn $NAME($$$ARGS) -> $RET { $$$BODY }", "rs", None).unwrap();
         assert_eq!(rs_matches.len(), 1);
         assert_eq!(rs_matches[0].file, rs_file.to_string_lossy());
 
         // Searching TS pattern must succeed across mixed dir, ignoring the .rs file without error.
         let ts_matches =
-            ast_search(&root, "function $NAME($$$ARGS): $RET { $$$BODY }", "ts").unwrap();
+            ast_search(&root, "function $NAME($$$ARGS): $RET { $$$BODY }", "ts", None).unwrap();
         assert_eq!(ts_matches.len(), 1);
         assert_eq!(ts_matches[0].file, ts_file.to_string_lossy());
+
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn search_targets_specific_file_path() {
+        let root = test_root("search_path");
+        let file_a = root.join("src").join("a.ts");
+        let file_b = root.join("src").join("b.ts");
+        fs::write(&file_a, "function foo() { return 1; }\n").unwrap();
+        fs::write(&file_b, "function bar() { return 2; }\n").unwrap();
+
+        // Target ONLY a.ts
+        let matches = ast_search(
+            &root,
+            "function $NAME() { $$$BODY }",
+            "ts",
+            Some("src/a.ts"),
+        )
+        .unwrap();
+        assert_eq!(matches.len(), 1);
+        assert_eq!(matches[0].file, file_a.to_string_lossy());
+        assert!(matches[0].text.contains("foo"));
 
         let _ = fs::remove_dir_all(&root);
     }
@@ -435,6 +472,7 @@ mod tests {
             "function $NAME($$$ARGS) { $$$BODY }",
             "function renamed($$$ARGS) { $$$BODY }",
             "ts",
+            None,
         )
         .unwrap();
 
@@ -446,6 +484,32 @@ mod tests {
         let new_content = fs::read_to_string(&file).unwrap();
         assert!(new_content.contains("renamed"), "content: {new_content}");
         assert!(!new_content.contains("greet"), "content: {new_content}");
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn replace_targets_specific_file_path() {
+        let root = test_root("replace_path");
+        let file_a = root.join("src").join("a.ts");
+        let file_b = root.join("src").join("b.ts");
+        fs::write(&file_a, "function target() {}\n").unwrap();
+        fs::write(&file_b, "function target() {}\n").unwrap();
+
+        // Replace ONLY in a.ts
+        let summary = ast_replace(
+            &root,
+            "function target() {}",
+            "function updated() {}",
+            "ts",
+            Some("src/a.ts"),
+        )
+        .unwrap();
+
+        assert_eq!(summary.files_applied, 1);
+        assert_eq!(summary.applied, vec![file_a.to_string_lossy().to_string()]);
+        assert_eq!(fs::read_to_string(&file_a).unwrap(), "function updated() {}\n");
+        assert_eq!(fs::read_to_string(&file_b).unwrap(), "function target() {}\n");
+
         let _ = fs::remove_dir_all(&root);
     }
 
@@ -464,6 +528,7 @@ mod tests {
             "function $NAME($$$ARGS) { $$$BODY }",
             "function broken(",
             "ts",
+            None,
         )
         .unwrap();
 
@@ -485,7 +550,7 @@ mod tests {
         // A non-existent absolute root is refused by the sandbox before any
         // AST work happens.
         let missing = std::env::temp_dir().join("castor_ast_missing_never");
-        let err = ast_search(&missing, "function $N() {}", "ts").unwrap_err();
+        let err = ast_search(&missing, "function $N() {}", "ts", None).unwrap_err();
         assert!(
             matches!(err, AstError::Sandbox(SandboxError::WorkspaceRoot(_))),
             "expected a sandbox refusal, got {err:?}"

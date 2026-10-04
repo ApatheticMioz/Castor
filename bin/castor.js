@@ -35,23 +35,35 @@ function handleSpawn(child) {
   });
 }
 
+function pickNewest(paths) {
+  let newest = null;
+  let maxTime = -1;
+  for (const p of paths) {
+    try {
+      const stat = fs.statSync(p);
+      if (stat.mtimeMs > maxTime) {
+        maxTime = stat.mtimeMs;
+        newest = p;
+      }
+    } catch {}
+  }
+  return newest;
+}
+
 if (isWin) {
-  if (fs.existsSync(winReleaseExe)) {
-    handleSpawn(spawn(winReleaseExe, args, { stdio: "inherit" }));
-  } else if (fs.existsSync(winDebugExe)) {
-    handleSpawn(spawn(winDebugExe, args, { stdio: "inherit" }));
+  const winBin = pickNewest([winReleaseExe, winDebugExe]);
+  if (winBin) {
+    handleSpawn(spawn(winBin, args, { stdio: "inherit" }));
   } else {
     // Forward to WSL2
     const wslRoot = root
       .replace(/^([a-zA-Z]):/, (_, drive) => `/mnt/${drive.toLowerCase()}`)
       .replace(/\\/g, "/");
 
-    let wslBin = "castor";
-    if (fs.existsSync(linuxReleaseBin)) {
-      wslBin = `${wslRoot}/target/release/castor`;
-    } else if (fs.existsSync(linuxDebugBin)) {
-      wslBin = `${wslRoot}/target/debug/castor`;
-    }
+    const linuxBin = pickNewest([linuxReleaseBin, linuxDebugBin]);
+    const wslBin = linuxBin
+      ? `${wslRoot}/target/${linuxBin.includes("release") ? "release" : "debug"}/castor`
+      : "castor";
 
     handleSpawn(
       spawn("wsl.exe", ["--", wslBin, ...args], {
@@ -61,12 +73,7 @@ if (isWin) {
     );
   }
 } else {
-  let bin = "castor";
-  if (fs.existsSync(linuxReleaseBin)) {
-    bin = linuxReleaseBin;
-  } else if (fs.existsSync(linuxDebugBin)) {
-    bin = linuxDebugBin;
-  }
-
+  const bin = pickNewest([linuxReleaseBin, linuxDebugBin]) ?? "castor";
   handleSpawn(spawn(bin, args, { stdio: "inherit" }));
 }
+

@@ -273,6 +273,56 @@ pub fn write_stats_json(state_dir: &Path, stats: &Stats) -> std::io::Result<Path
     Ok(out)
 }
 
+/// Format a high-level visual card of operational telemetry and financial savings.
+pub fn format_stats_card(stats: &Stats) -> String {
+    let mut out = String::new();
+    out.push_str("┌────────────────────────────────────────────────────────────────────────┐\n");
+    out.push_str("│                      CASTOR OPERATIONAL TELEMETRY                      │\n");
+    out.push_str("│                Universal Cloud-to-Local Agent Microkernel              │\n");
+    out.push_str("└────────────────────────────────────────────────────────────────────────┘\n\n");
+
+    out.push_str("📊 ACTIVITY & RUNTIME\n");
+    out.push_str(&format!("  • Turns:                   {}\n", stats.total_turns));
+    out.push_str(&format!("  • Sessions:                {}\n", stats.total_sessions));
+    out.push_str(&format!("  • Tasks Completed:         {}\n", stats.total_tasks_completed));
+    out.push_str(&format!("  • Tasks Failed:            {}\n", stats.total_tasks_failed));
+    out.push_str(&format!("  • Tasks Cancelled:         {}\n", stats.total_tasks_cancelled));
+    out.push_str(&format!(
+        "  • Total Tool Calls:        {} ({} errors)\n",
+        stats.total_tool_calls, stats.total_tool_errors
+    ));
+    if let Some(avg_ms) = stats.avg_duration_ms {
+        out.push_str(&format!("  • Avg Session Duration:    {:.2}s\n", avg_ms / 1000.0));
+    }
+    out.push('\n');
+
+    out.push_str("🧠 TOKEN EFFICIENCY\n");
+    out.push_str(&format!("  • Ingested Prompt Tokens:  {}\n", stats.total_prompt_tokens));
+    out.push_str(&format!("  • Generated Output Tokens: {}\n", stats.total_completion_tokens));
+    out.push_str(&format!("  • Reasoning Tokens:        {}\n", stats.total_reasoning_tokens));
+    out.push('\n');
+
+    out.push_str(&format!("💰 CLOUD ARBITRAGE ({} Rates)\n", stats.benchmark_model));
+    out.push_str(&format!("  • Virtual Cloud Cost:      ${:.2}\n", stats.estimated_cost_saved_usd));
+    out.push_str("  • Actual Local Cost:       $0.00\n");
+    out.push_str(&format!("  • NET SAVINGS:             +${:.2}\n", stats.estimated_cost_saved_usd));
+    out.push('\n');
+
+    if !stats.tool_calls.is_empty() {
+        out.push_str("🔧 TOOL USAGE BREAKDOWN\n");
+        for (name, count) in &stats.tool_calls {
+            let errs = stats.tool_errors.get(name).copied().unwrap_or(0);
+            out.push_str(&format!("  • {:<20} {:>5} calls ({} errors)\n", name, count, errs));
+        }
+        out.push('\n');
+    }
+
+    if let (Some(first), Some(last)) = (&stats.first_recorded_session, &stats.last_recorded_session) {
+        out.push_str(&format!("🕒 Active Horizon: {} → {}\n", first, last));
+    }
+    out
+}
+
 /// Per-session aggregates extracted from one `events.jsonl` ledger.
 struct SessionAgg {
     turns: u64,
@@ -586,6 +636,18 @@ mod tests {
             Some("world")
         );
         assert!(v.get("timestamp").is_some());
+        let _ = fs::remove_dir_all(&state);
+    }
+
+    #[test]
+    fn format_stats_card_renders_dashboard() {
+        let state = tmp_state();
+        let s = derive_stats(&state);
+        let card = format_stats_card(&s);
+        assert!(card.contains("CASTOR OPERATIONAL TELEMETRY"));
+        assert!(card.contains("ACTIVITY & RUNTIME"));
+        assert!(card.contains("TOKEN EFFICIENCY"));
+        assert!(card.contains("CLOUD ARBITRAGE"));
         let _ = fs::remove_dir_all(&state);
     }
 }

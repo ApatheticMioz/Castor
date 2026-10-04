@@ -159,7 +159,8 @@ pub fn builtin_tool_schemas() -> Vec<ToolSchema> {
                 "type": "object",
                 "properties": {
                     "pattern": { "type": "string", "description": "ast-grep pattern (e.g. 'function $NAME($$$ARGS) { $$$BODY }')" },
-                    "lang": { "type": "string", "description": "Target language (js, ts, py, rs, etc.)" }
+                    "lang": { "type": "string", "description": "Target language (js, ts, py, rs, etc.)" },
+                    "path": { "type": "string", "description": "Optional file or directory path to search within (defaults to workspace root)" }
                 },
                 "required": ["pattern", "lang"]
             }),
@@ -172,7 +173,8 @@ pub fn builtin_tool_schemas() -> Vec<ToolSchema> {
                 "properties": {
                     "pattern": { "type": "string", "description": "ast-grep pattern to match" },
                     "replacement": { "type": "string", "description": "Replacement pattern" },
-                    "lang": { "type": "string", "description": "Target language" }
+                    "lang": { "type": "string", "description": "Target language" },
+                    "path": { "type": "string", "description": "Optional file or directory path to replace within (defaults to workspace root)" }
                 },
                 "required": ["pattern", "replacement", "lang"]
             }),
@@ -264,7 +266,8 @@ impl ToolExecutor for CompositeExecutor {
             "ast_search" => {
                 let pattern = args.get("pattern").and_then(|v| v.as_str()).unwrap_or("");
                 let lang = args.get("lang").and_then(|v| v.as_str()).unwrap_or("");
-                match ast::ast_search(&self.workspace_root, pattern, lang) {
+                let path = args.get("path").and_then(|v| v.as_str());
+                match ast::ast_search(&self.workspace_root, pattern, lang, path) {
                     Ok(matches) => {
                         if matches.is_empty() {
                             Ok(ToolOutcome {
@@ -293,8 +296,9 @@ impl ToolExecutor for CompositeExecutor {
                     .and_then(|v| v.as_str())
                     .unwrap_or("");
                 let lang = args.get("lang").and_then(|v| v.as_str()).unwrap_or("");
+                let path = args.get("path").and_then(|v| v.as_str());
 
-                match ast::ast_replace(&self.workspace_root, pattern, replacement, lang) {
+                match ast::ast_replace(&self.workspace_root, pattern, replacement, lang, path) {
                     Ok(summary) => Ok(ToolOutcome {
                         text: format!(
                             "Replaced {} occurrence(s) across {} file(s) (applied: {}, rolled back: {}).",

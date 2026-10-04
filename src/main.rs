@@ -87,6 +87,12 @@ enum Command {
         #[arg(long)]
         yes: bool,
     },
+    /// View telemetry and operational statistics
+    Stats {
+        /// Print machine-readable JSON
+        #[arg(long)]
+        json: bool,
+    },
     /// Evo engine
     Evo {
         #[command(subcommand)]
@@ -566,6 +572,19 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 }
             }
         }
+        Command::Stats { json } => {
+            let loaded = config::load().map_err(|e| format!("config: {e}"))?;
+            let state = state::StateDir::from_config(&loaded.config);
+            let stats = telemetry::derive_stats(state.root());
+            if json {
+                println!(
+                    "{}",
+                    serde_json::to_string_pretty(&stats).map_err(|e| e.to_string())?
+                );
+            } else {
+                print!("{}", telemetry::format_stats_card(&stats));
+            }
+        }
         Command::Evo { action } => {
             let loaded = config::load().map_err(|e| format!("config: {e}"))?;
             let state = state::StateDir::from_config(&loaded.config);
@@ -639,6 +658,7 @@ mod tests {
             "config",
             "install",
             "clean",
+            "stats",
             "evo",
         ] {
             let args: Vec<&str> = match name {
