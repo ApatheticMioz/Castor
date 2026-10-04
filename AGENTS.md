@@ -200,6 +200,8 @@ skills/                  # Reusable SKILL.md workflow recipes
 - **ALWAYS** surface the unadulterated error (Rule 8: fail-fast, zero-masking).
 - **ALWAYS** keep `CLAUDE.md` and `GEMINI.md` shared invariants byte-identical.
 - **ALWAYS** use the sanctioned workspace scratchpad (`<workspace>/.scratch/` or repository-local helper scripts) for empirical reproduction scripts, intermediate data extractions, log slicing, and multi-item audit ledgers.
+- **ALWAYS** keep `Cargo.toml` and `package.json` version strings byte-identical before creating or pushing a release tag.
+- **ALWAYS** actively monitor CI/CD workflow runs to terminal completion (`gh run watch` or Actions console) when dispatching a release tag; never fire-and-forget.
 
 ### 4.2 ASK FIRST
 - **ASK** before adding a new dependency.
@@ -250,3 +252,45 @@ By default, tests NEVER interrupt, probe, or reboot a running serving engine (`A
    contracts (verify against code before relying on them).
 3. Secondary documentation, historical audit reports, and markdown notes =
    **reference ledgers, NOT executable ground truth.**
+
+---
+
+## 8. Release & Packaging Contract (npm OIDC & Cargo)
+
+Castor releases follow strict automated OIDC provenance and package registry invariants:
+
+### 8.1 The Triple-Lock Version Invariant
+The project version is represented in three distinct locations that **must remain byte-identical** on every release:
+1. `Cargo.toml`: `version = "X.Y.Z"` (compiled into the binary, reported by `castor --version`).
+2. `package.json`: `"version": "X.Y.Z"` (read directly by npm CLI during packaging and tarball generation).
+3. Git Tag: `vX.Y.Z` (triggers `.github/workflows/release.yml`, parsed into GitHub Release title).
+
+### 8.2 npm OIDC Trusted Publishing Architecture (`--provenance`)
+- **Zero Static Tokens**: Releases do NOT use a static `NPM_TOKEN` secret. Instead, npm authenticates via GitHub Actions OpenID Connect (OIDC) (`permissions: id-token: write`).
+- **Cryptographic Attestation**: When `npm publish --provenance` runs, npm requests a signed JWT from GitHub's OIDC provider containing the repository (`ApatheticMioz/Castor`), the git ref (`refs/tags/vX.Y.Z`), and the exact commit SHA.
+- **Sigstore Transparency**: npm mints a short-lived certificate via Sigstore Fulcio and records the provenance attestation in the Rekor public ledger, verifying that the published package originated from this exact workflow run.
+- **Registry Immutability & Fail-Fast**: The npm registry enforces strict version immutability. Once a version is published, it can never be replaced. If `package.json` has not been bumped to match the git tag, `npm publish` fails fast with `403 Forbidden` (`You cannot publish over previously published versions`). Subsequent promotion (`npm dist-tag add`) will fail with `404 Not Found`.
+
+### 8.3 Mandatory CI/CD Supervisory Monitoring
+- **No Fire-and-Forget Tagging**: Pushing a version tag dispatches asynchronous CI/CD. The operator or autonomous agent driving the release is **strictly required to monitor the pipeline to terminal completion**:
+  ```bash
+  # Watch the active release run until conclusion
+  gh run watch
+  ```
+- **Terminal Status Inspection**: If the release fails (test gate failure, clippy lint, Node shim invocation failure, OIDC token minting timeout, or npm dist-tag promotion failure), the supervisor must inspect `gh run view --log-failed` immediately and diagnose root cause before attempting remediation.
+
+### 8.4 Atomic Release Execution Checklist
+1. **Pre-flight verification**: Run `cargo test` (277+ tests green) and `cargo clippy --all-targets -- -D warnings` (0 warnings).
+2. **Lockstep version bump**: Update `Cargo.toml` (`version = "X.Y.Z"`) and `package.json` (`"version": "X.Y.Z"`).
+3. **Commit & push main**:
+   ```bash
+   git commit -am "chore(release): vX.Y.Z"
+   git push origin main
+   ```
+4. **Tag & push tag**:
+   ```bash
+   git tag vX.Y.Z
+   git push origin vX.Y.Z
+   ```
+5. **Supervise**: Run `gh run watch` and verify that the release job finishes with exit code 0 and promotes `latest` on npm.
+

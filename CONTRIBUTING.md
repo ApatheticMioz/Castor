@@ -165,7 +165,7 @@ We use [Conventional Commits](https://www.conventionalcommits.org/):
 
 ### PR Checklist
 Before requesting review, confirm:
-- [ ] `cargo test` is 100% green (243/243 tests).
+- [ ] `cargo test` is 100% green (277/277 tests).
 - [ ] `cargo clippy --all-targets -- -D warnings` passes with zero warnings.
 - [ ] `cargo fmt -- --check` passes cleanly.
 - [ ] No hardcoded drive letters, home dirs, or usernames in any file (paths are relative or env-driven).
@@ -183,3 +183,30 @@ privately per [`SECURITY.md`](SECURITY.md), which lists the supported
 versions, the private reporting channel, and our response SLA. The 137-vector
 containment suite (`src/tools/sandbox.rs`) is the regression net for the
 zero-trust boundary.
+
+---
+
+## 6. Release & Versioning Lifecycle (npm OIDC & Cargo)
+
+Castor uses [Semantic Versioning 2.0.0](https://semver.org/) (`MAJOR.MINOR.PATCH`):
+- **MAJOR**: Breaking changes to MCP tool signatures, protocol breaking removals.
+- **MINOR**: Backward-compatible new features (e.g. new CLI subcommands, new tool parameters, auto-boot).
+- **PATCH**: Backward-compatible bug fixes and internal stability hardening.
+
+### Automated Release Pipeline (`.github/workflows/release.yml`)
+Releases are automatically triggered whenever a git tag matching `v*` is pushed to GitHub:
+1. Runs full test suite (`cargo test --verbose`), clippy gate (`-D warnings`), and Node.js cross-platform shim test (`node bin/castor.js --help`).
+2. Creates the GitHub Release draft with auto-generated release notes.
+3. Publishes `mcp-castor` to npm using **OIDC Trusted Publishing** (`--provenance`) with cryptographic Sigstore attestation.
+
+### ⚠️ Version Invariant & Fail-Fast Guard
+- npm package releases are **immutable**. Once published, a version can never be republished or overwritten.
+- `npm publish` parses the version strictly from `package.json`. If `package.json` does not match the git tag, the publish step fails with `403 Forbidden`.
+- **`Cargo.toml` (`version`), `package.json` (`version`), and the git tag (`vX.Y.Z`) MUST remain byte-synchronized.**
+
+### Mandatory CI/CD Monitoring
+Pushing a release tag is an active operation, not fire-and-forget. The contributor or agent cutting a release must monitor GitHub Actions until completion:
+```bash
+# Watch the release workflow run to terminal status
+gh run watch
+```
