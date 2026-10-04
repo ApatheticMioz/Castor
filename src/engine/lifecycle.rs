@@ -100,6 +100,42 @@ impl EngineLifecycle {
             .any(|m| m.get("id").and_then(|i| i.as_str()) == Some(model.as_str()))
     }
 
+    /// Ensure the engine is running and healthy.
+    ///
+    /// Fast path: if the canary already passes, returns `Ok(())` immediately.
+    /// Otherwise, attempts to boot the engine (or waits for an in-progress boot
+    /// if another process holds the boot lock).
+    pub async fn ensure_running(&self) -> Result<(), LifecycleError> {
+        if self.canary().await {
+            return Ok(());
+        }
+        if self.config.launch_command.is_none() {
+            return Err(LifecycleError::NoLaunchCommand);
+        }
+        match self.boot().await {
+            Ok(()) => Ok(()),
+            Err(LifecycleError::AlreadyRunning) => Ok(()),
+            Err(LifecycleError::BootLockHeld { .. }) => {
+                self.wait_for_healthy().await
+            }
+            Err(e) => Err(e),
+        }
+    }
+
+    async fn wait_for_healthy(&self) -> Result<(), LifecycleError> {
+        let deadline = tokio::time::Instant::now() + self.boot_timeout;
+        while tokio::time::Instant::now() < deadline {
+            if self.canary().await {
+                return Ok(());
+            }
+            tokio::time::sleep(BOOT_POLL).await;
+        }
+        Err(LifecycleError::BootTimeout {
+            secs: self.boot_timeout.as_secs(),
+            detail: "timed out waiting for concurrent engine boot".into(),
+        })
+    }
+
     /// Boot the engine if it is not already healthy.
     ///
     /// Acquires the cross-process boot lock; a live holder fails cleanly.
@@ -368,6 +404,28 @@ mod tests {
         let lc = EngineLifecycle::new(&cfg, &state);
         let err = lc.boot().await.unwrap_err();
         assert!(matches!(err, LifecycleError::AlreadyRunning), "{err:?}");
+    }
+
+    #[tokio::test]
+    async fn ensure_running_happy_path_when_already_healthy() {
+        let state = tmp_state();
+        let (_base, port) = start_mock(vec!["test-model".into()], 0).await;
+        let mut cfg = test_config(&state, None, None);
+        cfg.ports.engine = port;
+        let lc = EngineLifecycle::new(&cfg, &state);
+        assert!(lc.ensure_running().await.is_ok());
+    }
+
+    #[tokio::test]
+    async fn ensure_running_fails_when_no_launch_command() {
+        let state = tmp_state();
+        let (_base, port) = start_mock(vec!["test-model".into()], u64::MAX).await;
+        let mut cfg = test_config(&state, None, None);
+        cfg.launch_command = None;
+        cfg.ports.engine = port;
+        let lc = EngineLifecycle::new(&cfg, &state);
+        let err = lc.ensure_running().await.unwrap_err();
+        assert!(matches!(err, LifecycleError::NoLaunchCommand));
     }
 
     #[tokio::test]

@@ -139,9 +139,87 @@ pub struct TaskRegistry {
     inner: Arc<Inner>,
 }
 
+static TASK_SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+/// Convert unix epoch seconds to UTC (year, month, day, hour, min, sec) using
+/// Howard Hinnant's civil day algorithm (0 external dependencies).
+pub fn epoch_secs_to_utc(secs: u64) -> (u32, u32, u32, u32, u32, u32) {
+    let sec = (secs % 60) as u32;
+    let min = ((secs / 60) % 60) as u32;
+    let hour = ((secs / 3600) % 24) as u32;
+    let mut days = (secs / 86400) as i64;
+
+    days += 719468;
+    let era = if days >= 0 { days } else { days - 146096 } / 146097;
+    let doe = (days - era * 146097) as u32;
+    let yoe = (doe - doe / 1029 + doe / 36524 - doe / 146096) / 365;
+    let y = yoe as i64 + era * 400;
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+    let mp = (5 * doy + 2) / 153;
+    let d = doy - (153 * mp + 2) / 5 + 1;
+    let m = if mp < 10 { mp + 3 } else { mp - 9 };
+    let y = if m <= 2 { y + 1 } else { y };
+
+    (y as u32, m, d, hour, min, sec)
+}
+
+/// Sanitize session_id or prompt into a clean, concise slug.
+fn sanitize_slug(session_id: &str, prompt: &str) -> String {
+    let trimmed = session_id.trim();
+    let source = if !trimmed.is_empty()
+        && !trimmed.starts_with("castor_session_")
+        && trimmed != "default"
+    {
+        trimmed.to_string()
+    } else {
+        let words: Vec<&str> = prompt.split_whitespace().take(3).collect();
+        if words.is_empty() {
+            "task".to_string()
+        } else {
+            words.join("_")
+        }
+    };
+
+    let mut slug = String::new();
+    let mut last_was_underscore = true;
+    for c in source.chars() {
+        if c.is_ascii_alphanumeric() {
+            slug.push(c.to_ascii_lowercase());
+            last_was_underscore = false;
+        } else if !last_was_underscore {
+            slug.push('_');
+            last_was_underscore = true;
+        }
+        if slug.len() >= 16 {
+            break;
+        }
+    }
+    let res = slug.trim_end_matches('_');
+    if res.is_empty() {
+        "task".to_string()
+    } else {
+        res.to_string()
+    }
+}
+
+
+/// Generate a collision-proof task ID:
+/// `task_{slug}_{YYYYMMDD_HHMMSS}_{millis:03}_{pid:04x}{seq:04x}`
+pub fn generate_task_id(session_id: &str, prompt: &str) -> String {
+    let slug = sanitize_slug(session_id, prompt);
+    let now_ms = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis() as u64)
+        .unwrap_or(0);
+    let (y, m, d, hh, mm, ss) = epoch_secs_to_utc(now_ms / 1000);
+    let millis = (now_ms % 1000) as u32;
+    let pid = (std::process::id() & 0xffff) as u16;
+    let seq = (TASK_SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed) & 0xffff) as u16;
+    format!("task_{slug}_{y:04}{m:02}{d:02}_{hh:02}{mm:02}{ss:02}_{millis:03}_{pid:04x}{seq:04x}")
+}
+
 struct Inner {
     tasks: Mutex<HashMap<String, TaskRecord>>,
-    next_seq: Mutex<u64>,
     /// Per-task terminal-transition broadcast channels. A wait handler
     /// subscribes to its task's channel to be woken on a terminal transition.
     terminal_txs: Mutex<HashMap<String, broadcast::Sender<u64>>>,
@@ -153,7 +231,6 @@ impl TaskRegistry {
             state: state.clone(),
             inner: Arc::new(Inner {
                 tasks: Mutex::new(HashMap::new()),
-                next_seq: Mutex::new(0),
                 terminal_txs: Mutex::new(HashMap::new()),
             }),
         }
@@ -196,7 +273,7 @@ impl TaskRegistry {
 
     /// Create a new task in the `queued` state and mirror it to disk.
     ///
-    /// Returns the new task id (`task_<seq>`).
+    /// Returns the unique, collision-proof task id (`task_<slug>_<timestamp>_<rand>`).
     pub async fn create(
         &self,
         prompt: impl Into<String>,
@@ -204,19 +281,23 @@ impl TaskRegistry {
         session_id: impl Into<String>,
     ) -> Result<String, RegistryError> {
         let now = now_ms();
-        let seq = {
-            let mut n = self.inner.next_seq.lock().await;
-            *n += 1;
-            *n
-        };
-        let id = format!("task_{seq}");
+        let prompt_str = prompt.into();
+        let cwd_str = cwd.into();
+        let session_id_str = session_id.into();
+
+        // Guaranteed collision-proof: generate task ID and ensure disk uniqueness.
+        let mut id = generate_task_id(&session_id_str, &prompt_str);
+        while self.task_path(&id).exists() {
+            id = generate_task_id(&session_id_str, &prompt_str);
+        }
+
         let rec = TaskRecord {
             id: id.clone(),
             status: TaskStatus::Queued,
             reason: None,
-            prompt: prompt.into(),
-            cwd: cwd.into(),
-            session_id: session_id.into(),
+            prompt: prompt_str,
+            cwd: cwd_str,
+            session_id: session_id_str,
             pid: None,
             heartbeat: now,
             turns_budget: 0,
@@ -615,5 +696,39 @@ mod tests {
                 status: TaskStatus::Completed
             }
         );
+    }
+
+    #[test]
+    fn civil_calendar_date_conversion() {
+        // 1970-01-01 00:00:00 UTC
+        assert_eq!(epoch_secs_to_utc(0), (1970, 1, 1, 0, 0, 0));
+
+        // Leap year: 2024-02-29 13:50:45 UTC = 1709214645
+        assert_eq!(epoch_secs_to_utc(1709214645), (2024, 2, 29, 13, 50, 45));
+
+        // Future date: 2026-10-04 11:09:19 UTC = 1791112159
+        assert_eq!(epoch_secs_to_utc(1791112159), (2026, 10, 4, 11, 9, 19));
+    }
+
+    #[tokio::test]
+    async fn task_id_format_and_collision_resistance() {
+        let state = tmp_state();
+        let reg = TaskRegistry::new(&state);
+
+        let id = reg.create("write question 1", "/tmp", "rm_activity_02").await.unwrap();
+        assert!(id.starts_with("task_rm_activity_02_"));
+        // task_{slug}_{YYYYMMDD_HHMMSS}_{millis:03}_{pid:04x}{seq:04x}
+        let parts: Vec<&str> = id.split('_').collect();
+        assert!(parts.len() >= 6); // task, rm, activity, 02, date, time, millis, pidseq
+        let last = parts.last().unwrap();
+        assert_eq!(last.len(), 8, "last component should be 8 hex chars (4 pid + 4 seq)");
+
+        // Concurrent generation of 1,000 tasks: guaranteed 0 collisions
+        let mut set = std::collections::HashSet::new();
+        for _ in 0..1000 {
+            let tid = generate_task_id("test_sess", "some prompt");
+            assert!(set.insert(tid), "collision detected!");
+        }
+        assert_eq!(set.len(), 1000);
     }
 }

@@ -259,7 +259,7 @@ impl CastorMcpServer {
         cmd.process_group(0);
 
         match cmd.spawn() {
-            Ok(child) => {
+            Ok(mut child) => {
                 if let Some(pid) = child.id() {
                     let _ = registry
                         .update(&task_id, |r| {
@@ -267,7 +267,44 @@ impl CastorMcpServer {
                         })
                         .await;
                 }
-            }
+
+                // Zero-Turn Execution Contract: sync window for fast tasks (<15s).
+                // Configurable via CASTOR_SYNC_TIMEOUT_SECS (default 15, 0 = immediately background).
+                let sync_timeout_secs = std::env::var("CASTOR_SYNC_TIMEOUT_SECS")
+                    .ok()
+                    .and_then(|s| s.parse::<u64>().ok())
+                    .unwrap_or(15);
+
+                if sync_timeout_secs > 0 {
+                    let sync_dur = std::time::Duration::from_secs(sync_timeout_secs);
+                    if let Ok(Ok(_)) = tokio::time::timeout(sync_dur, child.wait()).await {
+                        let rec = registry.get(&task_id).await.or_else(|| {
+                                match registry.read_disk(&task_id) {
+                                    crate::task::registry::DiskRead::Ok(r) => Some(r),
+                                    _ => None,
+                                }
+                            });
+
+                            if let Some(r) = rec {
+                                match r.status {
+                                    crate::task::registry::TaskStatus::Completed => {
+                                        let out = r
+                                            .reason
+                                            .unwrap_or_else(|| "Task completed successfully.".to_string());
+                                        return CallToolResult::success(vec![ContentBlock::text(out)]);
+                                    }
+                                    crate::task::registry::TaskStatus::Failed => {
+                                        let err = r.reason.unwrap_or_else(|| "Task failed.".to_string());
+                                        return CallToolResult::error(vec![ContentBlock::text(format!(
+                                            "Task failed: {err}"
+                                        ))]);
+                                    }
+                                    _ => {}
+                                }
+                            }
+                        }
+                    }
+                }
             Err(e) => {
                 let _ = registry
                     .transition(
@@ -776,7 +813,7 @@ mod tests {
     #[tokio::test]
     async fn stdio_purity_initialize_and_tools_list() {
         let (mut child, mut reader, mut stdin) =
-            spawn_and_handshake(&[], &[]).await;
+            spawn_and_handshake(&[], &[("CASTOR_SYNC_TIMEOUT_SECS", "0")]).await;
 
         // 1. initialize
         send_line(

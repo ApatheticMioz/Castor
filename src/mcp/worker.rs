@@ -57,6 +57,10 @@ fn now_epoch_ms() -> u64 {
 
 /// Execute a job specification against the real local engine.
 pub async fn run_job(spec: &JobSpec, state: &StateDir, config: &Config) -> Result<String, String> {
+    let lc = crate::engine::EngineLifecycle::new(config, state);
+    if let Err(e) = lc.ensure_running().await {
+        return Err(format!("Engine auto-boot failed: {e}"));
+    }
     let engine = EngineClient::from_config(config).map_err(|e| e.to_string())?;
     run_job_with_engine(spec, state, config, &engine).await
 }
