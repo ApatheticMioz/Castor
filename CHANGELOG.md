@@ -8,6 +8,16 @@ The project adheres to **[Semantic Versioning](https://semver.org/)**:
 
 ---
 
+## [1.0.2] — 2026-10-04
+
+### 📈 Telemetry Windowed Queries (Issue #18)
+- **`--since <duration>`**: Time-bound `castor stats` to a rolling window ending at now (e.g. `--since 24h`, `--since 7d`, `--since 30m`). Duration parsing uses the standard ecosystem crate `humantime` (2.1); invalid strings produce a clean, actionable error (`stats: invalid --since duration '…' (expected a duration like 24h, 7d, 30m)`) with a non-zero exit code.
+- **`--by-day`**: Aggregate session events by UTC civil date (`YYYY-MM-DD`) using `chrono`. The daily breakdown covers turns, prompt / completion / reasoning tokens, tool calls / errors, attributed session count, and attributed session duration.
+- **Card & JSON surfaces**: The `format_stats_card` operator card gains a `📅 DAILY BREAKDOWN (UTC)` table when `--by-day` is active; the `--json` surface gains a top-level `daily` object (keyed `YYYY-MM-DD`) when requested — and omits it entirely otherwise, preserving backwards-compatible JSON shape for existing consumers (MCP `castor_task stats`, `stats.json` writer).
+- **Pure derivation, no new writer**: Both options are pure query-time projections over the existing `<state>/sessions/*/events.jsonl` ledgers; no second stats writer, no new on-disk artifacts. The `since_ms` cutoff is computed in `main.rs` from the wall clock and passed into the pure `derive_stats` (which takes a `StatsOptions`), so the derivation stays deterministic and unit-testable with fixed timestamps.
+
+---
+
 ## [1.0.0] — 2026-10-03
 
 ### 🦀 Complete Rust Rewrite & v1.0.0 Full Cutover

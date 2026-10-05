@@ -147,7 +147,7 @@ src/
   pruner.rs              # State dir retention pruner
   mcp/
     mod.rs               # rmcp stdio transport, tool schemas, and server
-    dgi.rs               # Decomposition Granularity Index (DGI) semantic gatekeeper
+    dgi.rs               # Decomposition Granularity Index (DGI) 1-forward pass logit probe
     worker.rs            # Detached worker process execution loop
   task/
     mod.rs               # Task management subsystem
