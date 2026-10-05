@@ -97,6 +97,7 @@ impl ReplayEngine {
                             ttft_ms: None,
                             total_ms: 0.0,
                             tokens_per_sec: None,
+                            prompt_tokens: None,
                             completion_tokens: None,
                         },
                     })
@@ -119,6 +120,7 @@ impl ChatEngine for ReplayEngine {
         _messages: &[Message],
         _tools: &[ToolSchema],
         _stream: bool,
+        _reasoning_effort: Option<&str>,
     ) -> Result<Completion, EngineError> {
         // The critical section is synchronous (no await while locked), so a
         // std Mutex is sufficient and cheaper than a tokio Mutex.
@@ -142,6 +144,7 @@ impl ChatEngine for ReplayEngine {
                         ttft_ms: None,
                         total_ms: 0.0,
                         tokens_per_sec: None,
+                        prompt_tokens: None,
                         completion_tokens: None,
                     },
                 })
@@ -187,17 +190,17 @@ mod tests {
         ];
         let engine = ReplayEngine::new(steps);
 
-        let r1 = engine.chat(&[], &[], true).await.unwrap();
+        let r1 = engine.chat(&[], &[], true, None).await.unwrap();
         assert_eq!(r1.content, "one");
-        let r2 = engine.chat(&[], &[], true).await.unwrap();
+        let r2 = engine.chat(&[], &[], true, None).await.unwrap();
         assert_eq!(r2.content, "two");
-        let r3 = engine.chat(&[], &[], true).await.unwrap();
+        let r3 = engine.chat(&[], &[], true, None).await.unwrap();
         assert_eq!(r3.content, "three");
 
         // Fourth call: the (non-empty) trace is exhausted → the engine
         // returns a default final so the session can land cleanly (salvage
         // retry / budget synthesis), rather than `TraceExhausted`.
-        let r4 = engine.chat(&[], &[], true).await.unwrap();
+        let r4 = engine.chat(&[], &[], true, None).await.unwrap();
         assert_eq!(r4.content, "");
         assert!(r4.tool_calls.is_empty());
         assert_eq!(r4.finish_reason.as_deref(), Some("stop"));
@@ -206,7 +209,7 @@ mod tests {
     #[tokio::test]
     async fn empty_trace_errors_on_first_call() {
         let engine = ReplayEngine::new(Vec::new());
-        let err = engine.chat(&[], &[], true).await.unwrap_err();
+        let err = engine.chat(&[], &[], true, None).await.unwrap_err();
         assert!(matches!(err, EngineError::TraceExhausted), "{err:?}");
     }
 
@@ -235,7 +238,7 @@ mod tests {
         ];
         let engine = ReplayEngine::new(steps);
 
-        let r = engine.chat(&[], &[], true).await.unwrap();
+        let r = engine.chat(&[], &[], true, None).await.unwrap();
         assert_eq!(r.tool_calls.len(), 1);
         assert_eq!(r.tool_calls[0].id, "call_1");
         assert_eq!(r.tool_calls[0].name, "write_file");
@@ -258,7 +261,7 @@ mod tests {
         )];
         let engine = ReplayEngine::new(steps);
 
-        let r = engine.chat(&[], &[], true).await.unwrap();
+        let r = engine.chat(&[], &[], true, None).await.unwrap();
         assert_eq!(r.content, "calling a tool");
         assert_eq!(r.finish_reason.as_deref(), Some("tool_calls"));
         assert_eq!(r.tool_calls.len(), 2);
