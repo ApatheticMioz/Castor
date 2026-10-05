@@ -92,12 +92,16 @@ pub async fn run_job_with_engine(
 
     // 3. Initialize EventLogger and record session start.
     let logger = EventLogger::new(state, &spec.session_id);
+    // The effective tier is recorded on session_start (null when unset) so
+    // the session ledger is self-explanatory: pre-override sessions show
+    // null = "server default applied" (Issue #3).
     let _ = logger.append(json!({
         "type": "session_start",
         "sessionId": spec.session_id,
         "taskId": spec.task_id,
         "cwd": spec.cwd,
         "prompt": spec.prompt,
+        "reasoning_effort": spec.reasoning_effort,
     }));
 
     let host_cwd = crate::platform::to_host_path(&spec.cwd);
@@ -160,8 +164,12 @@ notes or deleted legacy references are reference ledgers.\n\
     let turns_budget = spec.turns_budget.unwrap_or(runner::DEFAULT_TURNS_BUDGET);
 
     // Terminal artifacts (the reasoning-ceiling salvage report) are persisted
-    // under the state dir's `.scratch/` (Issue #3 / R2).
-    let options = runner::SessionOptions::with_state(state.clone());
+    // under the state dir's `.scratch/` (Issue #3 / R2). The per-session
+    // reasoning-effort tier (validated at dispatch) is threaded into the
+    // runner so every engine call in the session carries it.
+    let mut options = runner::SessionOptions::with_state(state.clone());
+    options.reasoning_effort = spec.reasoning_effort.clone();
+    options.probe_budget = config.probe_budget;
 
     // 7. Run session loop.
     let outcome = runner::run_session(
@@ -220,6 +228,7 @@ mod tests {
             _messages: &[Message],
             _tools: &[ToolSchema],
             _stream: bool,
+            _reasoning_effort: Option<&str>,
         ) -> Result<Completion, EngineError> {
             self.responses
                 .lock()
@@ -275,6 +284,7 @@ mod tests {
                     ttft_ms: None,
                     total_ms: 10.0,
                     tokens_per_sec: None,
+                    prompt_tokens: None,
                     completion_tokens: None,
                 },
             }])),
@@ -297,8 +307,86 @@ mod tests {
         // Verify event log was written.
         let logger = EventLogger::new(&state, "sess_1");
         let events = logger.read_all();
-        assert!(events.iter().any(|e| e["type"] == "session_start"));
+        let session_start = events
+            .iter()
+            .find(|e| e["type"] == "session_start")
+            .expect("session_start event present");
+        // Unset effort: the field is present and null (honest "server default
+        // applied" — not missing, which would be indistinguishable from a
+        // pre-override session).
+        assert_eq!(
+            session_start["reasoning_effort"],
+            serde_json::Value::Null,
+            "session_start must carry reasoning_effort=null when unset: {session_start}"
+        );
         assert!(events.iter().any(|e| e["type"] == "final"));
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A dispatch carrying a per-session `reasoning_effort` tier records the
+    /// tier on the `session_start` event and threads it into
+    /// [`runner::SessionOptions`] (which the runner forwards to the engine
+    /// on every chat turn — Issue #3).
+    #[tokio::test]
+    async fn session_start_carries_reasoning_effort() {
+        let (state, dir) = tmp_state();
+        let registry = TaskRegistry::new(&state);
+
+        let task_id = registry
+            .create("effort test", dir.to_str().unwrap(), "sess_effort")
+            .await
+            .unwrap();
+
+        let spec = JobSpec {
+            task_id: task_id.clone(),
+            prompt: "effort test".to_string(),
+            cwd: dir.to_str().unwrap().to_string(),
+            session_id: "sess_effort".to_string(),
+            reasoning_effort: Some("xhigh".to_string()),
+            extensions: None,
+            skills: None,
+            test_command: None,
+            turns_budget: Some(10),
+            timeout_ms: None,
+        };
+
+        let engine = ScriptedEngine {
+            responses: tokio::sync::Mutex::new(VecDeque::from(vec![Completion {
+                content: "done at xhigh".to_string(),
+                tool_calls: Vec::new(),
+                finish_reason: Some("stop".to_string()),
+                metrics: Metrics {
+                    ttft_ms: None,
+                    total_ms: 10.0,
+                    tokens_per_sec: None,
+                    prompt_tokens: None,
+                    completion_tokens: None,
+                },
+            }])),
+        };
+
+        let loaded = crate::config::load().expect("load default config");
+        let mut config = loaded.config;
+        config.state_dir = dir.clone();
+
+        let res = run_job_with_engine(&spec, &state, &config, &engine)
+            .await
+            .unwrap();
+        assert_eq!(res, "done at xhigh");
+
+        // The session_start event carries the tier string.
+        let logger = EventLogger::new(&state, "sess_effort");
+        let events = logger.read_all();
+        let session_start = events
+            .iter()
+            .find(|e| e["type"] == "session_start")
+            .expect("session_start event present");
+        assert_eq!(
+            session_start["reasoning_effort"],
+            serde_json::json!("xhigh"),
+            "session_start must carry the tier string: {session_start}"
+        );
 
         let _ = std::fs::remove_dir_all(&dir);
     }

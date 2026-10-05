@@ -5,8 +5,6 @@
 //!
 //! All logging goes to stderr; stdout is reserved for JSON-RPC frames.
 
-#![allow(dead_code)]
-
 pub mod dgi;
 pub mod worker;
 
@@ -94,6 +92,34 @@ fn now_epoch_ms() -> u64 {
         .unwrap_or(0)
 }
 
+/// Valid reasoning-effort tiers for the default serving engine (Qwen via
+/// vLLM). The served template 400s on any other value (`off`, `high`,
+/// `minimal`, …), so the schema fails fast here instead of letting the
+/// upstream reject a dispatched session mid-run (Issue #3; matches the
+/// legacy JS `REASONING_EFFORT_TIERS` contract).
+pub const REASONING_EFFORT_TIERS: [&str; 3] = ["xhigh", "medium", "low"];
+
+/// Validate a per-dispatch `reasoning_effort` value against
+/// [`REASONING_EFFORT_TIERS`].
+///
+/// `Ok(())` when the value is absent or a known tier; `Err` with a clear,
+/// self-explanatory message naming the bad value and the valid set when it
+/// is not.
+pub fn validate_reasoning_effort(v: Option<&str>) -> Result<(), String> {
+    let Some(v) = v.map(str::trim).filter(|v| !v.is_empty()) else {
+        return Ok(());
+    };
+    if REASONING_EFFORT_TIERS.contains(&v) {
+        Ok(())
+    } else {
+        Err(format!(
+            "Invalid reasoning_effort '{v}': expected one of [{}]. The served \
+             engine template rejects other tiers with HTTP 400.",
+            REASONING_EFFORT_TIERS.join(", ")
+        ))
+    }
+}
+
 /// The MCP server handler.
 #[derive(Debug, Clone)]
 pub struct CastorMcpServer {
@@ -169,11 +195,48 @@ impl CastorMcpServer {
             return CallToolResult::error(vec![ContentBlock::text("Error: Prompt cannot be empty.")]);
         }
 
-        // DGI Gatekeeper: deterministic decomposition-granularity gate that
-        // replaces the legacy static `len > 1500` ceiling. Hard monolith
-        // signatures fail fast; the advisory score flags a decomposition note
-        // but does not block.
-        let dgi = dgi::evaluate(&params.prompt);
+        // Fail fast on a bad reasoning tier (Issue #3): the served template
+        // would 400 the whole session later, so reject at dispatch instead.
+        if let Err(e) = validate_reasoning_effort(params.reasoning_effort.as_deref()) {
+            return CallToolResult::error(vec![ContentBlock::text(format!("Error: {e}"))]);
+        }
+
+        let loaded = match crate::config::load() {
+            Ok(c) => c,
+            Err(e) => {
+                return CallToolResult::error(vec![ContentBlock::text(format!("Config error: {e}"))])
+            }
+        };
+
+        // DGI Gatekeeper: model-driven 1-forward pass logit probe via guided_choice.
+        // Replaces brittle regexes with the loaded model's own decomposition reasoning.
+        let dgi = if let (Some(base_url), Some(model)) = (&loaded.config.base_url, &loaded.config.model) {
+            let http = reqwest::Client::builder()
+                .timeout(std::time::Duration::from_millis(10000))
+                .build()
+                .unwrap_or_default();
+            match dgi::evaluate_model_probe(base_url, model, &params.prompt, &http).await {
+                Ok(v) => v,
+                Err(err) => {
+                    tracing::warn!(
+                        error = %err,
+                        "⚠️ LOUD DGI ADVISORY: 1-forward pass model probe failed ({err}). \
+                         Engine offline, unreachable, or endpoint does not support guided_choice. \
+                         Falling back to soft heuristic."
+                    );
+                    let fallback = dgi::evaluate(&params.prompt);
+                    if matches!(fallback, dgi::DgiVerdict::Admit) {
+                        dgi::DgiVerdict::Review(0) // Special loud warning sentinel
+                    } else {
+                        fallback
+                    }
+                }
+            }
+        } else {
+            tracing::warn!("⚠️ LOUD DGI ADVISORY: DGI running without configured engine/model; 1-forward pass probe inactive.");
+            dgi::DgiVerdict::Review(0)
+        };
+
         if let dgi::DgiVerdict::Reject(sigs) = &dgi {
             let body = sigs
                 .iter()
@@ -181,23 +244,19 @@ impl CastorMcpServer {
                 .collect::<Vec<_>>()
                 .join("\n");
             return CallToolResult::error(vec![ContentBlock::text(format!(
-                "DecompositionGateRejected: dispatch matches {n} calibrated monolith signature(s):\n{body}\n\
+                "DecompositionGateRejected: dispatch rejected by model decomposition gatekeeper:\n{body}\n\
                  Decompose into a single-concern slice (one subsystem, one verification gate) and re-dispatch.",
-                n = sigs.len(),
             ))]);
         }
         let dgi_note = match &dgi {
+            dgi::DgiVerdict::Review(0) => Some(
+                "- **⚠️ DGI LOUD ADVISORY**: 1-forward pass model probe was bypassed (engine offline, unreachable, or backend unsupported). Proceeding without model-verified CIVP gate."
+                    .to_string(),
+            ),
             dgi::DgiVerdict::Review(s) => Some(format!(
                 "- **DGI**: advisory score {s} — flag for decomposition; dispatch proceeding."
             )),
             _ => None,
-        };
-
-        let loaded = match crate::config::load() {
-            Ok(c) => c,
-            Err(e) => {
-                return CallToolResult::error(vec![ContentBlock::text(format!("Config error: {e}"))])
-            }
         };
         let state = crate::state::StateDir::from_config(&loaded.config);
         if let Err(e) = state.ensure() {
@@ -249,7 +308,22 @@ impl CastorMcpServer {
         }
 
         // Spawn detached worker process.
-        let bin = std::env::current_exe().unwrap_or_else(|_| std::path::PathBuf::from("castor"));
+        let mut bin = std::env::current_exe().unwrap_or_else(|_| std::path::PathBuf::from("castor"));
+        let bin_str = bin.to_string_lossy();
+        if let Some(clean) = bin_str.strip_suffix(" (deleted)") {
+            bin = std::path::PathBuf::from(clean);
+        }
+        if !bin.exists()
+            && let Ok(cwd) = std::env::current_dir()
+        {
+            let debug_bin = cwd.join("target/debug/castor");
+            let release_bin = cwd.join("target/release/castor");
+            if debug_bin.exists() {
+                bin = debug_bin;
+            } else if release_bin.exists() {
+                bin = release_bin;
+            }
+        }
         let mut cmd = tokio::process::Command::new(&bin);
         cmd.arg("__worker").arg(&spec_path);
         cmd.stdin(std::process::Stdio::null());
@@ -499,7 +573,7 @@ impl CastorMcpServer {
                 }
             }
             "stats" => {
-                let stats = crate::telemetry::derive_stats(state.root());
+                let stats = crate::telemetry::derive_stats(state.root(), &Default::default());
                 let text = serde_json::to_string_pretty(&stats).unwrap_or_else(|_| "{}".to_string());
                 CallToolResult::success(vec![ContentBlock::text(text)])
             }
@@ -637,6 +711,73 @@ mod tests {
     // (otherwise the status server's 30 s default yields a premature
     // `{status:"executing", timed_out:true}` 200 response).
     // ------------------------------------------------------------------
+
+    // ------------------------------------------------------------------
+    // Issue #3: per-dispatch reasoning_effort tier validation — fail fast
+    // on values the served template would 400 on, accept the known set
+    // (and absence).
+    // ------------------------------------------------------------------
+
+    #[test]
+    fn validate_reasoning_effort_accepts_known_tiers_and_absence() {
+        for tier in ["xhigh", "medium", "low", "  xhigh  "] {
+            assert!(
+                validate_reasoning_effort(Some(tier)).is_ok(),
+                "tier {tier:?} must be accepted (whitespace trimmed)"
+            );
+        }
+        assert!(validate_reasoning_effort(None).is_ok());
+        assert!(validate_reasoning_effort(Some("")).is_ok());
+        assert!(validate_reasoning_effort(Some("   ")).is_ok());
+    }
+
+    #[test]
+    fn validate_reasoning_effort_rejects_wrong_case() {
+        // The served template's valid set is lowercase; an uppercase tier
+        // would 400 mid-run, so fail fast at dispatch.
+        for tier in ["XHIGH", "Medium", "LOW"] {
+            let msg = validate_reasoning_effort(Some(tier)).unwrap_err();
+            assert!(msg.contains(tier), "error must name the bad value: {msg}");
+        }
+    }
+
+    #[test]
+    fn validate_reasoning_effort_rejects_invalid_tiers_with_clear_error() {
+        for tier in ["bogus", "high", "off", "none", "minimal", "max", "xhigh2"] {
+            let msg = validate_reasoning_effort(Some(tier))
+                .unwrap_err(); // must reject
+            assert!(msg.contains(tier), "error must name the bad value: {msg}");
+            assert!(
+                msg.contains("xhigh") && msg.contains("medium") && msg.contains("low"),
+                "error must name the valid set: {msg}"
+            );
+        }
+    }
+
+    #[test]
+    fn coworker_schema_lists_effort_tier_in_description() {
+        // The JSON schema is generated from the field's doc comment; the
+        // doc comment must keep advertising the valid tier set so MCP
+        // clients can self-validate before dispatch.
+        let server = CastorMcpServer::new(DEFAULT_TOOL_PREFIX);
+        let coworker = server.tools().into_iter().find(|t| t.name.as_ref() == "castor_coworker")
+            .expect("coworker tool present");
+        let schema = coworker.input_schema.as_ref();
+        let props = schema
+            .get("properties")
+            .and_then(|v| v.get("reasoning_effort"))
+            .expect("reasoning_effort must be in the input schema properties");
+        let field_desc = props
+            .get("description")
+            .and_then(|v| v.as_str())
+            .unwrap_or("");
+        assert!(
+            field_desc.contains("xhigh")
+                && field_desc.contains("medium")
+                && field_desc.contains("low"),
+            "the field description must advertise the valid tier set: {field_desc}"
+        );
+    }
 
     #[test]
     fn wait_command_embeds_explicit_long_poll_timeout() {
