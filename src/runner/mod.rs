@@ -170,12 +170,15 @@ fn msg(role: &str, content: impl Into<String>) -> Message {
 fn metrics_json(m: &Metrics) -> serde_json::Value {
     let mut o = serde_json::Map::new();
     if let Some(p) = m.prompt_tokens {
+        o.insert("prompt_tokens".into(), serde_json::json!(p));
         o.insert("promptTokens".into(), serde_json::json!(p));
     }
     if let Some(c) = m.completion_tokens {
+        o.insert("completion_tokens".into(), serde_json::json!(c));
         o.insert("completionTokens".into(), serde_json::json!(c));
     }
     if let Some(r) = m.reasoning_tokens {
+        o.insert("reasoning_tokens".into(), serde_json::json!(r));
         o.insert("reasoningTokens".into(), serde_json::json!(r));
     }
     if let Some(r) = m.tokens_per_sec {
