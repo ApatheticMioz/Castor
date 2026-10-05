@@ -225,59 +225,108 @@ pub struct StatsOptions {
     pub by_day: bool,
 }
 
-/// Derive the cumulative [`Stats`] by walking the existing ledgers:
-/// `sessions/*/events.jsonl` (turns, tokens, tool calls, durations,
-/// first/last activity) and `tasks/*.json` (task lifecycle counts).
-///
-/// Missing or corrupt lines are skipped silently — this is a derivation,
-/// not an authority.
-pub fn derive_stats(state_dir: &Path, opts: &StatsOptions) -> Stats {
-    let mut stats = Stats::default();
+#[derive(Default)]
+struct SessionRollup {
+    total_sessions: u64,
+    total_turns: u64,
+    total_prompt_tokens: u64,
+    total_completion_tokens: u64,
+    total_reasoning_tokens: u64,
+    total_tool_calls: u64,
+    total_tool_errors: u64,
+    tool_calls: BTreeMap<String, u64>,
+    tool_errors: BTreeMap<String, u64>,
+    duration_sum: u64,
+    duration_count: u64,
+    first_ms: Option<i128>,
+    last_ms: Option<i128>,
+    daily: BTreeMap<String, DayBucket>,
+}
 
-    // --- Sessions: one events.jsonl per session directory. ---
-    let sessions_dir = state_dir.join("sessions");
-    for path in read_dir_or_empty(&sessions_dir) {
+impl SessionRollup {
+    fn merge(&mut self, other: SessionRollup) {
+        self.total_sessions += other.total_sessions;
+        self.total_turns += other.total_turns;
+        self.total_prompt_tokens += other.total_prompt_tokens;
+        self.total_completion_tokens += other.total_completion_tokens;
+        self.total_reasoning_tokens += other.total_reasoning_tokens;
+        self.total_tool_calls += other.total_tool_calls;
+        self.total_tool_errors += other.total_tool_errors;
+        for (name, n) in other.tool_calls {
+            *self.tool_calls.entry(name).or_insert(0) += n;
+        }
+        for (name, n) in other.tool_errors {
+            *self.tool_errors.entry(name).or_insert(0) += n;
+        }
+        self.duration_sum += other.duration_sum;
+        self.duration_count += other.duration_count;
+        if let Some(f) = other.first_ms {
+            match self.first_ms {
+                None => self.first_ms = Some(f),
+                Some(cur) if f < cur => self.first_ms = Some(f),
+                _ => {}
+            }
+        }
+        if let Some(l) = other.last_ms {
+            match self.last_ms {
+                None => self.last_ms = Some(l),
+                Some(cur) if l > cur => self.last_ms = Some(l),
+                _ => {}
+            }
+        }
+        for (day, b) in other.daily {
+            let entry = self.daily.entry(day).or_default();
+            entry.turns += b.turns;
+            entry.prompt_tokens += b.prompt_tokens;
+            entry.completion_tokens += b.completion_tokens;
+            entry.reasoning_tokens += b.reasoning_tokens;
+            entry.tool_calls += b.tool_calls;
+            entry.tool_errors += b.tool_errors;
+            entry.sessions += b.sessions;
+            if let Some(d) = b.duration_ms {
+                entry.duration_ms = Some(entry.duration_ms.unwrap_or(0) + d);
+            }
+        }
+    }
+}
+
+fn process_session_dirs(paths: &[PathBuf], opts: &StatsOptions) -> SessionRollup {
+    let mut rollup = SessionRollup::default();
+    for path in paths {
         if !path.is_dir() {
             continue;
         }
         let events_path = path.join("events.jsonl");
         let Ok(raw) = fs::read_to_string(&events_path) else {
-            continue; // no ledger for this session yet
+            continue;
         };
         let Some(session) = parse_session_events(&raw, opts.since_ms) else {
-            continue; // empty / all-corrupt ledger
+            continue;
         };
 
-        stats.total_sessions += 1;
-        stats.total_turns += session.turns;
-        stats.total_prompt_tokens += session.prompt_tokens;
-        stats.total_completion_tokens += session.completion_tokens;
-        stats.total_reasoning_tokens += session.reasoning_tokens;
-        stats.total_tool_calls += session.tool_calls;
-        stats.total_tool_errors += session.tool_errors;
+        rollup.total_sessions += 1;
+        rollup.total_turns += session.turns;
+        rollup.total_prompt_tokens += session.prompt_tokens;
+        rollup.total_completion_tokens += session.completion_tokens;
+        rollup.total_reasoning_tokens += session.reasoning_tokens;
+        rollup.total_tool_calls += session.tool_calls;
+        rollup.total_tool_errors += session.tool_errors;
         for (name, n) in session.tool_calls_by_name {
-            *stats.tool_calls.entry(name).or_insert(0) += n;
+            *rollup.tool_calls.entry(name).or_insert(0) += n;
         }
         for (name, n) in session.tool_errors_by_name {
-            *stats.tool_errors.entry(name).or_insert(0) += n;
+            *rollup.tool_errors.entry(name).or_insert(0) += n;
         }
         if let Some(d) = session.duration_ms {
-            stats.duration_sum += d;
-            stats.duration_count += 1;
+            rollup.duration_sum += d;
+            rollup.duration_count += 1;
         }
-        // Daily bucketing: per-event aggregates go to the UTC civil day each
-        // event fell on; the session itself counts once, on the day of its
-        // first event; its duration is attributed to the day of its terminal
-        // event.
         if opts.by_day {
-            let map = stats.daily.get_or_insert_with(BTreeMap::new);
             if let Some(first_day) = session.first_ms.map(utc_day) {
-                map.entry(first_day)
-                    .or_insert_with(DayBucket::default)
-                    .sessions += 1;
+                rollup.daily.entry(first_day).or_default().sessions += 1;
             }
-            for (day, ev) in &session.events_by_day {
-                let b = map.entry(day.clone()).or_insert_with(DayBucket::default);
+            for (day, ev) in session.events_by_day {
+                let b = rollup.daily.entry(day).or_default();
                 b.turns += ev.turns;
                 b.prompt_tokens += ev.prompt_tokens;
                 b.completion_tokens += ev.completion_tokens;
@@ -286,48 +335,75 @@ pub fn derive_stats(state_dir: &Path, opts: &StatsOptions) -> Stats {
                 b.tool_errors += ev.tool_errors;
             }
             if let Some((day, d)) = session.last_ms.map(utc_day).zip(session.duration_ms) {
-                let b = map.entry(day).or_insert_with(DayBucket::default);
+                let b = rollup.daily.entry(day).or_default();
                 b.duration_ms = Some(b.duration_ms.unwrap_or(0) + d);
             }
         }
-        // The active horizon is derived from epoch milliseconds (a single
-        // canonical numeric order for every ledger), then rendered to ISO-8601
-        // UTC for display at the end of the derivation. This keeps the comparison correct even when legacy
-        // `assistant_message` ledgers carry epoch-millis strings and Rust
-        // `dispatch` ledgers carry RFC-3339 strings.
         if let Some(first_ms) = session.first_ms {
-            match stats.first_ms {
-                None => stats.first_ms = Some(first_ms),
-                Some(cur) if first_ms < cur => stats.first_ms = Some(first_ms),
+            match rollup.first_ms {
+                None => rollup.first_ms = Some(first_ms),
+                Some(cur) if first_ms < cur => rollup.first_ms = Some(first_ms),
                 _ => {}
             }
         }
         if let Some(last_ms) = session.last_ms {
-            match stats.last_ms {
-                None => stats.last_ms = Some(last_ms),
-                Some(cur) if last_ms > cur => stats.last_ms = Some(last_ms),
+            match rollup.last_ms {
+                None => rollup.last_ms = Some(last_ms),
+                Some(cur) if last_ms > cur => rollup.last_ms = Some(last_ms),
                 _ => {}
             }
         }
     }
+    rollup
+}
 
-    // --- Tasks: one JSON record per task. ---
-    let tasks_dir = state_dir.join("tasks");
-    for path in read_dir_or_empty(&tasks_dir) {
+fn load_session_rollups(
+    session_dirs: &[PathBuf],
+    opts: &StatsOptions,
+    num_threads: usize,
+) -> SessionRollup {
+    if session_dirs.is_empty() {
+        return SessionRollup::default();
+    }
+    if session_dirs.len() <= 4 || num_threads <= 1 {
+        return process_session_dirs(session_dirs, opts);
+    }
+    let chunk_size = session_dirs.len().div_ceil(num_threads);
+    std::thread::scope(|s| {
+        let mut handles = Vec::with_capacity(num_threads);
+        for chunk in session_dirs.chunks(chunk_size.max(1)) {
+            handles.push(s.spawn(move || process_session_dirs(chunk, opts)));
+        }
+        let mut total = SessionRollup::default();
+        for h in handles {
+            if let Ok(part) = h.join() {
+                total.merge(part);
+            }
+        }
+        total
+    })
+}
+
+#[derive(Default)]
+struct TaskMetrics {
+    completed: u64,
+    failed: u64,
+    cancelled: u64,
+}
+
+fn process_task_files(paths: &[PathBuf], since_ms: Option<i128>) -> TaskMetrics {
+    let mut metrics = TaskMetrics::default();
+    for path in paths {
         if path.extension().and_then(|e| e.to_str()) != Some("json") {
             continue;
         }
-        let Ok(raw) = fs::read_to_string(&path) else {
+        let Ok(raw) = fs::read_to_string(path) else {
             continue;
         };
         let Ok(v) = serde_json::from_str::<Value>(&raw) else {
-            continue; // corrupt record: skip
+            continue;
         };
-        // `--since` filter: use the terminal timestamp (`ended_at`) to decide
-        // whether the task completed within the window. Fall back to
-        // `started_at` / `created_at` when `ended_at` is absent (a task that
-        // was created but never finished has no terminal stamp).
-        if let Some(cutoff) = opts.since_ms {
+        if let Some(cutoff) = since_ms {
             let ts = v
                 .get("ended_at")
                 .or_else(|| v.get("started_at"))
@@ -335,19 +411,102 @@ pub fn derive_stats(state_dir: &Path, opts: &StatsOptions) -> Stats {
                 .and_then(|x| x.as_u64());
             match ts {
                 Some(t) if (t as i128) < cutoff => continue,
-                None => continue, // cannot prove membership; exclude
+                None => continue,
                 _ => {}
             }
         }
         match v.get("status").and_then(|s| s.as_str()) {
-            Some("completed") => stats.total_tasks_completed += 1,
-            Some("failed") => stats.total_tasks_failed += 1,
-            Some("cancelled") => stats.total_tasks_cancelled += 1,
+            Some("completed") => metrics.completed += 1,
+            Some("failed") => metrics.failed += 1,
+            Some("cancelled") => metrics.cancelled += 1,
             _ => {}
         }
     }
+    metrics
+}
 
-    // --- Derived averages / cost. ---
+fn load_task_metrics(
+    task_files: &[PathBuf],
+    since_ms: Option<i128>,
+    num_threads: usize,
+) -> TaskMetrics {
+    if task_files.is_empty() {
+        return TaskMetrics::default();
+    }
+    if task_files.len() <= 4 || num_threads <= 1 {
+        return process_task_files(task_files, since_ms);
+    }
+    let chunk_size = task_files.len().div_ceil(num_threads);
+    std::thread::scope(|s| {
+        let mut handles = Vec::with_capacity(num_threads);
+        for chunk in task_files.chunks(chunk_size.max(1)) {
+            handles.push(s.spawn(move || process_task_files(chunk, since_ms)));
+        }
+        let mut total = TaskMetrics::default();
+        for h in handles {
+            if let Ok(part) = h.join() {
+                total.completed += part.completed;
+                total.failed += part.failed;
+                total.cancelled += part.cancelled;
+            }
+        }
+        total
+    })
+}
+
+/// Derive the cumulative [`Stats`] by walking the existing ledgers:
+/// `sessions/*/events.jsonl` (turns, tokens, tool calls, durations,
+/// first/last activity) and `tasks/*.json` (task lifecycle counts).
+///
+/// Missing or corrupt lines are skipped silently — this is a derivation,
+/// not an authority.
+pub fn derive_stats(state_dir: &Path, opts: &StatsOptions) -> Stats {
+    let num_threads = std::thread::available_parallelism()
+        .map(|n| n.get())
+        .unwrap_or(4)
+        .max(1);
+
+    let sessions_dir = state_dir.join("sessions");
+    let session_dirs: Vec<PathBuf> = read_dir_or_empty(&sessions_dir)
+        .into_iter()
+        .filter(|p| p.is_dir())
+        .collect();
+
+    let tasks_dir = state_dir.join("tasks");
+    let task_files: Vec<PathBuf> = read_dir_or_empty(&tasks_dir)
+        .into_iter()
+        .filter(|p| p.extension().and_then(|e| e.to_str()) == Some("json"))
+        .collect();
+
+    let session_rollup = load_session_rollups(&session_dirs, opts, num_threads);
+    let task_metrics = load_task_metrics(&task_files, opts.since_ms, num_threads);
+
+    let mut stats = Stats {
+        total_turns: session_rollup.total_turns,
+        total_sessions: session_rollup.total_sessions,
+        total_tasks_completed: task_metrics.completed,
+        total_tasks_failed: task_metrics.failed,
+        total_tasks_cancelled: task_metrics.cancelled,
+        total_prompt_tokens: session_rollup.total_prompt_tokens,
+        total_completion_tokens: session_rollup.total_completion_tokens,
+        total_reasoning_tokens: session_rollup.total_reasoning_tokens,
+        total_tool_calls: session_rollup.total_tool_calls,
+        total_tool_errors: session_rollup.total_tool_errors,
+        tool_calls: session_rollup.tool_calls,
+        tool_errors: session_rollup.tool_errors,
+        first_ms: session_rollup.first_ms,
+        last_ms: session_rollup.last_ms,
+        duration_sum: session_rollup.duration_sum,
+        duration_count: session_rollup.duration_count,
+        daily: if opts.by_day {
+            Some(session_rollup.daily)
+        } else {
+            None
+        },
+        ..Stats::default()
+    };
+
+    // Derived averages / cost.
     stats.avg_duration_ms = (stats.duration_count > 0)
         .then(|| (stats.duration_sum as f64 / stats.duration_count as f64) * 100.0 / 100.0);
     stats.estimated_cost_saved_usd = (stats.total_prompt_tokens as f64 / 1_000_000.0)
@@ -376,87 +535,314 @@ pub fn write_stats_json(state_dir: &Path, stats: &Stats) -> std::io::Result<Path
     Ok(out)
 }
 
+struct Palette {
+    bold: &'static str,
+    dim: &'static str,
+    cyan: &'static str,
+    green: &'static str,
+    bright_green: &'static str,
+    yellow: &'static str,
+    red: &'static str,
+    reset: &'static str,
+}
+
+impl Palette {
+    fn new(color: bool) -> Self {
+        if color {
+            Self {
+                bold: "\x1b[1m",
+                dim: "\x1b[2m",
+                cyan: "\x1b[36m",
+                green: "\x1b[32m",
+                bright_green: "\x1b[92m",
+                yellow: "\x1b[33m",
+                red: "\x1b[31m",
+                reset: "\x1b[0m",
+            }
+        } else {
+            Self {
+                bold: "",
+                dim: "",
+                cyan: "",
+                green: "",
+                bright_green: "",
+                yellow: "",
+                red: "",
+                reset: "",
+            }
+        }
+    }
+}
+
+fn fmt_grouped(n: u64) -> String {
+    let s = n.to_string();
+    let mut out = String::with_capacity(s.len() + s.len() / 3);
+    let chars: Vec<char> = s.chars().collect();
+    let len = chars.len();
+    for (i, c) in chars.into_iter().enumerate() {
+        if i > 0 && (len - i).is_multiple_of(3) {
+            out.push(',');
+        }
+        out.push(c);
+    }
+    out
+}
+
+fn fmt_scaled(n: u64) -> String {
+    if n >= 1_000_000_000 {
+        format!("{:.2}B", n as f64 / 1_000_000_000.0)
+    } else if n >= 1_000_000 {
+        format!("{:.2}M", n as f64 / 1_000_000.0)
+    } else if n >= 10_000 {
+        format!("{:.1}k", n as f64 / 1_000.0)
+    } else {
+        fmt_grouped(n)
+    }
+}
+
+fn fmt_tokens_line(n: u64, p: &Palette) -> String {
+    if n >= 1_000_000 {
+        format!(
+            "{}{}{}{} ({})",
+            p.bold,
+            p.cyan,
+            fmt_scaled(n),
+            p.reset,
+            fmt_grouped(n)
+        )
+    } else {
+        fmt_grouped(n)
+    }
+}
+
+fn fmt_usd_grouped(amount: f64) -> String {
+    let is_neg = amount < 0.0;
+    let abs = amount.abs();
+    let whole = abs.trunc() as u64;
+    let cents = (abs.fract() * 100.0).round() as u64;
+    let prefix = if is_neg { "-$" } else { "$" };
+    format!("{}{}.{:02}", prefix, fmt_grouped(whole), cents)
+}
+
+fn fmt_duration_compact(ms: u64) -> String {
+    let total_secs = ms / 1000;
+    if total_secs >= 3600 {
+        let h = total_secs / 3600;
+        let m = (total_secs % 3600) / 60;
+        let s = total_secs % 60;
+        format!("{h}h {m:02}m {s:02}s")
+    } else if total_secs >= 60 {
+        let m = total_secs / 60;
+        let s = total_secs % 60;
+        format!("{m}m {s:02}s")
+    } else {
+        format!("{:.2}s", ms as f64 / 1000.0)
+    }
+}
+
+fn bar_chart(count: u64, max: u64, width: usize) -> String {
+    if max == 0 || count == 0 {
+        return " ".repeat(width);
+    }
+    let ratio = count as f64 / max as f64;
+    let full = (ratio * width as f64).floor() as usize;
+    if full >= width {
+        return "█".repeat(width);
+    }
+    let remainder = (ratio * width as f64) - full as f64;
+    let frac = if remainder >= 0.75 {
+        "▊"
+    } else if remainder >= 0.5 {
+        "▌"
+    } else if remainder >= 0.25 {
+        "▎"
+    } else if full == 0 {
+        "▏"
+    } else {
+        ""
+    };
+    let bar_len = full + if frac.is_empty() { 0 } else { 1 };
+    let empty = width.saturating_sub(bar_len);
+    format!("{}{}{}", "█".repeat(full), frac, " ".repeat(empty))
+}
+
 /// Format a high-level visual card of operational telemetry and financial savings.
 pub fn format_stats_card(stats: &Stats) -> String {
-    let mut out = String::new();
-    out.push_str("┌────────────────────────────────────────────────────────────────────────┐\n");
-    out.push_str("│                      CASTOR OPERATIONAL TELEMETRY                      │\n");
-    out.push_str("│                Universal Cloud-to-Local Agent Microkernel              │\n");
-    out.push_str("└────────────────────────────────────────────────────────────────────────┘\n\n");
+    format_stats_card_styled(stats, false)
+}
 
-    out.push_str("📊 ACTIVITY & RUNTIME\n");
+/// Format a high-level visual card with optional ANSI color and modern terminal aesthetics.
+pub fn format_stats_card_styled(stats: &Stats, color: bool) -> String {
+    let p = Palette::new(color);
+    let mut out = String::new();
+
     out.push_str(&format!(
-        "  • Turns:                   {}\n",
-        stats.total_turns
+        "{}╭────────────────────────────────────────────────────────────────────────╮{}\n",
+        p.cyan, p.reset
     ));
     out.push_str(&format!(
-        "  • Sessions:                {}\n",
-        stats.total_sessions
+        "{}│{}                      {}CASTOR OPERATIONAL TELEMETRY{}                      {}│{}\n",
+        p.cyan, p.reset, p.bold, p.reset, p.cyan, p.reset
     ));
     out.push_str(&format!(
-        "  • Tasks Completed:         {}\n",
-        stats.total_tasks_completed
+        "{}│{}                {}Universal Cloud-to-Local Agent Microkernel{}              {}│{}\n",
+        p.cyan, p.reset, p.dim, p.reset, p.cyan, p.reset
     ));
     out.push_str(&format!(
-        "  • Tasks Failed:            {}\n",
-        stats.total_tasks_failed
+        "{}╰────────────────────────────────────────────────────────────────────────╯{}\n\n",
+        p.cyan, p.reset
+    ));
+
+    out.push_str(&format!("{}📊 ACTIVITY & RUNTIME{}\n", p.bold, p.reset));
+    out.push_str(&format!(
+        "  • Turns:                   {}{}{}\n",
+        p.bold,
+        fmt_grouped(stats.total_turns),
+        p.reset
     ));
     out.push_str(&format!(
-        "  • Tasks Cancelled:         {}\n",
-        stats.total_tasks_cancelled
+        "  • Sessions:                {}{}{}\n",
+        p.bold,
+        fmt_grouped(stats.total_sessions),
+        p.reset
     ));
+
+    let total_tasks =
+        stats.total_tasks_completed + stats.total_tasks_failed + stats.total_tasks_cancelled;
+    let task_line = if total_tasks > 0 {
+        let ok_rate = (stats.total_tasks_completed as f64 / total_tasks as f64) * 100.0;
+        let fail_part = if stats.total_tasks_failed > 0 {
+            format!(
+                "{}{} failed{}",
+                p.red,
+                fmt_grouped(stats.total_tasks_failed),
+                p.reset
+            )
+        } else {
+            "0 failed".to_string()
+        };
+        let canc_part = if stats.total_tasks_cancelled > 0 {
+            format!(
+                "{}{} cancelled{}",
+                p.yellow,
+                fmt_grouped(stats.total_tasks_cancelled),
+                p.reset
+            )
+        } else {
+            "0 cancelled".to_string()
+        };
+        format!(
+            "{}{} completed{} ({:.1}% ok) · {} · {}",
+            p.green,
+            fmt_grouped(stats.total_tasks_completed),
+            p.reset,
+            ok_rate,
+            fail_part,
+            canc_part
+        )
+    } else {
+        "0 completed · 0 failed · 0 cancelled".to_string()
+    };
+    out.push_str(&format!("  • Tasks:                   {}\n", task_line));
+
+    let tool_call_line = if stats.total_tool_calls > 0 {
+        let ok_calls = stats
+            .total_tool_calls
+            .saturating_sub(stats.total_tool_errors);
+        let ok_rate = (ok_calls as f64 / stats.total_tool_calls as f64) * 100.0;
+        let err_part = if stats.total_tool_errors > 0 {
+            format!(
+                " · {}{} errors{}",
+                p.red,
+                fmt_grouped(stats.total_tool_errors),
+                p.reset
+            )
+        } else {
+            " · 0 errors".to_string()
+        };
+        format!(
+            "{}{} calls{} ({:.1}% ok{})",
+            p.bold,
+            fmt_grouped(stats.total_tool_calls),
+            p.reset,
+            ok_rate,
+            err_part
+        )
+    } else {
+        "0 calls (0 errors)".to_string()
+    };
     out.push_str(&format!(
-        "  • Total Tool Calls:        {} ({} errors)\n",
-        stats.total_tool_calls, stats.total_tool_errors
+        "  • Total Tool Calls:        {}\n",
+        tool_call_line
     ));
+
     if let Some(avg_ms) = stats.avg_duration_ms {
+        let compact = fmt_duration_compact(avg_ms.round() as u64);
         out.push_str(&format!(
-            "  • Avg Session Duration:    {:.2}s\n",
+            "  • Avg Session Duration:    {} ({:.2}s)\n",
+            compact,
             avg_ms / 1000.0
         ));
     }
     out.push('\n');
 
-    out.push_str("🧠 TOKEN EFFICIENCY\n");
+    out.push_str(&format!("{}🧠 TOKEN EFFICIENCY{}\n", p.bold, p.reset));
     out.push_str(&format!(
         "  • Ingested Prompt Tokens:  {}\n",
-        stats.total_prompt_tokens
+        fmt_tokens_line(stats.total_prompt_tokens, &p)
     ));
     out.push_str(&format!(
         "  • Generated Output Tokens: {}\n",
-        stats.total_completion_tokens
+        fmt_tokens_line(stats.total_completion_tokens, &p)
     ));
     out.push_str(&format!(
         "  • Reasoning Tokens:        {}\n",
-        stats.total_reasoning_tokens
+        fmt_tokens_line(stats.total_reasoning_tokens, &p)
     ));
     out.push('\n');
 
     out.push_str(&format!(
-        "💰 CLOUD ARBITRAGE ({} Rates)\n",
-        stats.benchmark_model
+        "{}💰 CLOUD ARBITRAGE ({} Rates){}\n",
+        p.bold, stats.benchmark_model, p.reset
     ));
     out.push_str(&format!(
-        "  • Virtual Cloud Cost:      ${:.2}\n",
-        stats.estimated_cost_saved_usd
+        "  • Virtual Cloud Cost:      {}\n",
+        fmt_usd_grouped(stats.estimated_cost_saved_usd)
     ));
-    out.push_str("  • Actual Local Cost:       $0.00\n");
     out.push_str(&format!(
-        "  • NET SAVINGS:             +${:.2}\n",
-        stats.estimated_cost_saved_usd
+        "  • Actual Local Cost:       {}$0.00{}\n",
+        p.green, p.reset
+    ));
+    out.push_str(&format!(
+        "  • NET SAVINGS:             {}{}+{} (100% saved){}\n",
+        p.bold,
+        p.bright_green,
+        fmt_usd_grouped(stats.estimated_cost_saved_usd),
+        p.reset
     ));
     out.push('\n');
 
     if let Some(daily) = &stats.daily {
-        out.push_str("📅 DAILY BREAKDOWN (UTC)\n");
+        out.push_str(&format!("{}📅 DAILY BREAKDOWN (UTC){}\n", p.bold, p.reset));
         if daily.is_empty() {
-            out.push_str("  (no activity in the selected window)\n");
+            out.push_str(&format!(
+                "  {}(no activity in the selected window){}\n",
+                p.dim, p.reset
+            ));
         } else {
-            out.push_str("  DATE           TURNS   P-TOK  C-TOK  R-TOK  TOOLS\n");
+            out.push_str(&format!(
+                "  {}{:<12} {:>8} {:>10} {:>10} {:>10} {:>8}{}\n",
+                p.dim, "DATE", "TURNS", "PROMPT", "COMPLETION", "REASONING", "TOOLS", p.reset
+            ));
             for (day, b) in daily {
                 out.push_str(&format!(
-                    "  {day}  {:>5}  {:>7}  {:>7}  {:>6}  {:>5}\n",
-                    b.turns, b.prompt_tokens, b.completion_tokens, b.reasoning_tokens, b.tool_calls
+                    "  {:<12} {:>8} {:>10} {:>10} {:>10} {:>8}\n",
+                    day,
+                    fmt_grouped(b.turns),
+                    fmt_scaled(b.prompt_tokens),
+                    fmt_scaled(b.completion_tokens),
+                    fmt_scaled(b.reasoning_tokens),
+                    fmt_grouped(b.tool_calls)
                 ));
             }
         }
@@ -464,12 +850,41 @@ pub fn format_stats_card(stats: &Stats) -> String {
     }
 
     if !stats.tool_calls.is_empty() {
-        out.push_str("🔧 TOOL USAGE BREAKDOWN\n");
-        for (name, count) in &stats.tool_calls {
+        out.push_str(&format!("{}🔧 TOOL USAGE BREAKDOWN{}\n", p.bold, p.reset));
+        let mut sorted_tools: Vec<(&String, &u64)> = stats.tool_calls.iter().collect();
+        sorted_tools.sort_by(|a, b| b.1.cmp(a.1).then_with(|| a.0.cmp(b.0)));
+        let max_calls = sorted_tools.first().map(|(_, c)| **c).unwrap_or(1);
+        let max_name_len = sorted_tools
+            .iter()
+            .map(|(n, _)| n.len())
+            .max()
+            .unwrap_or(15)
+            .clamp(15, 38);
+
+        for (name, &count) in sorted_tools {
+            let bar = bar_chart(count, max_calls, 14);
+            let pct = (count as f64 / stats.total_tool_calls.max(1) as f64) * 100.0;
             let errs = stats.tool_errors.get(name).copied().unwrap_or(0);
+            let ok_part = if count > 0 {
+                let ok_rate = (count.saturating_sub(errs) as f64 / count as f64) * 100.0;
+                if errs > 0 {
+                    format!(" [{:.1}% ok · {}{} err{}]", ok_rate, p.red, errs, p.reset)
+                } else {
+                    format!(" [{}{:.0}% ok{}]", p.dim, ok_rate, p.reset)
+                }
+            } else {
+                String::new()
+            };
             out.push_str(&format!(
-                "  • {:<20} {:>5} calls ({} errors)\n",
-                name, count, errs
+                "  • {:<width$} {}{}{} {:>7} ({:>4.1}%){}\n",
+                name,
+                p.cyan,
+                bar,
+                p.reset,
+                fmt_grouped(count),
+                pct,
+                ok_part,
+                width = max_name_len
             ));
         }
         out.push('\n');
@@ -1224,5 +1639,70 @@ mod tests {
         assert_eq!(s_win.total_sessions, 0, "no in-window events → no session");
 
         let _ = fs::remove_dir_all(&state);
+    }
+
+    #[test]
+    fn formatters_produce_clean_output() {
+        assert_eq!(fmt_grouped(0), "0");
+        assert_eq!(fmt_grouped(42), "42");
+        assert_eq!(fmt_grouped(1000), "1,000");
+        assert_eq!(fmt_grouped(1526923211), "1,526,923,211");
+
+        assert_eq!(fmt_scaled(500), "500");
+        assert_eq!(fmt_scaled(15_400), "15.4k");
+        assert_eq!(fmt_scaled(31_650_000), "31.65M");
+        assert_eq!(fmt_scaled(1_526_923_211), "1.53B");
+
+        assert_eq!(fmt_usd_grouped(0.0), "$0.00");
+        assert_eq!(fmt_usd_grouped(3370.38), "$3,370.38");
+
+        assert_eq!(fmt_duration_compact(450), "0.45s");
+        assert_eq!(fmt_duration_compact(45_000), "45.00s");
+        assert_eq!(fmt_duration_compact(244_950), "4m 04s");
+        assert_eq!(fmt_duration_compact(3_725_000), "1h 02m 05s");
+
+        assert_eq!(bar_chart(0, 100, 10), "          ");
+        assert_eq!(bar_chart(50, 100, 10), "█████     ");
+        assert_eq!(bar_chart(100, 100, 10), "██████████");
+    }
+
+    #[test]
+    fn styled_card_handles_color_and_plain() {
+        let mut stats = Stats {
+            total_turns: 1200,
+            total_sessions: 10,
+            total_tasks_completed: 8,
+            total_tasks_failed: 1,
+            total_tasks_cancelled: 1,
+            total_prompt_tokens: 1_500_000,
+            total_completion_tokens: 250_000,
+            total_reasoning_tokens: 50_000,
+            total_tool_calls: 500,
+            total_tool_errors: 5,
+            estimated_cost_saved_usd: 42.50,
+            ..Default::default()
+        };
+        stats.tool_calls.insert("bash".to_string(), 400);
+        stats.tool_calls.insert("read_file".to_string(), 100);
+        stats.tool_errors.insert("bash".to_string(), 5);
+
+        let plain = format_stats_card_styled(&stats, false);
+        assert!(
+            !plain.contains("\x1b["),
+            "plain card must not contain ANSI escape codes"
+        );
+        assert!(plain.contains("CASTOR OPERATIONAL TELEMETRY"));
+        assert!(plain.contains("1.50M (1,500,000)"));
+        assert!(plain.contains("bash"));
+        assert!(plain.contains("read_file"));
+        assert!(plain.contains("+$42.50"));
+
+        let colored = format_stats_card_styled(&stats, true);
+        assert!(
+            colored.contains("\x1b["),
+            "colored card must contain ANSI escape codes"
+        );
+        assert!(colored.contains("CASTOR OPERATIONAL TELEMETRY"));
+        assert!(colored.contains("+$42.50"));
     }
 }

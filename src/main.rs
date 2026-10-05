@@ -94,15 +94,18 @@ enum Command {
     /// View telemetry and operational statistics
     Stats {
         /// Print machine-readable JSON
-        #[arg(long)]
+        #[arg(short, long)]
         json: bool,
         /// Restrict stats to events within a duration of now
         /// (e.g. `24h`, `7d`, `120m`)
-        #[arg(long, value_name = "DURATION")]
+        #[arg(short, long, value_name = "DURATION")]
         since: Option<String>,
         /// Break down the stats by UTC day (`YYYY-MM-DD`)
-        #[arg(long)]
+        #[arg(short = 'd', long)]
         by_day: bool,
+        /// Disable colored output
+        #[arg(long)]
+        no_color: bool,
     },
     /// Evo engine
     Evo {
@@ -589,6 +592,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             json,
             since,
             by_day,
+            no_color,
         } => {
             let loaded = config::load().map_err(|e| format!("config: {e}"))?;
             let state = state::StateDir::from_config(&loaded.config);
@@ -613,7 +617,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                     serde_json::to_string_pretty(&stats).map_err(|e| e.to_string())?
                 );
             } else {
-                print!("{}", telemetry::format_stats_card(&stats));
+                use std::io::IsTerminal;
+                let use_color = !no_color
+                    && std::io::stdout().is_terminal()
+                    && std::env::var("NO_COLOR").is_err();
+                print!("{}", telemetry::format_stats_card_styled(&stats, use_color));
             }
         }
         Command::Evo { action } => {

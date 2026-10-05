@@ -118,6 +118,7 @@ Complementing `castor --help`:
 | Command | Action | Key Options |
 |---|---|---|
 | `castor mcp` | Launch standard Model Context Protocol stdio server | *(default subcommand)* |
+| `castor stats` | Live operational telemetry dashboard & cloud arbitrage savings | `-s <duration>`, `-d`, `-j`, `--no-color` |
 | `castor install` | Auto-register server in Claude (`.claude.json`) and Antigravity (`mcp_config.json`) | `--client <all\|claude\|antigravity>` |
 | `castor config` | Inspect resolved configuration hierarchy (`CASTOR_*` env > `config.json` > defaults) | *(prints effective values & sources)* |
 | `castor server` | Manage serving engine lifecycle (boot, canary health, shutdown) | `<status\|start\|stop>` |
@@ -127,6 +128,63 @@ Complementing `castor --help`:
 | `castor evo` | Run offline batch evaluations and view lineage DAG | `<run\|status>` |
 
 ---
+
+## Operational Telemetry & Arbitrage Dashboard (`castor stats`)
+
+Castor records granular telemetry locally in `~/.castor/sessions/*/events.jsonl` and `~/.castor/tasks/*.json`. The `castor stats` command parallelizes ledger ingestion across CPU cores via `std::thread::scope` (<250ms latency) and formats a modern, high-density terminal dashboard tracking token efficiency, task success rates, and actual financial savings:
+
+```text
+╭────────────────────────────────────────────────────────────────────────╮
+│                      CASTOR OPERATIONAL TELEMETRY                      │
+│                Universal Cloud-to-Local Agent Microkernel              │
+╰────────────────────────────────────────────────────────────────────────╯
+
+📊 ACTIVITY & RUNTIME
+  • Turns:                   23,544
+  • Sessions:                457
+  • Tasks:                   336 completed (87.3% ok) · 39 failed · 10 cancelled
+  • Total Tool Calls:        32,117 calls (96.5% ok · 1,131 errors)
+  • Avg Session Duration:    4m 04s (244.95s)
+
+🧠 TOKEN EFFICIENCY
+  • Ingested Prompt Tokens:  1.53B (1,526,923,211)
+  • Generated Output Tokens: 31.65M (31,653,674)
+  • Reasoning Tokens:        32.01M (32,013,499)
+
+💰 CLOUD ARBITRAGE (Claude Sonnet 5 Rates)
+  • Virtual Cloud Cost:      $3,370.38
+  • Actual Local Cost:       $0.00
+  • NET SAVINGS:             +$3,370.38 (100% saved)
+
+🔧 TOOL USAGE BREAKDOWN
+  • bash                                ██████████████  14,003 (43.6%) [99.9% ok · 19 err]
+  • read_file                           ███████▊         7,943 (24.7%) [92.0% ok · 633 err]
+  • edit_file                           ███▊             3,985 (12.4%) [95.4% ok · 182 err]
+  • search_code                         ██               2,082 ( 6.5%) [98.7% ok · 27 err]
+  • write_file                          █▌               1,501 ( 4.7%) [96.7% ok · 49 err]
+  • list_dir                            █                1,047 ( 3.3%) [98.3% ok · 18 err]
+  • web_fetch                           ▌                  545 ( 1.7%) [87.2% ok · 70 err]
+  • web_search                          ▎                  497 ( 1.5%) [77.5% ok · 112 err]
+```
+
+### Quick Usage Examples
+```bash
+# View all-time operational dashboard with full terminal colors
+castor stats
+
+# Restrict to recent window (e.g. last 24 hours, 7 days, 120 minutes)
+castor stats -s 24h
+castor stats -s 7d
+
+# Include daily tabular breakdown of turns, tokens, and tool usage
+castor stats -d
+
+# Machine-readable JSON output for CI/CD or custom monitoring scripts
+castor stats -j
+
+# Disable ANSI coloring for plain-text logging or pipe redirection
+castor stats --no-color
+```
 
 ## Backend & Model Configuration
 
