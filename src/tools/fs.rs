@@ -123,12 +123,7 @@ impl FsExecutor {
         ))
     }
 
-    fn write_file(
-        &self,
-        path: &str,
-        content: &str,
-        overwrite: bool,
-    ) -> Result<String, FsError> {
+    fn write_file(&self, path: &str, content: &str, overwrite: bool) -> Result<String, FsError> {
         let resolved = self.resolve_write(path)?;
         if resolved == self.root() {
             return Err(FsError::InvalidArgs(format!(
@@ -168,7 +163,9 @@ impl FsExecutor {
         }
         let resolved = self.resolve_write(path)?;
         if !resolved.exists() {
-            return Err(FsError::InvalidArgs(format!("File not found for edit: {path}")));
+            return Err(FsError::InvalidArgs(format!(
+                "File not found for edit: {path}"
+            )));
         }
         let original = fs::read_to_string(&resolved)?;
 
@@ -222,7 +219,9 @@ impl FsExecutor {
         }
         let meta = fs::metadata(&resolved)?;
         if !meta.is_dir() {
-            return Err(FsError::InvalidArgs(format!("Path is not a directory: {path}")));
+            return Err(FsError::InvalidArgs(format!(
+                "Path is not a directory: {path}"
+            )));
         }
 
         let mut items: Vec<(String, String)> = Vec::new();
@@ -278,15 +277,13 @@ impl FsExecutor {
         Ok(())
     }
 
-    fn search_code(
-        &self,
-        query: &str,
-        path: &str,
-        max_results: usize,
-    ) -> Result<String, FsError> {
+    fn search_code(&self, query: &str, path: &str, max_results: usize) -> Result<String, FsError> {
         let resolved = self.resolve_read(path)?;
         let search_dir = if resolved.is_file() {
-            resolved.parent().unwrap_or_else(|| self.root()).to_path_buf()
+            resolved
+                .parent()
+                .unwrap_or_else(|| self.root())
+                .to_path_buf()
         } else {
             resolved
         };
@@ -466,8 +463,17 @@ impl FsExecutor {
 }
 
 const IGNORED_DIRS: &[&str] = &[
-    ".venv", "venv", "node_modules", ".git", "__pycache__",
-    "target", "dist", "build", "vendor", ".idea", ".vscode",
+    ".venv",
+    "venv",
+    "node_modules",
+    ".git",
+    "__pycache__",
+    "target",
+    "dist",
+    "build",
+    "vendor",
+    ".idea",
+    ".vscode",
 ];
 
 fn is_env_file(name: &str) -> bool {
@@ -482,12 +488,36 @@ fn is_binary_extension(name: &str) -> bool {
     let ext = &name[dot + 1..];
     matches!(
         ext.to_lowercase().as_str(),
-        "pdf" | "png" | "jpg" | "jpeg" | "webp" | "gif" | "ico"
-            | "zip" | "gz" | "tar" | "7z" | "bz2" | "xz" | "wasm"
-            | "exe" | "dll" | "so" | "dylib" | "bin"
-            | "mp3" | "mp4" | "avi" | "mov" | "wav"
-            | "woff" | "woff2" | "ttf" | "otf"
-            | "sqlite" | "db"
+        "pdf"
+            | "png"
+            | "jpg"
+            | "jpeg"
+            | "webp"
+            | "gif"
+            | "ico"
+            | "zip"
+            | "gz"
+            | "tar"
+            | "7z"
+            | "bz2"
+            | "xz"
+            | "wasm"
+            | "exe"
+            | "dll"
+            | "so"
+            | "dylib"
+            | "bin"
+            | "mp3"
+            | "mp4"
+            | "avi"
+            | "mov"
+            | "wav"
+            | "woff"
+            | "woff2"
+            | "ttf"
+            | "otf"
+            | "sqlite"
+            | "db"
     )
 }
 
@@ -524,10 +554,8 @@ impl ToolExecutor for FsExecutor {
         let result = match name {
             "read_file" => {
                 let path = args.get("path").and_then(|v| v.as_str()).unwrap_or("");
-                let start_line = args
-                    .get("start_line")
-                    .and_then(|v| v.as_u64())
-                    .unwrap_or(1) as usize;
+                let start_line =
+                    args.get("start_line").and_then(|v| v.as_u64()).unwrap_or(1) as usize;
                 let end_line = args
                     .get("end_line")
                     .and_then(|v| v.as_u64())
@@ -561,10 +589,8 @@ impl ToolExecutor for FsExecutor {
             }
             "list_dir" => {
                 let path = args.get("path").and_then(|v| v.as_str()).unwrap_or(".");
-                let max_depth = args
-                    .get("max_depth")
-                    .and_then(|v| v.as_u64())
-                    .unwrap_or(2) as usize;
+                let max_depth =
+                    args.get("max_depth").and_then(|v| v.as_u64()).unwrap_or(2) as usize;
                 self.list_dir(path, max_depth)
             }
             "search_code" => {
@@ -597,11 +623,7 @@ mod tests {
     use super::*;
 
     fn test_root(name: &str) -> PathBuf {
-        let root = std::env::temp_dir().join(format!(
-            "castor_fs_{}_{}",
-            std::process::id(),
-            name
-        ));
+        let root = std::env::temp_dir().join(format!("castor_fs_{}_{}", std::process::id(), name));
         let _ = fs::remove_dir_all(&root);
         fs::create_dir_all(&root).unwrap();
         root
@@ -644,8 +666,7 @@ mod tests {
         fs::write(&file, "hello world\n").unwrap();
         let ex = executor(&root);
 
-        ex.edit_file("a.txt", "world", "there", false)
-            .unwrap();
+        ex.edit_file("a.txt", "world", "there", false).unwrap();
         assert_eq!(fs::read_to_string(&file).unwrap(), "hello there\n");
     }
 
@@ -656,12 +677,8 @@ mod tests {
         fs::write(&file, "line1\r\nline2\r\nline3\r\n").unwrap();
         let ex = executor(&root);
 
-        ex.edit_file("a.txt", "line2", "LINE2", false)
-            .unwrap();
-        assert_eq!(
-            fs::read(&file).unwrap(),
-            b"line1\r\nLINE2\r\nline3\r\n"
-        );
+        ex.edit_file("a.txt", "line2", "LINE2", false).unwrap();
+        assert_eq!(fs::read(&file).unwrap(), b"line1\r\nLINE2\r\nline3\r\n");
     }
 
     #[test]
@@ -671,8 +688,7 @@ mod tests {
         fs::write(&file, "line1\nline2\nline3\n").unwrap();
         let ex = executor(&root);
 
-        ex.edit_file("a.txt", "line2", "LINE2", false)
-            .unwrap();
+        ex.edit_file("a.txt", "line2", "LINE2", false).unwrap();
         assert_eq!(fs::read(&file).unwrap(), b"line1\nLINE2\nline3\n");
     }
 
@@ -714,9 +730,6 @@ mod tests {
         let ex = executor(&root);
 
         let err = ex.read_file("/etc/passwd", 1, None).unwrap_err();
-        assert!(matches!(
-            err,
-            FsError::Sandbox(SandboxError::PathEscape(_))
-        ));
+        assert!(matches!(err, FsError::Sandbox(SandboxError::PathEscape(_))));
     }
 }

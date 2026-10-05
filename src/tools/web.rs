@@ -28,12 +28,11 @@ const DEFAULT_DDG: &str = "https://html.duckduckgo.com/html/";
 /// Short timeout applied to every outbound request.
 const TIMEOUT: std::time::Duration = std::time::Duration::from_secs(15);
 
-/// Output cap for [`fetch_docs`] (~20KB).
+/// Output cap for [`WebClient::fetch_docs`] (~20KB).
 const MAX_OUTPUT_BYTES: usize = 20_000;
 
 /// User-Agent sent on every request.
-const USER_AGENT: &str =
-    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36 Castor/0.1.0";
+const USER_AGENT: &str = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36 Castor/0.1.0";
 
 /// Typed, actionable web errors.
 #[derive(Debug, Error)]
@@ -59,7 +58,9 @@ pub enum WebError {
         status: u16,
         reason: String,
     },
-    #[error("BinaryContentError: '{url}' returned binary content ({content_type}, {byte_length} bytes); not rendered as text")]
+    #[error(
+        "BinaryContentError: '{url}' returned binary content ({content_type}, {byte_length} bytes); not rendered as text"
+    )]
     Binary {
         url: String,
         content_type: String,
@@ -75,7 +76,7 @@ pub struct SearchResult {
     pub snippet: String,
 }
 
-/// The outcome of a [`web_search`] call.
+/// The outcome of a [`WebClient::web_search`] call.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SearchOutcome {
     pub query: String,
@@ -83,7 +84,7 @@ pub struct SearchOutcome {
     pub results: Vec<SearchResult>,
 }
 
-/// The outcome of a [`fetch_docs`] call.
+/// The outcome of a [`WebClient::fetch_docs`] call.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct FetchResult {
     pub url: String,
@@ -169,7 +170,7 @@ impl WebClient {
                         query: q.to_string(),
                         provider: "searxng".into(),
                         results,
-                    })
+                    });
                 }
                 Err(e) => return Err(e),
             }
@@ -198,12 +199,15 @@ impl WebClient {
 
     async fn search_searxng(&self, q: &str, base: &str) -> Result<Vec<SearchResult>, WebError> {
         let base = base.trim_end_matches('/');
-        let mut url = reqwest::Url::parse(&format!("{base}/search"))
-            .map_err(|e| WebError::SearxngUnreachable {
+        let mut url = reqwest::Url::parse(&format!("{base}/search")).map_err(|e| {
+            WebError::SearxngUnreachable {
                 url: base.to_string(),
                 reason: format!("invalid base url: {e}"),
-            })?;
-        url.query_pairs_mut().append_pair("q", q).append_pair("format", "json");
+            }
+        })?;
+        url.query_pairs_mut()
+            .append_pair("q", q)
+            .append_pair("format", "json");
 
         let resp = self
             .client
@@ -223,13 +227,13 @@ impl WebClient {
             });
         }
 
-        let json: serde_json::Value = resp
-            .json()
-            .await
-            .map_err(|e| WebError::SearxngUnreachable {
-                url: base.to_string(),
-                reason: format!("invalid JSON: {e}"),
-            })?;
+        let json: serde_json::Value =
+            resp.json()
+                .await
+                .map_err(|e| WebError::SearxngUnreachable {
+                    url: base.to_string(),
+                    reason: format!("invalid JSON: {e}"),
+                })?;
 
         let mut out = Vec::new();
         if let Some(items) = json.get("results").and_then(|v| v.as_array()) {
@@ -252,7 +256,9 @@ impl WebClient {
     async fn search_brave(&self, q: &str, key: &str) -> Result<Vec<SearchResult>, WebError> {
         let mut url = reqwest::Url::parse(&self.brave_base)
             .map_err(|e| WebError::Brave(format!("invalid base url: {e}")))?;
-        url.query_pairs_mut().append_pair("q", q).append_pair("count", "10");
+        url.query_pairs_mut()
+            .append_pair("q", q)
+            .append_pair("count", "10");
 
         let resp = self
             .client
@@ -321,15 +327,12 @@ impl WebClient {
             });
         }
 
-        let html = resp
-            .text()
-            .await
-            .map_err(|e| WebError::Http {
-                method: "POST".into(),
-                url: self.ddg_base.clone(),
-                status: 0,
-                reason: e.to_string(),
-            })?;
+        let html = resp.text().await.map_err(|e| WebError::Http {
+            method: "POST".into(),
+            url: self.ddg_base.clone(),
+            status: 0,
+            reason: e.to_string(),
+        })?;
 
         Ok(parse_ddg_html(&html))
     }
@@ -409,8 +412,7 @@ fn percent_encode(s: &str) -> String {
 impl WebClient {
     /// Fetch a URL and convert it to Markdown (or pass JSON / text through).
     pub async fn fetch_docs(&self, url: &str) -> Result<FetchResult, WebError> {
-        let parsed = reqwest::Url::parse(url)
-            .map_err(|_| WebError::InvalidUrl(url.to_string()))?;
+        let parsed = reqwest::Url::parse(url).map_err(|_| WebError::InvalidUrl(url.to_string()))?;
         let scheme = parsed.scheme();
         if scheme != "http" && scheme != "https" {
             return Err(WebError::InvalidUrl(scheme.to_string()));
@@ -419,7 +421,10 @@ impl WebClient {
         let resp = self
             .client
             .get(parsed.clone())
-            .header("Accept", "text/html,application/xhtml+xml,application/json;q=0.8,text/plain;q=0.7,*/*;q=0.5")
+            .header(
+                "Accept",
+                "text/html,application/xhtml+xml,application/json;q=0.8,text/plain;q=0.7,*/*;q=0.5",
+            )
             .send()
             .await
             .map_err(|e| WebError::Http {
@@ -465,8 +470,8 @@ impl WebClient {
                 ("text/html".to_string(), md, 0)
             }
             Category::Json => {
-                let v: serde_json::Value = serde_json::from_slice(&bytes)
-                    .map_err(|e| WebError::Http {
+                let v: serde_json::Value =
+                    serde_json::from_slice(&bytes).map_err(|e| WebError::Http {
                         method: "GET".into(),
                         url: url.to_string(),
                         status: 0,
@@ -489,15 +494,11 @@ impl WebClient {
                         content_type
                     },
                     byte_length: bytes.len(),
-                })
+                });
             }
         };
 
-        let full_len = if length == 0 {
-            markdown.len()
-        } else {
-            length
-        };
+        let full_len = if length == 0 { markdown.len() } else { length };
         let markdown = cap_output(&markdown, full_len);
 
         Ok(FetchResult {
@@ -519,8 +520,13 @@ enum Category {
 }
 
 /// Classify a response body from its Content-Type header plus a binary sniff.
-fn classify(content_type: &str, bytes: & [u8]) -> Category {
-    let base = content_type.split(';').next().unwrap_or("").trim().to_lowercase();
+fn classify(content_type: &str, bytes: &[u8]) -> Category {
+    let base = content_type
+        .split(';')
+        .next()
+        .unwrap_or("")
+        .trim()
+        .to_lowercase();
     match base.as_str() {
         "text/html" | "application/xhtml+xml" => return Category::Html,
         "application/json" => return Category::Json,
@@ -590,10 +596,10 @@ fn cap_output(text: &str, full_len: usize) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use axum::Router;
     use axum::http::StatusCode;
     use axum::response::IntoResponse;
     use axum::routing::{get, post};
-    use axum::Router;
 
     async fn start(app: Router) -> String {
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -695,11 +701,7 @@ mod tests {
     #[tokio::test]
     async fn searxng_results() {
         let base = start(router()).await;
-        let c = WebClient::with_base_urls(
-            Some(format!("{base}/searxng")),
-            None,
-            None,
-        );
+        let c = WebClient::with_base_urls(Some(format!("{base}/searxng")), None, None);
         let out = c.web_search("rust async", None).await.unwrap();
         assert_eq!(out.provider, "searxng");
         assert_eq!(out.query, "rust async");
@@ -730,8 +732,14 @@ mod tests {
         }
         let msg = err.to_string();
         assert!(msg.contains("SearxngUnreachableError"), "{msg}");
-        assert!(msg.contains("searxng_url"), "must name the config key: {msg}");
-        assert!(msg.contains("brave_api_key"), "must name the alternative: {msg}");
+        assert!(
+            msg.contains("searxng_url"),
+            "must name the config key: {msg}"
+        );
+        assert!(
+            msg.contains("brave_api_key"),
+            "must name the alternative: {msg}"
+        );
     }
 
     #[tokio::test]
@@ -772,16 +780,17 @@ mod tests {
     async fn html_to_markdown_via_html2md() {
         let base = start(router()).await;
         let c = WebClient::new();
-        let r = c
-            .fetch_docs(&format!("{base}/fetch/html"))
-            .await
-            .unwrap();
+        let r = c.fetch_docs(&format!("{base}/fetch/html")).await.unwrap();
         assert_eq!(r.status, 200);
         assert_eq!(r.content_type, "text/html");
         // html2md renders <h1> as a setext heading (text + "====" underline).
         assert!(r.markdown.contains("Hello"), "got: {}", r.markdown);
         assert!(r.markdown.contains("World"), "got: {}", r.markdown);
-        assert!(r.markdown.contains("===="), "expected setext underline, got: {}", r.markdown);
+        assert!(
+            r.markdown.contains("===="),
+            "expected setext underline, got: {}",
+            r.markdown
+        );
     }
 
     #[tokio::test]
@@ -835,10 +844,7 @@ mod tests {
     async fn json_passthrough() {
         let base = start(router()).await;
         let c = WebClient::new();
-        let r = c
-            .fetch_docs(&format!("{base}/fetch/json"))
-            .await
-            .unwrap();
+        let r = c.fetch_docs(&format!("{base}/fetch/json")).await.unwrap();
         assert_eq!(r.status, 200);
         assert_eq!(r.content_type, "application/json");
         assert!(r.markdown.contains("\"a\""), "got: {}", r.markdown);
@@ -849,10 +855,7 @@ mod tests {
     async fn output_cap_truncates() {
         let base = start(router()).await;
         let c = WebClient::new();
-        let r = c
-            .fetch_docs(&format!("{base}/fetch/big"))
-            .await
-            .unwrap();
+        let r = c.fetch_docs(&format!("{base}/fetch/big")).await.unwrap();
         assert!(
             r.markdown.len() <= MAX_OUTPUT_BYTES + 200,
             "markdown should be capped, got {} bytes",

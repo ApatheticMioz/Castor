@@ -88,11 +88,7 @@ fn is_linux_zombie(pid: u32) -> bool {
     content
         .lines()
         .find(|l| l.starts_with("State:"))
-        .map(|l| {
-            l.trim_start_matches("State:")
-                .trim_start()
-                .starts_with('Z')
-        })
+        .map(|l| l.trim_start_matches("State:").trim_start().starts_with('Z'))
         .unwrap_or(false)
 }
 
@@ -299,9 +295,11 @@ impl TaskSemaphore {
         let me = std::process::id() as u32;
         for i in 0..self.inner.max_slots {
             if let Some(l) = self.read_lease(i)
-                && !self.lease_reclaimable(Some(&l)) && l.tenant != me {
-                    return true;
-                }
+                && !self.lease_reclaimable(Some(&l))
+                && l.tenant != me
+            {
+                return true;
+            }
         }
         false
     }
@@ -324,11 +322,7 @@ impl TaskSemaphore {
             let (tx, rx) = oneshot::channel::<()>();
             let id = self.inner.next_id.fetch_add(1, Ordering::SeqCst);
             {
-                let mut w = self
-                    .inner
-                    .waiters
-                    .lock()
-                    .unwrap_or_else(|e| e.into_inner());
+                let mut w = self.inner.waiters.lock().unwrap_or_else(|e| e.into_inner());
                 w.queue.push_back(id);
                 w.channels.insert(id, tx);
             }
@@ -341,11 +335,7 @@ impl TaskSemaphore {
 
             // Remove our wait-queue entry (idempotent).
             {
-                let mut w = self
-                    .inner
-                    .waiters
-                    .lock()
-                    .unwrap_or_else(|e| e.into_inner());
+                let mut w = self.inner.waiters.lock().unwrap_or_else(|e| e.into_inner());
                 w.queue.retain(|&q| q != id);
                 w.channels.remove(&id);
             }
@@ -377,11 +367,7 @@ impl TaskSemaphore {
 
         // Wake the head waiter (FIFO) so it can try to claim.
         let woken = {
-            let mut w = self
-                .inner
-                .waiters
-                .lock()
-                .unwrap_or_else(|e| e.into_inner());
+            let mut w = self.inner.waiters.lock().unwrap_or_else(|e| e.into_inner());
             if let Some(&head) = w.queue.front() {
                 w.queue.pop_front();
                 w.channels.remove(&head)
@@ -401,9 +387,10 @@ impl TaskSemaphore {
         let mut out = Vec::new();
         for i in 0..self.inner.max_slots {
             if let Some(l) = self.read_lease(i)
-                && !self.lease_reclaimable(Some(&l)) {
-                    out.push(l);
-                }
+                && !self.lease_reclaimable(Some(&l))
+            {
+                out.push(l);
+            }
         }
         out
     }
@@ -416,18 +403,19 @@ impl TaskSemaphore {
         let mut same = Vec::new();
         for i in 0..self.inner.max_slots {
             if let Some(l) = self.read_lease(i)
-                && !self.lease_reclaimable(Some(&l)) {
-                    let entry = SlotEntry {
-                        slot: i,
-                        lease: l.clone(),
-                    };
-                    if l.tenant == current_tenant {
-                        same.push(entry.clone());
-                    } else {
-                        alien.push(entry.clone());
-                    }
-                    slots.push(entry);
+                && !self.lease_reclaimable(Some(&l))
+            {
+                let entry = SlotEntry {
+                    slot: i,
+                    lease: l.clone(),
+                };
+                if l.tenant == current_tenant {
+                    same.push(entry.clone());
+                } else {
+                    alien.push(entry.clone());
                 }
+                slots.push(entry);
+            }
         }
         let alien_active = !alien.is_empty();
         let same_active = !same.is_empty();
@@ -508,11 +496,7 @@ mod tests {
 
     fn tmp_state() -> StateDir {
         let n = TMP.fetch_add(1, Ord::SeqCst);
-        let p = std::env::temp_dir().join(format!(
-            "castor-sem-{}-{}",
-            std::process::id(),
-            n
-        ));
+        let p = std::env::temp_dir().join(format!("castor-sem-{}-{}", std::process::id(), n));
         let s = StateDir::new(p);
         s.ensure().unwrap();
         s
@@ -570,11 +554,7 @@ mod tests {
                 .and_then(|c| {
                     c.lines()
                         .find(|l| l.starts_with("State:"))
-                        .map(|l| {
-                            l.trim_start_matches("State:")
-                                .trim_start()
-                                .starts_with('Z')
-                        })
+                        .map(|l| l.trim_start_matches("State:").trim_start().starts_with('Z'))
                 })
                 .unwrap_or(false);
             if is_zombie {
@@ -763,10 +743,7 @@ mod tests {
             let f = sem2.acquire("parent");
             tokio::time::timeout(Duration::from_millis(500), f).await
         });
-        assert!(
-            blocked.is_err(),
-            "parent should be blocked by alien tenant"
-        );
+        assert!(blocked.is_err(), "parent should be blocked by alien tenant");
 
         // Wait for child to exit.
         let status = child.wait().unwrap();

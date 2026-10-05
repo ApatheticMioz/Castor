@@ -22,11 +22,11 @@ use std::net::SocketAddr;
 use std::sync::Arc;
 use std::time::Duration;
 
+use axum::Router;
 use axum::extract::{Query, State};
 use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
 use axum::routing::get;
-use axum::Router;
 use serde::Deserialize;
 use serde_json::json;
 
@@ -52,10 +52,7 @@ impl StatusServer {
         let registry = TaskRegistry::new(state);
         let locks = Locks::from_state(state);
         Self {
-            inner: Arc::new(Inner {
-                registry,
-                locks,
-            }),
+            inner: Arc::new(Inner { registry, locks }),
         }
     }
 
@@ -179,14 +176,16 @@ async fn wait_handler(
 
     // Re-read after the wait: the task may have gone terminal.
     if let Some(rec) = reg.get(&id).await
-        && rec.status.is_terminal() {
-            return terminal_response(&rec).into_response();
-        }
+        && rec.status.is_terminal()
+    {
+        return terminal_response(&rec).into_response();
+    }
     // Also check disk (cross-instance).
     if let DiskRead::Ok(rec) = reg.read_disk(&id)
-        && rec.status.is_terminal() {
-            return terminal_response(&rec).into_response();
-        }
+        && rec.status.is_terminal()
+    {
+        return terminal_response(&rec).into_response();
+    }
 
     // Timed out.
     (
@@ -437,11 +436,7 @@ mod tests {
 
     fn tmp_state() -> StateDir {
         let n = TMP.fetch_add(1, Ord::SeqCst);
-        let p = std::env::temp_dir().join(format!(
-            "castor-wait-{}-{}",
-            std::process::id(),
-            n
-        ));
+        let p = std::env::temp_dir().join(format!("castor-wait-{}-{}", std::process::id(), n));
         let s = StateDir::new(p);
         s.ensure().unwrap();
         s
@@ -473,7 +468,10 @@ mod tests {
         let addr = server.serve_ephemeral().await.unwrap();
 
         let id = reg.create("do it", "/tmp", "s1").await.unwrap();
-        let _ = reg.transition(&id, TaskStatus::Executing, None).await.unwrap();
+        let _ = reg
+            .transition(&id, TaskStatus::Executing, None)
+            .await
+            .unwrap();
 
         // Spawn a wait with a 5s timeout; transition to completed after 100ms.
         let reg2 = reg.clone();
@@ -497,7 +495,11 @@ mod tests {
         let v: serde_json::Value = serde_json::from_str(&body).unwrap();
         assert_eq!(v["status"], "completed");
         assert_eq!(v["found"], true);
-        assert!(!v.get("timed_out").and_then(|t| t.as_bool()).unwrap_or(false));
+        assert!(
+            !v.get("timed_out")
+                .and_then(|t| t.as_bool())
+                .unwrap_or(false)
+        );
     }
 
     #[tokio::test]
@@ -508,7 +510,10 @@ mod tests {
         let addr = server.serve_ephemeral().await.unwrap();
 
         let id = reg.create("do it", "/tmp", "s2").await.unwrap();
-        let _ = reg.transition(&id, TaskStatus::Executing, None).await.unwrap();
+        let _ = reg
+            .transition(&id, TaskStatus::Executing, None)
+            .await
+            .unwrap();
 
         let reg2 = reg.clone();
         let id2 = id.clone();
@@ -640,7 +645,10 @@ mod tests {
 
         // Create an executing task with a dead pid.
         let id = reg.create("orphan", "/tmp", "so").await.unwrap();
-        let _ = reg.transition(&id, TaskStatus::Executing, None).await.unwrap();
+        let _ = reg
+            .transition(&id, TaskStatus::Executing, None)
+            .await
+            .unwrap();
         let dead = dead_pid();
         let _ = reg.update(&id, |r| r.pid = Some(dead)).await.unwrap();
 
@@ -666,7 +674,10 @@ mod tests {
         assert!(server.try_acquire_lock());
         // Second server (same state dir) should find the lock held.
         let server2 = StatusServer::new(&state);
-        assert!(!server2.try_acquire_lock(), "second server must see lock held");
+        assert!(
+            !server2.try_acquire_lock(),
+            "second server must see lock held"
+        );
         // Release; now the second can acquire.
         server.release_lock();
         assert!(server2.try_acquire_lock());

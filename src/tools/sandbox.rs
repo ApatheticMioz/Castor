@@ -141,9 +141,11 @@ fn is_reserved_device(name: &str) -> bool {
     for prefix in ["COM", "LPT"] {
         if let Some(rest) = stem.strip_prefix(prefix)
             && let Some(d) = rest.chars().next()
-                && rest.len() == 1 && d.is_ascii_digit() {
-                    return true;
-                }
+            && rest.len() == 1
+            && d.is_ascii_digit()
+        {
+            return true;
+        }
     }
     false
 }
@@ -426,7 +428,10 @@ impl SandboxPolicy {
 
         // (5) Lexical out-of-tree check first — a plainly-absolute path outside
         // every root is a PathEscape (layer 3), not a symlink error.
-        let lexical_in_write = self.write_roots.iter().any(|r| normalized.strip_prefix(r).is_ok());
+        let lexical_in_write = self
+            .write_roots
+            .iter()
+            .any(|r| normalized.strip_prefix(r).is_ok());
         let lexical_in_read = self
             .read_roots
             .iter()
@@ -445,7 +450,10 @@ impl SandboxPolicy {
         } else {
             normalized.clone()
         };
-        let real_in_write = self.write_roots.iter().any(|r| real.strip_prefix(r).is_ok());
+        let real_in_write = self
+            .write_roots
+            .iter()
+            .any(|r| real.strip_prefix(r).is_ok());
         let real_in_read = self.read_roots.iter().any(|r| real.strip_prefix(r).is_ok());
         if !real_in_write && !real_in_read {
             return Err(SandboxError::SymlinkEscape(format!(
@@ -500,10 +508,8 @@ impl SandboxPolicy {
     /// with a ruleset ready to be `try_clone`d into a child and `restrict_self`ed.
     /// `Err` is reserved for a genuine build failure (the caller treats it the
     /// same as `None` — degrade to the in-process sandbox).
-    pub fn build_landlock_ruleset(
-        &self,
-    ) -> Result<Option<landlock::RulesetCreated>, SandboxError> {
-        use landlock::{Access, AccessFs, Ruleset, RulesetAttr, RulesetCreatedAttr, ABI};
+    pub fn build_landlock_ruleset(&self) -> Result<Option<landlock::RulesetCreated>, SandboxError> {
+        use landlock::{ABI, Access, AccessFs, Ruleset, RulesetAttr, RulesetCreatedAttr};
 
         let abi = ABI::V3; // Refer (V2) + Truncate (V3); best-effort on older kernels.
         let ro = AccessFs::from_read(abi);
@@ -562,11 +568,8 @@ mod tests {
     use crate::tools::shell::{self, ShellPolicyError};
 
     fn test_root(name: &str) -> PathBuf {
-        let root = std::env::temp_dir().join(format!(
-            "castor_sandbox_{}_{}",
-            std::process::id(),
-            name
-        ));
+        let root =
+            std::env::temp_dir().join(format!("castor_sandbox_{}_{}", std::process::id(), name));
         let _ = fs::remove_dir_all(&root);
         fs::create_dir_all(root.join("src")).unwrap();
         root
@@ -591,11 +594,7 @@ mod tests {
     #[test]
     fn traversal_escape_rejected() {
         let root = test_root("traversal");
-        for input in [
-            "../outside.txt",
-            "src/../../outside.txt",
-            "a/b/../../../c",
-        ] {
+        for input in ["../outside.txt", "src/../../outside.txt", "a/b/../../../c"] {
             let err = normalize_traversal(&root, input).unwrap_err();
             assert!(matches!(err, SandboxError::PathEscape(_)), "{input}");
         }
@@ -883,20 +882,34 @@ mod tests {
         // (deeper subpath, not a protected root).
         let allow: &[(&str, Option<&str>)] = &[
             ("rm -rf /tmp/build", Some("/tmp/build")),
-            ("rm -rf /mnt/c/Users/testuser/proj/dist", Some("/mnt/c/Users/testuser/proj/dist")),
-            ("rm -rf C:\\Windows\\System32", Some("C:\\Windows\\System32")),
-            ("rm -rf /mnt/c/Users/otheruser/build", Some("/mnt/c/Users/otheruser/build")),
+            (
+                "rm -rf /mnt/c/Users/testuser/proj/dist",
+                Some("/mnt/c/Users/testuser/proj/dist"),
+            ),
+            (
+                "rm -rf C:\\Windows\\System32",
+                Some("C:\\Windows\\System32"),
+            ),
+            (
+                "rm -rf /mnt/c/Users/otheruser/build",
+                Some("/mnt/c/Users/otheruser/build"),
+            ),
             ("git push --force", None),
             ("npm ci", None),
             ("cargo build --release", None),
             ("rm -rf ./node_modules", Some("./node_modules")),
-            ("rm -rf \"/mnt/d/some project/build\"", Some("/mnt/d/some project/build")),
+            (
+                "rm -rf \"/mnt/d/some project/build\"",
+                Some("/mnt/d/some project/build"),
+            ),
             ("sudo rm -rf /tmp/build", Some("/tmp/build")),
             ("bash -c \"rm -rf /tmp/build\"", Some("/tmp/build")),
             ("env TMP=/tmp rm -rf /tmp/build", Some("/tmp/build")),
             ("xargs rm -rf < /tmp/list", Some("/tmp/list")),
-            ("powershell -Command \"Remove-Item C:\\Users\\testuser\\proj\\dist -Recurse -Force\"",
-             Some("C:\\Users\\testuser\\proj\\dist")),
+            (
+                "powershell -Command \"Remove-Item C:\\Users\\testuser\\proj\\dist -Recurse -Force\"",
+                Some("C:\\Users\\testuser\\proj\\dist"),
+            ),
         ];
         for (cmd, operand) in allow {
             v.push(Vector {
@@ -1073,7 +1086,11 @@ mod tests {
         for v in vectors.iter().filter(|v| v.runnable) {
             if v.layer == "ShellPolicy" {
                 let res = shell::validate(v.input);
-                assert!(res.is_err(), "Runnable vector '{}' should be blocked but was allowed", v.input);
+                assert!(
+                    res.is_err(),
+                    "Runnable vector '{}' should be blocked but was allowed",
+                    v.input
+                );
                 let err = res.unwrap_err();
                 match &err {
                     ShellPolicyError::ProhibitedPattern(_)
@@ -1108,8 +1125,8 @@ mod tests {
     /// (under `temp_dir()`, but not under the workspace), mirroring the
     /// production `$HOME/.castor` layout.
     fn fake_home_state_dir(tag: &str) -> PathBuf {
-        let home = std::env::temp_dir()
-            .join(format!("castor_fake_home_{}_{}", std::process::id(), tag));
+        let home =
+            std::env::temp_dir().join(format!("castor_fake_home_{}_{}", std::process::id(), tag));
         let _ = fs::remove_dir_all(&home);
         let state = home.join(".castor");
         fs::create_dir_all(&state).unwrap();
@@ -1208,7 +1225,10 @@ mod tests {
         // is outside the tight workspace policy -> PathEscape (still classified,
         // never silently coerced).
         let expanded = policy.expand_tilde_prefix("~/some/file.txt");
-        assert!(!expanded.starts_with('~'), "tilde must be expanded: {expanded}");
+        assert!(
+            !expanded.starts_with('~'),
+            "tilde must be expanded: {expanded}"
+        );
         if home_dir().is_some() {
             let err = policy.resolve("~/some/file.txt").unwrap_err();
             assert!(matches!(err, SandboxError::PathEscape(_)), "{err}");

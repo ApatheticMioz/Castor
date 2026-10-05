@@ -16,8 +16,10 @@ use encoding_rs::{CoderResult, Decoder, UTF_8};
 
 /// Characters that appear in long consecutive runs in model output (git-diff
 /// '+' hunks, code, URLs, JSON, math).
-const CODE_REPEAT_CHARS: &[char] =
-    &['+', '.', '/', '\\', '<', '>', '|', ':', ';', '(', ')', '[', ']', '{', '}', '\'', '"', '!', '?', ',', '~', '^', '&', '%', '$', '@'];
+const CODE_REPEAT_CHARS: &[char] = &[
+    '+', '.', '/', '\\', '<', '>', '|', ':', ';', '(', ')', '[', ']', '{', '}', '\'', '"', '!',
+    '?', ',', '~', '^', '&', '%', '$', '@',
+];
 
 /// Whitespace / standard markdown divider characters.
 const DIVIDER_CHARS: &[char] = &['-', '=', '*', '#', ' ', '\t', '\n', '_'];
@@ -147,8 +149,7 @@ pub const GUARD_MARKER_PREFIX: &str = "[StreamProxy Guard: Runaway repetition lo
 
 /// Template for the full stream-proxy guard marker. The `${type}` and
 /// `${pattern}` placeholders are interpolated by the breaker.
-pub const GUARD_MARKER_TEMPLATE: &str =
-    "\n\n[StreamProxy Guard: Runaway repetition loop (${type}: ${pattern}) detected and safely truncated]\n\n";
+pub const GUARD_MARKER_TEMPLATE: &str = "\n\n[StreamProxy Guard: Runaway repetition loop (${type}: ${pattern}) detected and safely truncated]\n\n";
 
 // ---------------------------------------------------------------------------
 // Incremental UTF-8 reassembler
@@ -181,8 +182,7 @@ impl Utf8Reassembler {
                 .max_utf8_buffer_length(remaining)
                 .unwrap_or(remaining);
             out.reserve(needed);
-            let (result, read, _) =
-                self.decoder.decode_to_string(&chunk[offset..], out, false);
+            let (result, read, _) = self.decoder.decode_to_string(&chunk[offset..], out, false);
             offset += read;
             if result == CoderResult::InputEmpty {
                 break;
@@ -305,7 +305,7 @@ impl SseSanitizer {
     }
 
     /// Process a single SSE line. Returns `Some(output)` for special lines
-    /// ([DONE], error frames, repetition breaker) that terminate the stream,
+    /// (\[DONE\], error frames, repetition breaker) that terminate the stream,
     /// or `None` for lines that should be passed through as-is.
     fn process_line(&mut self, line: &str) -> Option<String> {
         let trimmed = line.trim();
@@ -316,44 +316,45 @@ impl SseSanitizer {
         if let Some(stripped) = trimmed.strip_prefix("data: ") {
             let payload = stripped.trim();
             if payload.starts_with('{')
-                && let Ok(parsed) = serde_json::from_str::<serde_json::Value>(payload) {
-                    // Mid-stream error frame: error present, no choices.
-                    if parsed.get("error").is_some() && parsed.get("choices").is_none() {
-                        self.done = true;
-                        return Some(format!("event: error\ndata: {parsed}\n\n"));
-                    }
+                && let Ok(parsed) = serde_json::from_str::<serde_json::Value>(payload)
+            {
+                // Mid-stream error frame: error present, no choices.
+                if parsed.get("error").is_some() && parsed.get("choices").is_none() {
+                    self.done = true;
+                    return Some(format!("event: error\ndata: {parsed}\n\n"));
+                }
 
-                    // Repetition circuit breaker on delta content/reasoning.
-                    if let Some(delta) = parsed.pointer("/choices/0/delta") {
-                        let token_text = delta
-                            .get("content")
-                            .or_else(|| delta.get("reasoning"))
-                            .or_else(|| delta.get("reasoning_content"))
-                            .and_then(|v| v.as_str())
-                            .unwrap_or("");
-                        if !token_text.is_empty()
-                            && let Some(rep) = self.detector.feed(token_text) {
-                                self.done = true;
-                                let pattern_json =
-                                    serde_json::to_string(&rep.pattern).unwrap_or_default();
-                                let marker = GUARD_MARKER_TEMPLATE
-                                    .replace("${type}", &rep.r#type)
-                                    .replace("${pattern}", &pattern_json);
-                                let breaker = serde_json::json!({
-                                    "id": "chatcmpl-repetition-breaker",
-                                    "object": "chat.completion.chunk",
-                                    "created": now_secs(),
-                                    "model": "qwen3.8-27b",
-                                    "choices": [{
-                                        "index": 0,
-                                        "delta": { "content": marker },
-                                        "finish_reason": "stop",
-                                    }],
-                                });
-                                return Some(format!("data: {breaker}\n\ndata: [DONE]\n\n"));
-                            }
+                // Repetition circuit breaker on delta content/reasoning.
+                if let Some(delta) = parsed.pointer("/choices/0/delta") {
+                    let token_text = delta
+                        .get("content")
+                        .or_else(|| delta.get("reasoning"))
+                        .or_else(|| delta.get("reasoning_content"))
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("");
+                    if !token_text.is_empty()
+                        && let Some(rep) = self.detector.feed(token_text)
+                    {
+                        self.done = true;
+                        let pattern_json = serde_json::to_string(&rep.pattern).unwrap_or_default();
+                        let marker = GUARD_MARKER_TEMPLATE
+                            .replace("${type}", &rep.r#type)
+                            .replace("${pattern}", &pattern_json);
+                        let breaker = serde_json::json!({
+                            "id": "chatcmpl-repetition-breaker",
+                            "object": "chat.completion.chunk",
+                            "created": now_secs(),
+                            "model": "qwen3.8-27b",
+                            "choices": [{
+                                "index": 0,
+                                "delta": { "content": marker },
+                                "finish_reason": "stop",
+                            }],
+                        });
+                        return Some(format!("data: {breaker}\n\ndata: [DONE]\n\n"));
                     }
                 }
+            }
         }
         None
     }
@@ -364,8 +365,7 @@ impl SseSanitizer {
 // ---------------------------------------------------------------------------
 
 /// Placeholder text that replaces image blocks in the multimodal guard.
-pub const IMAGE_PLACEHOLDER: &str =
-    "[Image file omitted: Local Qwen3.8-27B runs in pure text mode for Universal 245K context. \
+pub const IMAGE_PLACEHOLDER: &str = "[Image file omitted: Local Qwen3.8-27B runs in pure text mode for Universal 245K context. \
      Images must be inspected multimodally by the Lead Architect.]";
 
 /// Sanitize a chat-completions request body by replacing image blocks with
@@ -398,12 +398,11 @@ fn sanitize_item(item: &mut serde_json::Value, modified: &mut bool) {
             }
         }
         serde_json::Value::Object(obj) => {
-            let is_image = obj
-                .get("type")
-                .and_then(|v| v.as_str())
-                .is_some_and(|t| matches!(t, "image_url" | "image" | "input_image" | "image_file"))
-                || obj.contains_key("image")
-                || obj.contains_key("image_url");
+            let is_image =
+                obj.get("type").and_then(|v| v.as_str()).is_some_and(|t| {
+                    matches!(t, "image_url" | "image" | "input_image" | "image_file")
+                }) || obj.contains_key("image")
+                    || obj.contains_key("image_url");
             if is_image {
                 *modified = true;
                 *item = serde_json::json!({
@@ -479,7 +478,10 @@ mod tests {
         let mut r = Utf8Reassembler::new();
         let mut out = String::new();
         r.feed(b"\xFF", &mut out);
-        assert_eq!(out, "", "trailing byte must be held back, not emitted split");
+        assert_eq!(
+            out, "",
+            "trailing byte must be held back, not emitted split"
+        );
         r.finish(&mut out);
         assert_eq!(out, "\u{FFFD}");
     }
@@ -499,7 +501,10 @@ mod tests {
     fn sse_sanitizer_passthrough() {
         let mut s = SseSanitizer::new();
         let out = s.feed(b"data: {\"choices\":[{\"delta\":{\"content\":\"hi\"}}]}\n\n");
-        assert_eq!(out, "data: {\"choices\":[{\"delta\":{\"content\":\"hi\"}}]}\n\n");
+        assert_eq!(
+            out,
+            "data: {\"choices\":[{\"delta\":{\"content\":\"hi\"}}]}\n\n"
+        );
         assert!(!s.is_done());
     }
 
@@ -521,7 +526,10 @@ mod tests {
         let out = s.feed(chunk.as_bytes());
         assert!(out.starts_with("event: error\n"), "got: {out}");
         assert!(out.contains("boom"), "got: {out}");
-        assert!(!out.contains("[DONE]"), "error frame must NOT append [DONE]: {out}");
+        assert!(
+            !out.contains("[DONE]"),
+            "error frame must NOT append [DONE]: {out}"
+        );
         assert!(s.is_done());
     }
 
@@ -565,7 +573,10 @@ mod tests {
             combined.contains("\u{1F600}"),
             "emoji must arrive intact, got: {combined}"
         );
-        assert!(!combined.contains('\u{FFFD}'), "no replacement chars: {combined}");
+        assert!(
+            !combined.contains('\u{FFFD}'),
+            "no replacement chars: {combined}"
+        );
     }
 
     #[test]
@@ -596,7 +607,12 @@ mod tests {
         assert!(modified);
         let content = body["messages"][0]["content"].as_array().unwrap();
         assert_eq!(content[1]["type"], "text");
-        assert!(content[1]["text"].as_str().unwrap().starts_with("[Image file omitted"));
+        assert!(
+            content[1]["text"]
+                .as_str()
+                .unwrap()
+                .starts_with("[Image file omitted")
+        );
     }
 
     #[test]

@@ -48,9 +48,7 @@ impl ReplayEngine {
             std::collections::HashMap::new();
         for step in &steps {
             if let TraceStep::ToolCall {
-                tool_call_id,
-                args,
-                ..
+                tool_call_id, args, ..
             } = step
             {
                 call_args.insert(tool_call_id.clone(), args.to_string());

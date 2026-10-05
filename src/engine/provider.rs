@@ -4,7 +4,7 @@ use std::collections::BTreeMap;
 use std::time::Instant;
 
 use futures_util::StreamExt;
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 use thiserror::Error;
 
 use crate::config::Config;
@@ -54,7 +54,12 @@ impl Message {
         if !self.tool_calls.is_empty() {
             obj.insert(
                 "tool_calls".into(),
-                json!(self.tool_calls.iter().map(|tc| tc.to_json()).collect::<Vec<_>>()),
+                json!(
+                    self.tool_calls
+                        .iter()
+                        .map(|tc| tc.to_json())
+                        .collect::<Vec<_>>()
+                ),
             );
         }
         if let Some(id) = &self.tool_call_id {
@@ -146,7 +151,10 @@ impl EngineClient {
             .ok_or(EngineError::MissingConfig { field: "model" })?;
         let http = reqwest::Client::builder()
             .build()
-            .map_err(|e| EngineError::Connect { url: base_url.clone(), source: e })?;
+            .map_err(|e| EngineError::Connect {
+                url: base_url.clone(),
+                source: e,
+            })?;
         Ok(Self {
             http,
             base_url,
@@ -166,10 +174,7 @@ impl EngineClient {
         stream: bool,
         reasoning_effort: Option<&str>,
     ) -> Result<Completion, EngineError> {
-        let url = format!(
-            "{}/chat/completions",
-            self.base_url.trim_end_matches('/')
-        );
+        let url = format!("{}/chat/completions", self.base_url.trim_end_matches('/'));
         let mut body = json!({
             "model": self.model,
             "messages": messages.iter().map(|m| m.to_json()).collect::<Vec<_>>(),
@@ -190,10 +195,10 @@ impl EngineClient {
             req = req.bearer_auth(key);
         }
         let t0 = Instant::now();
-        let resp = req
-            .send()
-            .await
-            .map_err(|e| EngineError::Connect { url: url.clone(), source: e })?;
+        let resp = req.send().await.map_err(|e| EngineError::Connect {
+            url: url.clone(),
+            source: e,
+        })?;
         if !resp.status().is_success() {
             let status = resp.status().as_u16();
             let body = resp.text().await.unwrap_or_default();
@@ -252,9 +257,7 @@ impl EngineClient {
                     // Engine-reported usage chunk: completion tokens take
                     // precedence over the local char estimate; prompt tokens
                     // are carried through for the session ledger.
-                    if let Some(c) =
-                        usage.get("completion_tokens").and_then(Value::as_u64)
-                    {
+                    if let Some(c) = usage.get("completion_tokens").and_then(Value::as_u64) {
                         completion_tokens = Some(c);
                     }
                     if let Some(p) = usage.get("prompt_tokens").and_then(Value::as_u64) {
@@ -274,14 +277,10 @@ impl EngineClient {
                     .into_iter()
                     .flatten()
                 {
-                    if let Some(fr) = choice
-                        .get("finish_reason")
-                        .and_then(Value::as_str)
-                    {
+                    if let Some(fr) = choice.get("finish_reason").and_then(Value::as_str) {
                         finish_reason = Some(fr.to_string());
                     }
-                    let Some(delta) = choice.get("delta").or_else(|| choice.get("message"))
-                    else {
+                    let Some(delta) = choice.get("delta").or_else(|| choice.get("message")) else {
                         continue;
                     };
                     if let Some(c) = delta.get("content").and_then(Value::as_str) {
@@ -350,12 +349,17 @@ impl EngineClient {
             .and_then(Value::as_str)
             .unwrap_or_default()
             .to_string();
-        let finish_reason =
-            choice.get("finish_reason").and_then(Value::as_str).map(String::from);
+        let finish_reason = choice
+            .get("finish_reason")
+            .and_then(Value::as_str)
+            .map(String::from);
         let mut tool_calls = BTreeMap::new();
         if let Some(tcs) = msg.get("tool_calls").and_then(Value::as_array) {
             for (i, tc) in tcs.iter().enumerate() {
-                let mut slot = ToolCall { index: i, ..Default::default() };
+                let mut slot = ToolCall {
+                    index: i,
+                    ..Default::default()
+                };
                 if let Some(id) = tc.get("id").and_then(Value::as_str) {
                     slot.id = id.to_string();
                 }
@@ -363,9 +367,7 @@ impl EngineClient {
                 if let Some(name) = fn_.and_then(|f| f.get("name")).and_then(Value::as_str) {
                     slot.name = name.to_string();
                 }
-                if let Some(args) =
-                    fn_.and_then(|f| f.get("arguments")).and_then(Value::as_str)
-                {
+                if let Some(args) = fn_.and_then(|f| f.get("arguments")).and_then(Value::as_str) {
                     slot.arguments = args.to_string();
                 }
                 tool_calls.insert(i, slot);
@@ -439,12 +441,12 @@ fn assemble(
 mod tests {
     use super::*;
     use crate::config::Ports;
-    use axum::body::Body;
-    use axum::http::StatusCode;
-    use axum::routing::post;
     use axum::Json;
     use axum::Router;
+    use axum::body::Body;
+    use axum::http::StatusCode;
     use axum::response::IntoResponse;
+    use axum::routing::post;
     use futures_util::stream;
     use std::path::PathBuf;
 
@@ -522,11 +524,17 @@ mod tests {
     }
 
     async fn err400_handler() -> (StatusCode, &'static str) {
-        (StatusCode::BAD_REQUEST, r#"{"error":{"message":"bad model"}}"#)
+        (
+            StatusCode::BAD_REQUEST,
+            r#"{"error":{"message":"bad model"}}"#,
+        )
     }
 
     async fn err500_handler() -> (StatusCode, &'static str) {
-        (StatusCode::INTERNAL_SERVER_ERROR, r#"{"error":{"message":"boom"}}"#)
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            r#"{"error":{"message":"boom"}}"#,
+        )
     }
 
     async fn split_handler() -> axum::response::Response {
@@ -636,8 +644,7 @@ mod tests {
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let addr = listener.local_addr().unwrap();
         drop(listener);
-        let client =
-            EngineClient::from_config(&test_config(&format!("http://{addr}"))).unwrap();
+        let client = EngineClient::from_config(&test_config(&format!("http://{addr}"))).unwrap();
         let err = client.chat(&[msg()], &[], true, None).await.unwrap_err();
         assert!(matches!(err, EngineError::Connect { .. }), "{err:?}");
     }
@@ -686,7 +693,10 @@ mod tests {
                     Some(&json!({ "reasoning_effort": e })),
                     "chat_template_kwargs must contain reasoning_effort: {body}"
                 );
-                assert!(tl.is_none(), "top-level reasoning_effort should not be sent: {body}");
+                assert!(
+                    tl.is_none(),
+                    "top-level reasoning_effort should not be sent: {body}"
+                );
             }
             None => {
                 assert!(
@@ -724,7 +734,10 @@ mod tests {
     async fn effort_serialized_as_chat_template_kwargs() {
         let base = start_echo_server().await;
         let client = EngineClient::from_config(&test_config(&base)).unwrap();
-        let out = client.chat(&[msg()], &[], false, Some("xhigh")).await.unwrap();
+        let out = client
+            .chat(&[msg()], &[], false, Some("xhigh"))
+            .await
+            .unwrap();
         let sent = sent_body(&out);
         assert_effort_fields(&sent, Some("xhigh"));
     }

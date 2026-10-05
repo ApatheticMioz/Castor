@@ -26,11 +26,15 @@ use tokio::io::AsyncReadExt;
 pub enum ShellPolicyError {
     #[error("InvalidCommandError: Shell command must be a non-empty string")]
     InvalidCommand,
-    #[error("CommandSecurityError: Execution blocked. Command matches prohibited destructive pattern: {0}")]
+    #[error(
+        "CommandSecurityError: Execution blocked. Command matches prohibited destructive pattern: {0}"
+    )]
     ProhibitedPattern(String),
     #[error("CommandSecurityError: Execution blocked. Unexpanded shell reference in target '{0}'")]
     UnexpandedReference(String),
-    #[error("CommandSecurityError: Execution blocked. Target '{0}' resolves to protected root: {1}")]
+    #[error(
+        "CommandSecurityError: Execution blocked. Target '{0}' resolves to protected root: {1}"
+    )]
     ProtectedRoot(String, String),
     #[error("FatalDeadManFuseError: Execution halted by dead-man fuse (synthetic canary tripped)")]
     DeadManFuse,
@@ -70,10 +74,7 @@ fn pattern_blocks() -> &'static [(&'static str, Regex)] {
                 "disk partitioning",
                 Regex::new(r"\b(mkfs(\.[a-z0-9]+)?|fdisk|parted)\b").unwrap(),
             ),
-            (
-                "drive format",
-                Regex::new(r"\bformat\s+[A-Za-z]:").unwrap(),
-            ),
+            ("drive format", Regex::new(r"\bformat\s+[A-Za-z]:").unwrap()),
             (
                 "dd to raw device",
                 Regex::new(r"\bdd\s+.*of=/dev/(sd[a-z]|nvme|hd[a-z]|vd[a-z])").unwrap(),
@@ -219,15 +220,18 @@ fn expand_tilde(operand: &str, is_win: bool) -> String {
         return format!("{HOME}{}", operand[1..].replace('\\', "/"));
     }
     if let Some(rest) = operand.strip_prefix('~')
-        && !rest.is_empty() && rest.as_bytes()[0] != b'/' && rest.as_bytes()[0] != b'\\' {
-            if is_win {
-                return format!("C:\\Users\\{rest}");
-            }
-            if rest == "root" {
-                return "/root".to_string();
-            }
-            return format!("/home/{rest}");
+        && !rest.is_empty()
+        && rest.as_bytes()[0] != b'/'
+        && rest.as_bytes()[0] != b'\\'
+    {
+        if is_win {
+            return format!("C:\\Users\\{rest}");
         }
+        if rest == "root" {
+            return "/root".to_string();
+        }
+        return format!("/home/{rest}");
+    }
     operand.to_string()
 }
 
@@ -403,7 +407,11 @@ fn is_protected_root(p: &str) -> bool {
         if p == *root {
             return true;
         }
-        let w = if *root == "/" { "/*" } else { &format!("{root}/*") };
+        let w = if *root == "/" {
+            "/*"
+        } else {
+            &format!("{root}/*")
+        };
         if p == w {
             return true;
         }
@@ -481,13 +489,15 @@ fn analyze_segment(cmd: &str, cwd: &str, depth: usize) -> Result<(), ShellPolicy
         let mut operands = Vec::new();
         for tok in tokens.iter().skip(i + 1) {
             if let Some(eq) = tok.find('=')
-                && eq > 0 && (tok.starts_with('-') || tok.starts_with('/')) {
-                    let value = &tok[eq + 1..];
-                    if !value.is_empty() {
-                        operands.push(value.to_string());
-                    }
-                    continue;
+                && eq > 0
+                && (tok.starts_with('-') || tok.starts_with('/'))
+            {
+                let value = &tok[eq + 1..];
+                if !value.is_empty() {
+                    operands.push(value.to_string());
                 }
+                continue;
+            }
             if !is_flag(tok) {
                 operands.push(tok.clone());
             }
@@ -498,10 +508,7 @@ fn analyze_segment(cmd: &str, cwd: &str, depth: usize) -> Result<(), ShellPolicy
             }
             let normalized = normalize_operand(operand, cwd, is_win);
             if is_protected_root(&normalized) {
-                return Err(ShellPolicyError::ProtectedRoot(
-                    operand.clone(),
-                    normalized,
-                ));
+                return Err(ShellPolicyError::ProtectedRoot(operand.clone(), normalized));
             }
         }
     }
@@ -577,7 +584,11 @@ pub enum ShellError {
 /// 1. `validate` — typed policy refusal; nothing is ever spawned on refusal.
 /// 2. `cwd` resolved through the sandbox layers (canonicalized real path).
 /// 3. Spawn `bash -c <cmd>` with `process_group(0)`.
-pub async fn run_async(cmd: &str, cwd: &Path, timeout: Duration) -> Result<ShellOutput, ShellError> {
+pub async fn run_async(
+    cmd: &str,
+    cwd: &Path,
+    timeout: Duration,
+) -> Result<ShellOutput, ShellError> {
     // Layer 1: policy validation — typed refusal, nothing spawns.
     validate(cmd)?;
     // Layer 2: resolve the cwd through the sandbox layers (real path).
@@ -625,7 +636,9 @@ async fn capture_capped<R: tokio::io::AsyncRead + Unpin>(mut r: R, cap: usize) -
 
 #[cfg(target_os = "linux")]
 fn build_landlock_ruleset(cwd: &Path) -> Result<landlock::RulesetCreated, String> {
-    use landlock::{Access, AccessFs, PathBeneath, PathFd, Ruleset, RulesetAttr, RulesetCreatedAttr, ABI};
+    use landlock::{
+        ABI, Access, AccessFs, PathBeneath, PathFd, Ruleset, RulesetAttr, RulesetCreatedAttr,
+    };
     let abi = ABI::V1;
     let mut ruleset = Ruleset::default()
         .handle_access(AccessFs::from_all(abi))
@@ -775,8 +788,8 @@ async fn execute(cmd: &str, cwd: &Path, timeout: Duration) -> Result<ShellOutput
         Some(status) => {
             let _ = tokio::join!(out_task, err_task);
             let out = std::mem::take(&mut *out_buf.lock().unwrap());
-            let mut err =
-                String::from_utf8_lossy(&std::mem::take(&mut *err_buf.lock().unwrap())).into_owned();
+            let mut err = String::from_utf8_lossy(&std::mem::take(&mut *err_buf.lock().unwrap()))
+                .into_owned();
             if status.code().is_none() {
                 err.push_str("\n[Process terminated by signal]");
             }
@@ -806,8 +819,8 @@ async fn execute(cmd: &str, cwd: &Path, timeout: Duration) -> Result<ShellOutput
             }
             let _ = tokio::join!(out_task, err_task);
             let out = std::mem::take(&mut *out_buf.lock().unwrap());
-            let mut err =
-                String::from_utf8_lossy(&std::mem::take(&mut *err_buf.lock().unwrap())).into_owned();
+            let mut err = String::from_utf8_lossy(&std::mem::take(&mut *err_buf.lock().unwrap()))
+                .into_owned();
             err.push_str(&format!(
                 "\n[Command timed out after {}ms]",
                 timeout.as_millis()
@@ -964,7 +977,6 @@ mod tests {
             Err(ShellPolicyError::ProtectedRoot(_, _))
         ));
     }
-
 }
 
 // ---------------------------------------------------------------------------
@@ -977,10 +989,8 @@ mod run_tests {
     use std::path::PathBuf;
 
     fn tmp_dir(tag: &str) -> PathBuf {
-        let d = std::env::temp_dir().join(format!(
-            "castor_shell_test_{tag}_{}",
-            std::process::id()
-        ));
+        let d =
+            std::env::temp_dir().join(format!("castor_shell_test_{tag}_{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&d);
         std::fs::create_dir_all(&d).unwrap();
         d
@@ -1020,10 +1030,7 @@ mod run_tests {
         // Stronger proof: the refused command would CREATE the marker file
         // if it were ever spawned. It must not exist afterwards.
         let marker = dir.join("marker.txt");
-        let cmd = format!(
-            "echo {CANARY_DISASTER_FUSE_TOKEN} > {}",
-            marker.display()
-        );
+        let cmd = format!("echo {CANARY_DISASTER_FUSE_TOKEN} > {}", marker.display());
         let res = run(&cmd, &dir, Duration::from_secs(10));
         assert!(matches!(
             res,
@@ -1070,7 +1077,12 @@ mod run_tests {
         assert!(dir.join("ok.txt").exists());
 
         // Denied paths: writing to /etc or reading /root fails with permission denied
-        let out_denied = run("touch /etc/test_landlock_fail 2>&1 || ls /root 2>&1", &dir, Duration::from_secs(10)).unwrap();
+        let out_denied = run(
+            "touch /etc/test_landlock_fail 2>&1 || ls /root 2>&1",
+            &dir,
+            Duration::from_secs(10),
+        )
+        .unwrap();
         let combined = format!("{} {}", out_denied.stdout, out_denied.stderr);
         assert!(
             combined.contains("Permission denied") || combined.contains("denied"),
@@ -1085,12 +1097,21 @@ mod run_tests {
         let dir = tmp_dir("landlock_devnull");
         // Writing to /dev/null must succeed under Landlock (required by git, redirection, etc.)
         let out_devnull = run("echo test > /dev/null 2>&1", &dir, Duration::from_secs(10)).unwrap();
-        assert_eq!(out_devnull.exit_code, 0, "Writing to /dev/null must succeed: {out_devnull:?}");
+        assert_eq!(
+            out_devnull.exit_code, 0,
+            "Writing to /dev/null must succeed: {out_devnull:?}"
+        );
 
         // If cargo is installed in ~/.cargo/bin, it must be executable under Landlock
-        if std::env::var_os("HOME").map(|h| PathBuf::from(h).join(".cargo/bin/cargo").exists()).unwrap_or(false) {
+        if std::env::var_os("HOME")
+            .map(|h| PathBuf::from(h).join(".cargo/bin/cargo").exists())
+            .unwrap_or(false)
+        {
             let out_cargo = run("cargo --version", &dir, Duration::from_secs(10)).unwrap();
-            assert_eq!(out_cargo.exit_code, 0, "cargo --version must succeed under Landlock: {out_cargo:?}");
+            assert_eq!(
+                out_cargo.exit_code, 0,
+                "cargo --version must succeed under Landlock: {out_cargo:?}"
+            );
         }
         let _ = std::fs::remove_dir_all(&dir);
     }

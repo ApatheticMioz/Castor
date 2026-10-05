@@ -15,13 +15,13 @@ use std::path::PathBuf;
 use std::time::Duration;
 
 use async_trait::async_trait;
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 
-use crate::engine::ToolSchema;
-use crate::runner::{ToolError, ToolExecutor, ToolOutcome};
 use self::extensions::ExtensionBridge;
 use self::fs::FsExecutor;
 use self::web::WebClient;
+use crate::engine::ToolSchema;
+use crate::runner::{ToolError, ToolExecutor, ToolOutcome};
 
 /// The aggregate tool executor providing all built-in capabilities and extensions.
 pub struct CompositeExecutor {
@@ -34,7 +34,10 @@ pub struct CompositeExecutor {
 
 impl CompositeExecutor {
     /// Create a new executor for the given workspace root, with optional extension bridge.
-    pub fn new(workspace_root: impl Into<PathBuf>, extensions: Option<ExtensionBridge>) -> Result<Self, fs::FsError> {
+    pub fn new(
+        workspace_root: impl Into<PathBuf>,
+        extensions: Option<ExtensionBridge>,
+    ) -> Result<Self, fs::FsError> {
         Self::with_config(workspace_root, None, None, extensions)
     }
 
@@ -46,12 +49,11 @@ impl CompositeExecutor {
         extensions: Option<ExtensionBridge>,
     ) -> Result<Self, fs::FsError> {
         let root = crate::platform::to_host_path(workspace_root.into());
-        let state_dir = crate::config::load()
-            .ok()
-            .map(|l| l.config.state_dir);
+        let state_dir = crate::config::load().ok().map(|l| l.config.state_dir);
         let policy = sandbox::SandboxPolicy::for_workspace(&root, state_dir.as_deref());
         let fs = FsExecutor::with_policy(policy);
-        let searx_base = searxng_url.or_else(|| crate::tools::web::DEFAULT_SEARXNG.map(str::to_string));
+        let searx_base =
+            searxng_url.or_else(|| crate::tools::web::DEFAULT_SEARXNG.map(str::to_string));
         let web = WebClient::with_base_urls(searx_base, None, None);
         Ok(Self {
             fs,
@@ -307,7 +309,10 @@ impl ToolExecutor for CompositeExecutor {
                     Ok(summary) => Ok(ToolOutcome {
                         text: format!(
                             "Replaced {} occurrence(s) across {} file(s) (applied: {}, rolled back: {}).",
-                            summary.replacements, summary.files_applied, summary.applied.len(), summary.rolled_back.len()
+                            summary.replacements,
+                            summary.files_applied,
+                            summary.applied.len(),
+                            summary.rolled_back.len()
                         ),
                     }),
                     Err(e) => Ok(ToolOutcome {
@@ -319,8 +324,15 @@ impl ToolExecutor for CompositeExecutor {
             // Web tools
             "web_search" => {
                 let query = args.get("query").and_then(|v| v.as_str()).unwrap_or("");
-                let limit = args.get("num_results").and_then(|v| v.as_u64()).unwrap_or(10) as usize;
-                match self.web.web_search(query, self.brave_api_key.as_deref()).await {
+                let limit = args
+                    .get("num_results")
+                    .and_then(|v| v.as_u64())
+                    .unwrap_or(10) as usize;
+                match self
+                    .web
+                    .web_search(query, self.brave_api_key.as_deref())
+                    .await
+                {
                     Ok(outcome) => {
                         if outcome.results.is_empty() {
                             Ok(ToolOutcome {
@@ -329,7 +341,13 @@ impl ToolExecutor for CompositeExecutor {
                         } else {
                             let mut lines = Vec::new();
                             for (i, r) in outcome.results.iter().take(limit).enumerate() {
-                                lines.push(format!("{}. [{}]({})\n   {}", i + 1, r.title, r.url, r.snippet));
+                                lines.push(format!(
+                                    "{}. [{}]({})\n   {}",
+                                    i + 1,
+                                    r.title,
+                                    r.url,
+                                    r.snippet
+                                ));
                             }
                             Ok(ToolOutcome {
                                 text: lines.join("\n\n"),
@@ -406,7 +424,10 @@ mod tests {
 
         // Write a file
         let write_res = executor
-            .execute("write_file", r#"{"path": "hello.txt", "content": "hello world"}"#)
+            .execute(
+                "write_file",
+                r#"{"path": "hello.txt", "content": "hello world"}"#,
+            )
             .await
             .unwrap();
         assert!(write_res.text.contains("hello.txt"));

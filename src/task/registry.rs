@@ -19,7 +19,7 @@ use std::path::PathBuf;
 use std::sync::Arc;
 
 use serde::{Deserialize, Serialize};
-use tokio::sync::{broadcast, Mutex};
+use tokio::sync::{Mutex, broadcast};
 
 use crate::state::StateDir;
 use crate::task::semaphore::pid_alive;
@@ -91,7 +91,9 @@ pub struct TaskRecord {
 pub enum RegistryError {
     #[error("task '{id}' not found")]
     NotFound { id: String },
-    #[error("task '{id}' is already terminal ({status}); exactly one terminal transition is allowed")]
+    #[error(
+        "task '{id}' is already terminal ({status}); exactly one terminal transition is allowed"
+    )]
     AlreadyTerminal { id: String, status: TaskStatus },
     #[error("io error: {0}")]
     Io(#[from] std::io::Error),
@@ -102,10 +104,9 @@ impl PartialEq for RegistryError {
         use RegistryError::*;
         match (self, other) {
             (NotFound { id: a }, NotFound { id: b }) => a == b,
-            (
-                AlreadyTerminal { id: a, status: sa },
-                AlreadyTerminal { id: b, status: sb },
-            ) => a == b && sa == sb,
+            (AlreadyTerminal { id: a, status: sa }, AlreadyTerminal { id: b, status: sb }) => {
+                a == b && sa == sb
+            }
             (Io(_), Io(_)) => true,
             _ => false,
         }
@@ -166,19 +167,17 @@ pub fn epoch_secs_to_utc(secs: u64) -> (u32, u32, u32, u32, u32, u32) {
 /// Sanitize session_id or prompt into a clean, concise slug.
 fn sanitize_slug(session_id: &str, prompt: &str) -> String {
     let trimmed = session_id.trim();
-    let source = if !trimmed.is_empty()
-        && !trimmed.starts_with("castor_session_")
-        && trimmed != "default"
-    {
-        trimmed.to_string()
-    } else {
-        let words: Vec<&str> = prompt.split_whitespace().take(3).collect();
-        if words.is_empty() {
-            "task".to_string()
+    let source =
+        if !trimmed.is_empty() && !trimmed.starts_with("castor_session_") && trimmed != "default" {
+            trimmed.to_string()
         } else {
-            words.join("_")
-        }
-    };
+            let words: Vec<&str> = prompt.split_whitespace().take(3).collect();
+            if words.is_empty() {
+                "task".to_string()
+            } else {
+                words.join("_")
+            }
+        };
 
     let mut slug = String::new();
     let mut last_was_underscore = true;
@@ -201,7 +200,6 @@ fn sanitize_slug(session_id: &str, prompt: &str) -> String {
         res.to_string()
     }
 }
-
 
 /// Generate a collision-proof task ID:
 /// `task_{slug}_{YYYYMMDD_HHMMSS}_{millis:03}_{pid:04x}{seq:04x}`
@@ -315,7 +313,11 @@ impl TaskRegistry {
         if let Ok(raw) = fs::read_to_string(self.task_path(id))
             && let Ok(rec) = serde_json::from_str::<TaskRecord>(&raw)
         {
-            self.inner.tasks.lock().await.insert(id.to_string(), rec.clone());
+            self.inner
+                .tasks
+                .lock()
+                .await
+                .insert(id.to_string(), rec.clone());
             return Some(rec);
         }
         self.inner.tasks.lock().await.get(id).cloned()
@@ -516,11 +518,7 @@ mod tests {
 
     fn tmp_state() -> StateDir {
         let n = TMP.fetch_add(1, Ord::SeqCst);
-        let p = std::env::temp_dir().join(format!(
-            "castor-reg-{}-{}",
-            std::process::id(),
-            n
-        ));
+        let p = std::env::temp_dir().join(format!("castor-reg-{}-{}", std::process::id(), n));
         let s = StateDir::new(p);
         s.ensure().unwrap();
         s
@@ -538,10 +536,7 @@ mod tests {
     async fn create_get_list_update() {
         let state = tmp_state();
         let reg = TaskRegistry::new(&state);
-        let id = reg
-            .create("do the thing", "/tmp", "sess-1")
-            .await
-            .unwrap();
+        let id = reg.create("do the thing", "/tmp", "sess-1").await.unwrap();
         assert!(id.starts_with("task_"));
 
         let rec = reg.get(&id).await.unwrap();
@@ -605,7 +600,10 @@ mod tests {
         let state = tmp_state();
         let reg = TaskRegistry::new(&state);
         let id = reg.create("p", "/tmp", "s").await.unwrap();
-        let _ = reg.transition(&id, TaskStatus::Executing, None).await.unwrap();
+        let _ = reg
+            .transition(&id, TaskStatus::Executing, None)
+            .await
+            .unwrap();
         let _ = reg
             .transition(&id, TaskStatus::Failed, Some("boom".into()))
             .await
@@ -635,7 +633,10 @@ mod tests {
         let state = tmp_state();
         let reg = TaskRegistry::new(&state);
         let id = reg.create("p", "/tmp", "s").await.unwrap();
-        let _ = reg.transition(&id, TaskStatus::Executing, None).await.unwrap();
+        let _ = reg
+            .transition(&id, TaskStatus::Executing, None)
+            .await
+            .unwrap();
         let dead = dead_pid();
         let _ = reg.update(&id, |r| r.pid = Some(dead)).await.unwrap();
 
@@ -654,7 +655,10 @@ mod tests {
         let state = tmp_state();
         let reg = TaskRegistry::new(&state);
         let id = reg.create("p", "/tmp", "s").await.unwrap();
-        let _ = reg.transition(&id, TaskStatus::Executing, None).await.unwrap();
+        let _ = reg
+            .transition(&id, TaskStatus::Executing, None)
+            .await
+            .unwrap();
         // Our own pid is alive.
         let _ = reg
             .update(&id, |r| r.pid = Some(std::process::id() as u32))
@@ -669,7 +673,10 @@ mod tests {
         let state = tmp_state();
         let reg = TaskRegistry::new(&state);
         let id = reg.create("p", "/tmp", "s").await.unwrap();
-        let _ = reg.transition(&id, TaskStatus::Executing, None).await.unwrap();
+        let _ = reg
+            .transition(&id, TaskStatus::Executing, None)
+            .await
+            .unwrap();
 
         // Normal extension.
         let b = reg.extend_budget(&id, 30).await.unwrap();
@@ -715,13 +722,20 @@ mod tests {
         let state = tmp_state();
         let reg = TaskRegistry::new(&state);
 
-        let id = reg.create("write question 1", "/tmp", "rm_activity_02").await.unwrap();
+        let id = reg
+            .create("write question 1", "/tmp", "rm_activity_02")
+            .await
+            .unwrap();
         assert!(id.starts_with("task_rm_activity_02_"));
         // task_{slug}_{YYYYMMDD_HHMMSS}_{millis:03}_{pid:04x}{seq:04x}
         let parts: Vec<&str> = id.split('_').collect();
         assert!(parts.len() >= 6); // task, rm, activity, 02, date, time, millis, pidseq
         let last = parts.last().unwrap();
-        assert_eq!(last.len(), 8, "last component should be 8 hex chars (4 pid + 4 seq)");
+        assert_eq!(
+            last.len(),
+            8,
+            "last component should be 8 hex chars (4 pid + 4 seq)"
+        );
 
         // Concurrent generation of 1,000 tasks: guaranteed 0 collisions
         let mut set = std::collections::HashSet::new();

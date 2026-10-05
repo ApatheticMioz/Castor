@@ -57,7 +57,12 @@ pub fn evaluate(lineage: &Lineage, now_ms: u64) -> WatchdogVerdict {
 
     // Check if the last 5 commits show no fitness improvement.
     let window: Vec<&LineageNode> = nodes.iter().rev().take(IMPROVEMENT_WINDOW).collect();
-    let scored: Vec<&LineageNode> = window.iter().rev().filter(|n| n.fitness.is_some()).copied().collect();
+    let scored: Vec<&LineageNode> = window
+        .iter()
+        .rev()
+        .filter(|n| n.fitness.is_some())
+        .copied()
+        .collect();
 
     if scored.len() >= 2 {
         let oldest_fitness = scored[0].fitness.unwrap();
@@ -187,10 +192,7 @@ mod tests {
     #[test]
     fn parse_iso8601_roundtrip() {
         // 1970-01-01T00:00:00.000Z → 0
-        assert_eq!(
-            parse_iso8601_to_ms("1970-01-01T00:00:00.000Z"),
-            Some(0)
-        );
+        assert_eq!(parse_iso8601_to_ms("1970-01-01T00:00:00.000Z"), Some(0));
         // 2026-01-01T00:00:00.000Z → 1_767_225_600_000
         assert_eq!(
             parse_iso8601_to_ms("2026-01-01T00:00:00.000Z"),

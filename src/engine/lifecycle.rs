@@ -115,9 +115,7 @@ impl EngineLifecycle {
         match self.boot().await {
             Ok(()) => Ok(()),
             Err(LifecycleError::AlreadyRunning) => Ok(()),
-            Err(LifecycleError::BootLockHeld { .. }) => {
-                self.wait_for_healthy().await
-            }
+            Err(LifecycleError::BootLockHeld { .. }) => self.wait_for_healthy().await,
             Err(e) => Err(e),
         }
     }
@@ -287,10 +285,10 @@ impl EngineLifecycle {
 mod tests {
     use super::*;
     use crate::config::Ports;
-    use axum::routing::get;
-    use axum::response::IntoResponse;
     use axum::Json;
     use axum::Router;
+    use axum::response::IntoResponse;
+    use axum::routing::get;
     use serde_json::json;
     use std::path::Path;
     use std::sync::atomic::{AtomicU64, Ordering};
@@ -299,11 +297,7 @@ mod tests {
 
     fn tmp_state() -> StateDir {
         let n = TMP.fetch_add(1, Ordering::SeqCst);
-        let p = std::env::temp_dir().join(format!(
-            "castor-lifecycle-{}-{}",
-            std::process::id(),
-            n
-        ));
+        let p = std::env::temp_dir().join(format!("castor-lifecycle-{}-{}", std::process::id(), n));
         let s = StateDir::new(p);
         s.ensure().unwrap();
         s
@@ -434,11 +428,7 @@ mod tests {
         let state = tmp_state();
         let marker = state.root().join("launched.marker");
         let (_base, port) = start_mock(vec!["test-model".into()], u64::MAX).await;
-        let mut cfg = test_config(
-            &state,
-            Some(&format!("touch {}", marker.display())),
-            None,
-        );
+        let mut cfg = test_config(&state, Some(&format!("touch {}", marker.display())), None);
         cfg.ports.engine = port;
         let lc = EngineLifecycle::new(&cfg, &state).with_boot_timeout(Duration::from_millis(2000));
         let err = lc.boot().await.unwrap_err();
@@ -477,7 +467,12 @@ mod tests {
             other => panic!("expected BootTimeout from heal, got {other:?}"),
         }
         assert!(
-            wait_for_marker(&stop_marker, Duration::from_secs(10), Duration::from_millis(50)).await,
+            wait_for_marker(
+                &stop_marker,
+                Duration::from_secs(10),
+                Duration::from_millis(50)
+            )
+            .await,
             "heal should have run stop_command"
         );
         assert_eq!(lc.wedge.read(), 0, "heal should reset the wedge counter");
@@ -494,7 +489,9 @@ mod tests {
             Some(&format!("sleep 0.2; touch {}", stop_marker.display())),
         );
         cfg.ports.engine = port;
-        let lc = Arc::new(EngineLifecycle::new(&cfg, &state).with_boot_timeout(Duration::from_millis(800)));
+        let lc = Arc::new(
+            EngineLifecycle::new(&cfg, &state).with_boot_timeout(Duration::from_millis(800)),
+        );
 
         let a = lc.clone();
         let ta = tokio::spawn(async move { a.heal().await });
@@ -591,9 +588,15 @@ mod tests {
             tokio::time::sleep(Duration::from_millis(20)).await;
         }
         let pid = pid.expect("pidfile should be written by the launch command");
-        assert!(Path::new(&format!("/proc/{pid}")).exists(), "child should be alive");
+        assert!(
+            Path::new(&format!("/proc/{pid}")).exists(),
+            "child should be alive"
+        );
 
         lc.stop().await.unwrap();
-        assert!(!Path::new(&format!("/proc/{pid}")).exists(), "group should be dead");
+        assert!(
+            !Path::new(&format!("/proc/{pid}")).exists(),
+            "group should be dead"
+        );
     }
 }

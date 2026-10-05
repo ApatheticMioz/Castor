@@ -254,16 +254,20 @@ mod tests {
     #[test]
     fn best_parent_picks_fitter() {
         let mut lin = Lineage::default();
-        lin.add_node(node("a", &[], Some(1.0), "2026-01-01T00:00:00Z")).unwrap();
-        lin.add_node(node("b", &["a"], Some(2.0), "2026-01-02T00:00:00Z")).unwrap();
+        lin.add_node(node("a", &[], Some(1.0), "2026-01-01T00:00:00Z"))
+            .unwrap();
+        lin.add_node(node("b", &["a"], Some(2.0), "2026-01-02T00:00:00Z"))
+            .unwrap();
         assert_eq!(lin.best_parent().unwrap().id, "b");
     }
 
     #[test]
     fn best_parent_tie_broken_by_earliest() {
         let mut lin = Lineage::default();
-        lin.add_node(node("a", &[], Some(1.0), "2026-01-02T00:00:00Z")).unwrap();
-        lin.add_node(node("b", &[], Some(1.0), "2026-01-01T00:00:00Z")).unwrap();
+        lin.add_node(node("a", &[], Some(1.0), "2026-01-02T00:00:00Z"))
+            .unwrap();
+        lin.add_node(node("b", &[], Some(1.0), "2026-01-01T00:00:00Z"))
+            .unwrap();
         assert_eq!(lin.best_parent().unwrap().id, "b");
     }
 
@@ -274,10 +278,7 @@ mod tests {
         let err = lin
             .add_node(node("b", &["ghost"], Some(2.0), "t2"))
             .unwrap_err();
-        assert_eq!(
-            err,
-            LineageError::UnknownParent("ghost".into(), "b".into())
-        );
+        assert_eq!(err, LineageError::UnknownParent("ghost".into(), "b".into()));
     }
 
     #[test]
@@ -333,9 +334,12 @@ mod tests {
     #[test]
     fn head_is_best_leaf() {
         let mut lin = Lineage::default();
-        lin.add_node(node("a", &[], Some(1.0), "2026-01-01T00:00:00Z")).unwrap();
-        lin.add_node(node("b", &["a"], Some(2.0), "2026-01-02T00:00:00Z")).unwrap();
-        lin.add_node(node("c", &["a"], Some(3.0), "2026-01-03T00:00:00Z")).unwrap();
+        lin.add_node(node("a", &[], Some(1.0), "2026-01-01T00:00:00Z"))
+            .unwrap();
+        lin.add_node(node("b", &["a"], Some(2.0), "2026-01-02T00:00:00Z"))
+            .unwrap();
+        lin.add_node(node("c", &["a"], Some(3.0), "2026-01-03T00:00:00Z"))
+            .unwrap();
         // 'a' is not a leaf (parent of b and c); the best leaf is 'c'.
         assert_eq!(lin.head().unwrap().id, "c");
         assert_eq!(lin.best_parent().unwrap().id, "c");
@@ -345,8 +349,10 @@ mod tests {
     fn save_load_roundtrip() {
         let p = tmp_path("roundtrip");
         let mut lin = Lineage::default();
-        lin.add_node(node("a", &[], Some(1.0), "2026-01-01T00:00:00Z")).unwrap();
-        lin.add_node(node("b", &["a"], Some(2.0), "2026-01-02T00:00:00Z")).unwrap();
+        lin.add_node(node("a", &[], Some(1.0), "2026-01-01T00:00:00Z"))
+            .unwrap();
+        lin.add_node(node("b", &["a"], Some(2.0), "2026-01-02T00:00:00Z"))
+            .unwrap();
         lin.save_to(&p).unwrap();
         let loaded = Lineage::load(&p).unwrap();
         assert_eq!(loaded.nodes().len(), 2);

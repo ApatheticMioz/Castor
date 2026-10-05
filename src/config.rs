@@ -164,11 +164,10 @@ pub fn load_with(get_env: impl Fn(&str) -> Option<String>) -> Result<LoadedConfi
 
     let file_path = state_dir.join("config.json");
     let file = if file_path.is_file() {
-        let raw = std::fs::read_to_string(&file_path)
-            .map_err(|e| ConfigError::Read {
-                path: file_path.clone(),
-                source: e,
-            })?;
+        let raw = std::fs::read_to_string(&file_path).map_err(|e| ConfigError::Read {
+            path: file_path.clone(),
+            source: e,
+        })?;
         Some(
             serde_json::from_str::<FileConfig>(&raw).map_err(|e| ConfigError::Parse {
                 path: file_path.clone(),
@@ -180,45 +179,46 @@ pub fn load_with(get_env: impl Fn(&str) -> Option<String>) -> Result<LoadedConfi
     };
     let file = file.as_ref();
 
-    let env_str = |key: &str| -> Option<String> {
-        get_env(key).filter(|v| !v.is_empty())
-    };
+    let env_str = |key: &str| -> Option<String> { get_env(key).filter(|v| !v.is_empty()) };
     let env_u32 = |key: &str| -> Result<Option<u32>, ConfigError> {
         match get_env(key) {
-            Some(v) if !v.is_empty() => v
-                .parse::<u32>()
-                .map(Some)
-                .map_err(|e| ConfigError::InvalidValue {
-                    key: key.to_string(),
-                    value: v,
-                    reason: e.to_string(),
-                }),
+            Some(v) if !v.is_empty() => {
+                v.parse::<u32>()
+                    .map(Some)
+                    .map_err(|e| ConfigError::InvalidValue {
+                        key: key.to_string(),
+                        value: v,
+                        reason: e.to_string(),
+                    })
+            }
             _ => Ok(None),
         }
     };
     let env_u16 = |key: &str| -> Result<Option<u16>, ConfigError> {
         match get_env(key) {
-            Some(v) if !v.is_empty() => v
-                .parse::<u16>()
-                .map(Some)
-                .map_err(|e| ConfigError::InvalidValue {
-                    key: key.to_string(),
-                    value: v,
-                    reason: e.to_string(),
-                }),
+            Some(v) if !v.is_empty() => {
+                v.parse::<u16>()
+                    .map(Some)
+                    .map_err(|e| ConfigError::InvalidValue {
+                        key: key.to_string(),
+                        value: v,
+                        reason: e.to_string(),
+                    })
+            }
             _ => Ok(None),
         }
     };
     let env_u64 = |key: &str| -> Result<Option<u64>, ConfigError> {
         match get_env(key) {
-            Some(v) if !v.is_empty() => v
-                .parse::<u64>()
-                .map(Some)
-                .map_err(|e| ConfigError::InvalidValue {
-                    key: key.to_string(),
-                    value: v,
-                    reason: e.to_string(),
-                }),
+            Some(v) if !v.is_empty() => {
+                v.parse::<u64>()
+                    .map(Some)
+                    .map_err(|e| ConfigError::InvalidValue {
+                        key: key.to_string(),
+                        value: v,
+                        reason: e.to_string(),
+                    })
+            }
             _ => Ok(None),
         }
     };
@@ -232,22 +232,35 @@ pub fn load_with(get_env: impl Fn(&str) -> Option<String>) -> Result<LoadedConfi
 
     let file_ports = file.and_then(|f| f.ports.as_ref());
 
-    let (model, src_model) =
-        pick_str(env_str("CASTOR_MODEL"), file.and_then(|f| f.model.clone()));
-    let (base_url, src_base_url) =
-        pick_str(env_str("CASTOR_BASE_URL"), file.and_then(|f| f.base_url.clone()));
-    let (api_key, src_api_key) =
-        pick_str(env_str("CASTOR_API_KEY"), file.and_then(|f| f.api_key.clone()));
-    let (engine_type, src_engine_type) =
-        pick_str(env_str("CASTOR_ENGINE_TYPE"), file.and_then(|f| f.engine_type.clone()));
-    let (launch_command, src_launch_command) =
-        pick_str(env_str("CASTOR_LAUNCH_COMMAND"), file.and_then(|f| f.launch_command.clone()));
-    let (stop_command, src_stop_command) =
-        pick_str(env_str("CASTOR_STOP_COMMAND"), file.and_then(|f| f.stop_command.clone()));
-    let (searxng_url, src_searxng_url) =
-        pick_str(env_str("CASTOR_SEARXNG_URL"), file.and_then(|f| f.searxng_url.clone()));
-    let (brave_api_key, src_brave_api_key) =
-        pick_str(env_str("CASTOR_BRAVE_API_KEY"), file.and_then(|f| f.brave_api_key.clone()));
+    let (model, src_model) = pick_str(env_str("CASTOR_MODEL"), file.and_then(|f| f.model.clone()));
+    let (base_url, src_base_url) = pick_str(
+        env_str("CASTOR_BASE_URL"),
+        file.and_then(|f| f.base_url.clone()),
+    );
+    let (api_key, src_api_key) = pick_str(
+        env_str("CASTOR_API_KEY"),
+        file.and_then(|f| f.api_key.clone()),
+    );
+    let (engine_type, src_engine_type) = pick_str(
+        env_str("CASTOR_ENGINE_TYPE"),
+        file.and_then(|f| f.engine_type.clone()),
+    );
+    let (launch_command, src_launch_command) = pick_str(
+        env_str("CASTOR_LAUNCH_COMMAND"),
+        file.and_then(|f| f.launch_command.clone()),
+    );
+    let (stop_command, src_stop_command) = pick_str(
+        env_str("CASTOR_STOP_COMMAND"),
+        file.and_then(|f| f.stop_command.clone()),
+    );
+    let (searxng_url, src_searxng_url) = pick_str(
+        env_str("CASTOR_SEARXNG_URL"),
+        file.and_then(|f| f.searxng_url.clone()),
+    );
+    let (brave_api_key, src_brave_api_key) = pick_str(
+        env_str("CASTOR_BRAVE_API_KEY"),
+        file.and_then(|f| f.brave_api_key.clone()),
+    );
 
     let (max_context, src_max_context) =
         pick_opt_u32(env_max_context, file.and_then(|f| f.max_context));
@@ -268,13 +281,9 @@ pub fn load_with(get_env: impl Fn(&str) -> Option<String>) -> Result<LoadedConfi
     );
 
     // Probe budget: env > file > default (4).
-    let env_probe_budget: Option<usize> =
-        env_u32("CASTOR_PROBE_BUDGET")?.map(|v| v as usize);
-    let (probe_budget, src_probe_budget) = pick_usize(
-        env_probe_budget,
-        file.and_then(|f| f.probe_budget),
-        4,
-    );
+    let env_probe_budget: Option<usize> = env_u32("CASTOR_PROBE_BUDGET")?.map(|v| v as usize);
+    let (probe_budget, src_probe_budget) =
+        pick_usize(env_probe_budget, file.and_then(|f| f.probe_budget), 4);
 
     let (ports, (src_port_engine, src_port_status, src_port_proxy)) = {
         let (engine, src_port_engine) =
@@ -341,20 +350,60 @@ pub fn format_loaded(loaded: &LoadedConfig) -> String {
     let mut out = String::new();
     out.push_str("castor effective config\n");
     row(&mut out, "model", &display(c.model.as_deref()), s.model);
-    row(&mut out, "base_url", &display(c.base_url.as_deref()), s.base_url);
-    row(&mut out, "api_key", &display_secret(c.api_key.as_deref()), s.api_key);
-    row(&mut out, "engine_type", &display(c.engine_type.as_deref()), s.engine_type);
-    row(&mut out, "launch_command", &display(c.launch_command.as_deref()), s.launch_command);
-    row(&mut out, "stop_command", &display(c.stop_command.as_deref()), s.stop_command);
+    row(
+        &mut out,
+        "base_url",
+        &display(c.base_url.as_deref()),
+        s.base_url,
+    );
+    row(
+        &mut out,
+        "api_key",
+        &display_secret(c.api_key.as_deref()),
+        s.api_key,
+    );
+    row(
+        &mut out,
+        "engine_type",
+        &display(c.engine_type.as_deref()),
+        s.engine_type,
+    );
+    row(
+        &mut out,
+        "launch_command",
+        &display(c.launch_command.as_deref()),
+        s.launch_command,
+    );
+    row(
+        &mut out,
+        "stop_command",
+        &display(c.stop_command.as_deref()),
+        s.stop_command,
+    );
     row(
         &mut out,
         "max_context",
         &display(c.max_context.map(|v| v.to_string()).as_deref()),
         s.max_context,
     );
-    row(&mut out, "ports.engine", &c.ports.engine.to_string(), s.port_engine);
-    row(&mut out, "ports.status", &c.ports.status.to_string(), s.port_status);
-    row(&mut out, "ports.proxy", &c.ports.proxy.to_string(), s.port_proxy);
+    row(
+        &mut out,
+        "ports.engine",
+        &c.ports.engine.to_string(),
+        s.port_engine,
+    );
+    row(
+        &mut out,
+        "ports.status",
+        &c.ports.status.to_string(),
+        s.port_status,
+    );
+    row(
+        &mut out,
+        "ports.proxy",
+        &c.ports.proxy.to_string(),
+        s.port_proxy,
+    );
     row(
         &mut out,
         "max_concurrent_tasks",
@@ -362,7 +411,12 @@ pub fn format_loaded(loaded: &LoadedConfig) -> String {
         s.max_concurrent_tasks,
     );
     row(&mut out, "tool_prefix", &c.tool_prefix, s.tool_prefix);
-    row(&mut out, "searxng_url", &display(c.searxng_url.as_deref()), s.searxng_url);
+    row(
+        &mut out,
+        "searxng_url",
+        &display(c.searxng_url.as_deref()),
+        s.searxng_url,
+    );
     row(
         &mut out,
         "brave_api_key",
@@ -381,7 +435,12 @@ pub fn format_loaded(loaded: &LoadedConfig) -> String {
         &c.probe_budget.to_string(),
         s.probe_budget,
     );
-    row(&mut out, "state_dir", &c.state_dir.display().to_string(), s.state_dir);
+    row(
+        &mut out,
+        "state_dir",
+        &c.state_dir.display().to_string(),
+        s.state_dir,
+    );
     out
 }
 
@@ -397,7 +456,12 @@ pub fn print_effective() -> Result<(), ConfigError> {
 }
 
 fn row(out: &mut String, name: &str, value: &str, source: Source) {
-    out.push_str(&format!("{:<20} = {:<40} [{}]\n", name, value, source.as_str()));
+    out.push_str(&format!(
+        "{:<20} = {:<40} [{}]\n",
+        name,
+        value,
+        source.as_str()
+    ));
 }
 
 fn display(v: Option<&str>) -> String {
@@ -420,7 +484,11 @@ fn pick_str(env: Option<String>, file: Option<String>) -> (Option<String>, Sourc
     }
 }
 
-fn pick_str_default(env: Option<String>, file: Option<String>, default: String) -> (String, Source) {
+fn pick_str_default(
+    env: Option<String>,
+    file: Option<String>,
+    default: String,
+) -> (String, Source) {
     match (env.as_ref(), file.as_ref()) {
         (Some(_), _) => (env.unwrap(), Source::Env),
         (None, Some(_)) => (file.unwrap(), Source::File),
@@ -503,27 +571,23 @@ mod tests {
         if let Some(json) = file_json {
             std::fs::write(dir.join("config.json"), json).unwrap();
         }
-        let mut env: Vec<(String, String)> =
-            env.iter().map(|(k, v)| (k.to_string(), v.to_string())).collect();
+        let mut env: Vec<(String, String)> = env
+            .iter()
+            .map(|(k, v)| (k.to_string(), v.to_string()))
+            .collect();
         if !env.iter().any(|(k, _)| k == "CASTOR_STATE_DIR") {
             env.push(("CASTOR_STATE_DIR".to_string(), dir.display().to_string()));
         }
-        load_with(move |k: &str| {
-            env.iter()
-                .find(|(ek, _)| ek == k)
-                .map(|(_, v)| v.clone())
-        })
-        .unwrap()
+        load_with(move |k: &str| env.iter().find(|(ek, _)| ek == k).map(|(_, v)| v.clone()))
+            .unwrap()
     }
 
     fn load_with_env(env: &[(&str, &str)]) -> Result<LoadedConfig, ConfigError> {
-        let env: Vec<(String, String)> =
-            env.iter().map(|(k, v)| (k.to_string(), v.to_string())).collect();
-        load_with(move |k: &str| {
-            env.iter()
-                .find(|(ek, _)| ek == k)
-                .map(|(_, v)| v.clone())
-        })
+        let env: Vec<(String, String)> = env
+            .iter()
+            .map(|(k, v)| (k.to_string(), v.to_string()))
+            .collect();
+        load_with(move |k: &str| env.iter().find(|(ek, _)| ek == k).map(|(_, v)| v.clone()))
     }
 
     /// Check env > file > default for one optional string field.
@@ -574,16 +638,29 @@ mod tests {
         }"#;
         let l = load_case(&[], Some(json));
         assert_eq!(l.config.model.as_deref(), Some("m1"));
-        assert_eq!(l.config.base_url.as_deref(), Some("https://api.example.com/v1"));
+        assert_eq!(
+            l.config.base_url.as_deref(),
+            Some("https://api.example.com/v1")
+        );
         assert_eq!(l.config.api_key.as_deref(), Some("sk-file"));
         assert_eq!(l.config.engine_type.as_deref(), Some("qwen"));
         assert_eq!(l.config.launch_command.as_deref(), Some("qwen -s"));
         assert_eq!(l.config.stop_command.as_deref(), Some("qwen -k"));
         assert_eq!(l.config.max_context, Some(32768));
-        assert_eq!(l.config.ports, Ports { engine: 1, status: 2, proxy: 3 });
+        assert_eq!(
+            l.config.ports,
+            Ports {
+                engine: 1,
+                status: 2,
+                proxy: 3
+            }
+        );
         assert_eq!(l.config.max_concurrent_tasks, 7);
         assert_eq!(l.config.tool_prefix, "cast");
-        assert_eq!(l.config.searxng_url.as_deref(), Some("https://searxng.example"));
+        assert_eq!(
+            l.config.searxng_url.as_deref(),
+            Some("https://searxng.example")
+        );
         assert_eq!(l.config.brave_api_key.as_deref(), Some("bkey"));
         assert_eq!(l.config.boot_timeout_secs, 240);
         // every file-provided field is annotated as File
@@ -617,9 +694,13 @@ mod tests {
         check_str_field("CASTOR_API_KEY", "api_key", "env-key", "file-key", |l| {
             (l.config.api_key.clone(), l.sources.api_key)
         });
-        check_str_field("CASTOR_ENGINE_TYPE", "engine_type", "env-et", "file-et", |l| {
-            (l.config.engine_type.clone(), l.sources.engine_type)
-        });
+        check_str_field(
+            "CASTOR_ENGINE_TYPE",
+            "engine_type",
+            "env-et",
+            "file-et",
+            |l| (l.config.engine_type.clone(), l.sources.engine_type),
+        );
         check_str_field(
             "CASTOR_LAUNCH_COMMAND",
             "launch_command",
@@ -627,20 +708,35 @@ mod tests {
             "file-lc",
             |l| (l.config.launch_command.clone(), l.sources.launch_command),
         );
-        check_str_field("CASTOR_STOP_COMMAND", "stop_command", "env-sc", "file-sc", |l| {
-            (l.config.stop_command.clone(), l.sources.stop_command)
-        });
-        check_str_field("CASTOR_SEARXNG_URL", "searxng_url", "env-sx", "file-sx", |l| {
-            (l.config.searxng_url.clone(), l.sources.searxng_url)
-        });
-        check_str_field("CASTOR_BRAVE_API_KEY", "brave_api_key", "env-bk", "file-bk", |l| {
-            (l.config.brave_api_key.clone(), l.sources.brave_api_key)
-        });
+        check_str_field(
+            "CASTOR_STOP_COMMAND",
+            "stop_command",
+            "env-sc",
+            "file-sc",
+            |l| (l.config.stop_command.clone(), l.sources.stop_command),
+        );
+        check_str_field(
+            "CASTOR_SEARXNG_URL",
+            "searxng_url",
+            "env-sx",
+            "file-sx",
+            |l| (l.config.searxng_url.clone(), l.sources.searxng_url),
+        );
+        check_str_field(
+            "CASTOR_BRAVE_API_KEY",
+            "brave_api_key",
+            "env-bk",
+            "file-bk",
+            |l| (l.config.brave_api_key.clone(), l.sources.brave_api_key),
+        );
     }
 
     #[test]
     fn precedence_max_context() {
-        let l = load_case(&[("CASTOR_MAX_CONTEXT", "4096")], Some(r#"{"max_context":8192}"#));
+        let l = load_case(
+            &[("CASTOR_MAX_CONTEXT", "4096")],
+            Some(r#"{"max_context":8192}"#),
+        );
         assert_eq!(
             (l.config.max_context, l.sources.max_context),
             (Some(4096), Source::Env)
@@ -664,24 +760,36 @@ mod tests {
             Some(r#"{"max_concurrent_tasks":3}"#),
         );
         assert_eq!(
-            (l.config.max_concurrent_tasks, l.sources.max_concurrent_tasks),
+            (
+                l.config.max_concurrent_tasks,
+                l.sources.max_concurrent_tasks
+            ),
             (5, Source::Env)
         );
         let l = load_case(&[], Some(r#"{"max_concurrent_tasks":3}"#));
         assert_eq!(
-            (l.config.max_concurrent_tasks, l.sources.max_concurrent_tasks),
+            (
+                l.config.max_concurrent_tasks,
+                l.sources.max_concurrent_tasks
+            ),
             (3, Source::File)
         );
         let l = load_case(&[], None);
         assert_eq!(
-            (l.config.max_concurrent_tasks, l.sources.max_concurrent_tasks),
+            (
+                l.config.max_concurrent_tasks,
+                l.sources.max_concurrent_tasks
+            ),
             (1, Source::Default)
         );
     }
 
     #[test]
     fn precedence_tool_prefix() {
-        let l = load_case(&[("CASTOR_TOOL_PREFIX", "envp")], Some(r#"{"tool_prefix":"filep"}"#));
+        let l = load_case(
+            &[("CASTOR_TOOL_PREFIX", "envp")],
+            Some(r#"{"tool_prefix":"filep"}"#),
+        );
         assert_eq!(
             (l.config.tool_prefix.as_str(), l.sources.tool_prefix),
             ("envp", Source::Env)
@@ -707,9 +815,18 @@ mod tests {
             ],
             Some(r#"{"ports":{"engine":100,"status":200,"proxy":300}}"#),
         );
-        assert_eq!((l.config.ports.engine, l.sources.port_engine), (1111, Source::Env));
-        assert_eq!((l.config.ports.status, l.sources.port_status), (2222, Source::Env));
-        assert_eq!((l.config.ports.proxy, l.sources.port_proxy), (300, Source::File));
+        assert_eq!(
+            (l.config.ports.engine, l.sources.port_engine),
+            (1111, Source::Env)
+        );
+        assert_eq!(
+            (l.config.ports.status, l.sources.port_status),
+            (2222, Source::Env)
+        );
+        assert_eq!(
+            (l.config.ports.proxy, l.sources.port_proxy),
+            (300, Source::File)
+        );
         let l = load_case(&[], None);
         assert_eq!(l.config.ports, Ports::default());
         assert_eq!(l.sources.port_engine, Source::Default);
@@ -727,18 +844,39 @@ mod tests {
     #[test]
     fn partial_file_merges_over_defaults() {
         let l = load_case(&[], Some(r#"{"model":"m","ports":{"status":1234}}"#));
-        assert_eq!((l.config.model.as_deref(), l.sources.model), (Some("m"), Source::File));
-        assert_eq!((l.config.ports.status, l.sources.port_status), (1234, Source::File));
+        assert_eq!(
+            (l.config.model.as_deref(), l.sources.model),
+            (Some("m"), Source::File)
+        );
+        assert_eq!(
+            (l.config.ports.status, l.sources.port_status),
+            (1234, Source::File)
+        );
         // unspecified port falls back to the built-in default
-        assert_eq!((l.config.ports.engine, l.sources.port_engine), (18020, Source::Default));
-        assert_eq!((l.config.ports.proxy, l.sources.port_proxy), (18022, Source::Default));
+        assert_eq!(
+            (l.config.ports.engine, l.sources.port_engine),
+            (18020, Source::Default)
+        );
+        assert_eq!(
+            (l.config.ports.proxy, l.sources.port_proxy),
+            (18022, Source::Default)
+        );
         // other defaults
         assert_eq!(
-            (l.config.max_concurrent_tasks, l.sources.max_concurrent_tasks),
+            (
+                l.config.max_concurrent_tasks,
+                l.sources.max_concurrent_tasks
+            ),
             (1, Source::Default)
         );
-        assert_eq!((l.config.tool_prefix.as_str(), l.sources.tool_prefix), ("castor", Source::Default));
-        assert_eq!((l.config.max_context, l.sources.max_context), (None, Source::Default));
+        assert_eq!(
+            (l.config.tool_prefix.as_str(), l.sources.tool_prefix),
+            ("castor", Source::Default)
+        );
+        assert_eq!(
+            (l.config.max_context, l.sources.max_context),
+            (None, Source::Default)
+        );
         assert_eq!(l.config.base_url, None);
     }
 
@@ -761,7 +899,11 @@ mod tests {
     #[test]
     fn unknown_key_in_file_fails() {
         let dir = tmp_dir();
-        std::fs::write(dir.join("config.json"), r#"{"model":"m","model_alias":"x"}"#).unwrap();
+        std::fs::write(
+            dir.join("config.json"),
+            r#"{"model":"m","model_alias":"x"}"#,
+        )
+        .unwrap();
         let err = load_with_env(&[("CASTOR_STATE_DIR", &dir.display().to_string())]).unwrap_err();
         match &err {
             ConfigError::Parse { .. } => {}
@@ -788,7 +930,10 @@ mod tests {
 
     #[test]
     fn precedence_probe_budget() {
-        let l = load_case(&[("CASTOR_PROBE_BUDGET", "8")], Some(r#"{"probe_budget":6}"#));
+        let l = load_case(
+            &[("CASTOR_PROBE_BUDGET", "8")],
+            Some(r#"{"probe_budget":6}"#),
+        );
         assert_eq!(
             (l.config.probe_budget, l.sources.probe_budget),
             (8, Source::Env)
@@ -811,9 +956,15 @@ mod tests {
             &[("CASTOR_PORT_PROXY", "9999")],
             Some(r#"{"ports":{"proxy":8888}}"#),
         );
-        assert_eq!((l.config.ports.proxy, l.sources.port_proxy), (9999, Source::Env));
+        assert_eq!(
+            (l.config.ports.proxy, l.sources.port_proxy),
+            (9999, Source::Env)
+        );
         let l = load_case(&[], Some(r#"{"ports":{"proxy":8888}}"#));
-        assert_eq!((l.config.ports.proxy, l.sources.port_proxy), (8888, Source::File));
+        assert_eq!(
+            (l.config.ports.proxy, l.sources.port_proxy),
+            (8888, Source::File)
+        );
     }
 
     #[test]

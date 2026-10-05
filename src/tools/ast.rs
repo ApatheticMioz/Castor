@@ -26,8 +26,17 @@ use super::sandbox::{self, SandboxError};
 
 /// Directories skipped during recursive walks (mirrors `sandbox_fs.js`).
 const IGNORED_DIRS: &[&str] = &[
-    ".venv", "venv", "node_modules", ".git", "__pycache__",
-    "target", "dist", "build", "vendor", ".idea", ".vscode",
+    ".venv",
+    "venv",
+    "node_modules",
+    ".git",
+    "__pycache__",
+    "target",
+    "dist",
+    "build",
+    "vendor",
+    ".idea",
+    ".vscode",
 ];
 
 /// Files larger than this are skipped (implausible for AST).
@@ -162,7 +171,9 @@ pub fn ast_search(
     path: Option<&str>,
 ) -> Result<Vec<Match>, AstError> {
     if pattern.trim().is_empty() {
-        return Err(AstError::InvalidArgs("AST search requires a non-empty pattern".into()));
+        return Err(AstError::InvalidArgs(
+            "AST search requires a non-empty pattern".into(),
+        ));
     }
     let raw = match path {
         Some(p) if !p.trim().is_empty() => p.trim(),
@@ -172,8 +183,8 @@ pub fn ast_search(
     let files = resolve_files(&target)?;
 
     let target_lang = parse_lang(lang)?;
-    let pat = Pattern::try_new(pattern, target_lang)
-        .map_err(|e| AstError::Pattern(e.to_string()))?;
+    let pat =
+        Pattern::try_new(pattern, target_lang).map_err(|e| AstError::Pattern(e.to_string()))?;
 
     let mut matches = Vec::new();
     for file in &files {
@@ -218,7 +229,9 @@ pub fn ast_replace(
     path: Option<&str>,
 ) -> Result<ReplaceSummary, AstError> {
     if pattern.trim().is_empty() {
-        return Err(AstError::InvalidArgs("AST replace requires a non-empty pattern".into()));
+        return Err(AstError::InvalidArgs(
+            "AST replace requires a non-empty pattern".into(),
+        ));
     }
     let raw = match path {
         Some(p) if !p.trim().is_empty() => p.trim(),
@@ -229,8 +242,7 @@ pub fn ast_replace(
     let target_lang = parse_lang(lang)?;
 
     // Validate pattern syntax upfront.
-    Pattern::try_new(pattern, target_lang)
-        .map_err(|e| AstError::Pattern(e.to_string()))?;
+    Pattern::try_new(pattern, target_lang).map_err(|e| AstError::Pattern(e.to_string()))?;
 
     let mut summary = ReplaceSummary {
         files_scanned: files.len(),
@@ -290,13 +302,15 @@ fn replace_in_memory(
     lang: SupportLang,
 ) -> Result<(String, usize), AstError> {
     let doc = lang.ast_grep(original);
-    let pat = Pattern::try_new(pattern, lang)
-        .map_err(|e| AstError::Pattern(e.to_string()))?;
+    let pat = Pattern::try_new(pattern, lang).map_err(|e| AstError::Pattern(e.to_string()))?;
 
     // Collect the edits as owned values (they do not borrow the doc), so the
     // matches can be dropped before we mutate the source.
-    let edits: Vec<ast_grep_core::source::Edit<String>> =
-        doc.root().find_all(pat).map(|m| m.replace_by(replacement)).collect();
+    let edits: Vec<ast_grep_core::source::Edit<String>> = doc
+        .root()
+        .find_all(pat)
+        .map(|m| m.replace_by(replacement))
+        .collect();
     if edits.is_empty() {
         return Ok((original.to_string(), 0));
     }
@@ -305,7 +319,10 @@ fn replace_in_memory(
     let mut src = original.to_string();
     for edit in edits.iter().rev() {
         let end = edit.position + edit.deleted_length;
-        src.replace_range(edit.position..end, &String::from_utf8_lossy(&edit.inserted_text));
+        src.replace_range(
+            edit.position..end,
+            &String::from_utf8_lossy(&edit.inserted_text),
+        );
     }
 
     Ok((src, edits.len()))
@@ -321,10 +338,7 @@ fn syntax_gate(content: &str, lang: SupportLang) -> bool {
     has_error
 }
 
-fn walk_for_errors(
-    node: &Node<ast_grep_core::tree_sitter::StrDoc<SupportLang>>,
-    out: &mut bool,
-) {
+fn walk_for_errors(node: &Node<ast_grep_core::tree_sitter::StrDoc<SupportLang>>, out: &mut bool) {
     if *out {
         return;
     }
@@ -343,11 +357,7 @@ mod tests {
     use super::*;
 
     fn test_root(name: &str) -> PathBuf {
-        let root = std::env::temp_dir().join(format!(
-            "castor_ast_{}_{}",
-            std::process::id(),
-            name
-        ));
+        let root = std::env::temp_dir().join(format!("castor_ast_{}_{}", std::process::id(), name));
         let _ = fs::remove_dir_all(&root);
         fs::create_dir_all(root.join("src")).unwrap();
         root
@@ -357,11 +367,7 @@ mod tests {
     fn search_finds_pattern_in_fixture() {
         let root = test_root("search");
         let file = root.join("src").join("app.ts");
-        fs::write(
-            &file,
-            "function greet(name) {\n  return `hi ${name}`;\n}\n",
-        )
-        .unwrap();
+        fs::write(&file, "function greet(name) {\n  return `hi ${name}`;\n}\n").unwrap();
 
         let matches = ast_search(&root, "function $NAME($$$ARGS) { $$$BODY }", "ts", None).unwrap();
         assert!(!matches.is_empty(), "expected at least one match");
@@ -383,7 +389,8 @@ mod tests {
         )
         .unwrap();
 
-        let matches = ast_search(&root, "fn $NAME($$$ARGS) -> $RET { $$$BODY }", "rs", None).unwrap();
+        let matches =
+            ast_search(&root, "fn $NAME($$$ARGS) -> $RET { $$$BODY }", "rs", None).unwrap();
         assert!(!matches.is_empty(), "expected at least one match");
         let m = &matches[0];
         assert_eq!(m.file, file.to_string_lossy());
@@ -414,8 +421,13 @@ mod tests {
         assert_eq!(rs_matches[0].file, rs_file.to_string_lossy());
 
         // Searching TS pattern must succeed across mixed dir, ignoring the .rs file without error.
-        let ts_matches =
-            ast_search(&root, "function $NAME($$$ARGS): $RET { $$$BODY }", "ts", None).unwrap();
+        let ts_matches = ast_search(
+            &root,
+            "function $NAME($$$ARGS): $RET { $$$BODY }",
+            "ts",
+            None,
+        )
+        .unwrap();
         assert_eq!(ts_matches.len(), 1);
         assert_eq!(ts_matches[0].file, ts_file.to_string_lossy());
 
@@ -627,8 +639,14 @@ mod tests {
 
         assert_eq!(summary.files_applied, 1);
         assert_eq!(summary.applied, vec![file_a.to_string_lossy().to_string()]);
-        assert_eq!(fs::read_to_string(&file_a).unwrap(), "function updated() {}\n");
-        assert_eq!(fs::read_to_string(&file_b).unwrap(), "function target() {}\n");
+        assert_eq!(
+            fs::read_to_string(&file_a).unwrap(),
+            "function updated() {}\n"
+        );
+        assert_eq!(
+            fs::read_to_string(&file_b).unwrap(),
+            "function target() {}\n"
+        );
 
         let _ = fs::remove_dir_all(&root);
     }
@@ -652,7 +670,10 @@ mod tests {
         )
         .unwrap();
 
-        assert_eq!(summary.files_rolled_back, 1, "expected one rolled-back file");
+        assert_eq!(
+            summary.files_rolled_back, 1,
+            "expected one rolled-back file"
+        );
         assert_eq!(summary.files_applied, 0);
         assert_eq!(
             summary.rolled_back,

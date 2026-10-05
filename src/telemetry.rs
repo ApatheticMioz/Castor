@@ -175,7 +175,11 @@ impl<'writer> tracing_subscriber::fmt::MakeWriter<'writer> for FileSink {
         if let Some(parent) = self.path.parent() {
             let _ = fs::create_dir_all(parent);
         }
-        match OpenOptions::new().create(true).append(true).open(&self.path) {
+        match OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(&self.path)
+        {
             Ok(f) => Box::new(f),
             Err(_) => Box::new(NoopWriter),
         }
@@ -344,20 +348,16 @@ pub fn derive_stats(state_dir: &Path, opts: &StatsOptions) -> Stats {
     }
 
     // --- Derived averages / cost. ---
-    stats.avg_duration_ms = (stats.duration_count > 0).then(|| {
-        (stats.duration_sum as f64 / stats.duration_count as f64)
-            * 100.0
-            / 100.0
-    });
-    stats.estimated_cost_saved_usd =
-        (stats.total_prompt_tokens as f64 / 1_000_000.0) * PROMPT_COST_PER_MILLION
-            + (stats.total_completion_tokens as f64 / 1_000_000.0) * COMPLETION_COST_PER_MILLION;
+    stats.avg_duration_ms = (stats.duration_count > 0)
+        .then(|| (stats.duration_sum as f64 / stats.duration_count as f64) * 100.0 / 100.0);
+    stats.estimated_cost_saved_usd = (stats.total_prompt_tokens as f64 / 1_000_000.0)
+        * PROMPT_COST_PER_MILLION
+        + (stats.total_completion_tokens as f64 / 1_000_000.0) * COMPLETION_COST_PER_MILLION;
     stats.estimated_cost_saved_usd = (stats.estimated_cost_saved_usd * 100.0).round() / 100.0;
     stats.last_updated = now_iso();
 
     // Render the epoch-millisecond horizon accumulators to ISO-8601 UTC.
-    stats.first_recorded_session =
-        stats.first_ms.map(|ms| iso_from_ms(ms as u64));
+    stats.first_recorded_session = stats.first_ms.map(|ms| iso_from_ms(ms as u64));
     stats.last_recorded_session = stats.last_ms.map(|ms| iso_from_ms(ms as u64));
 
     stats
@@ -370,8 +370,7 @@ pub fn write_stats_json(state_dir: &Path, stats: &Stats) -> std::io::Result<Path
     fs::create_dir_all(&telemetry_dir)?;
     let out = telemetry_dir.join("stats.json");
     let tmp = telemetry_dir.join(format!("stats.json.tmp.{}", std::process::id()));
-    let body = serde_json::to_string_pretty(stats)
-        .map_err(std::io::Error::other)?;
+    let body = serde_json::to_string_pretty(stats).map_err(std::io::Error::other)?;
     fs::write(&tmp, body)?;
     fs::rename(&tmp, &out)?;
     Ok(out)
@@ -386,30 +385,66 @@ pub fn format_stats_card(stats: &Stats) -> String {
     out.push_str("└────────────────────────────────────────────────────────────────────────┘\n\n");
 
     out.push_str("📊 ACTIVITY & RUNTIME\n");
-    out.push_str(&format!("  • Turns:                   {}\n", stats.total_turns));
-    out.push_str(&format!("  • Sessions:                {}\n", stats.total_sessions));
-    out.push_str(&format!("  • Tasks Completed:         {}\n", stats.total_tasks_completed));
-    out.push_str(&format!("  • Tasks Failed:            {}\n", stats.total_tasks_failed));
-    out.push_str(&format!("  • Tasks Cancelled:         {}\n", stats.total_tasks_cancelled));
+    out.push_str(&format!(
+        "  • Turns:                   {}\n",
+        stats.total_turns
+    ));
+    out.push_str(&format!(
+        "  • Sessions:                {}\n",
+        stats.total_sessions
+    ));
+    out.push_str(&format!(
+        "  • Tasks Completed:         {}\n",
+        stats.total_tasks_completed
+    ));
+    out.push_str(&format!(
+        "  • Tasks Failed:            {}\n",
+        stats.total_tasks_failed
+    ));
+    out.push_str(&format!(
+        "  • Tasks Cancelled:         {}\n",
+        stats.total_tasks_cancelled
+    ));
     out.push_str(&format!(
         "  • Total Tool Calls:        {} ({} errors)\n",
         stats.total_tool_calls, stats.total_tool_errors
     ));
     if let Some(avg_ms) = stats.avg_duration_ms {
-        out.push_str(&format!("  • Avg Session Duration:    {:.2}s\n", avg_ms / 1000.0));
+        out.push_str(&format!(
+            "  • Avg Session Duration:    {:.2}s\n",
+            avg_ms / 1000.0
+        ));
     }
     out.push('\n');
 
     out.push_str("🧠 TOKEN EFFICIENCY\n");
-    out.push_str(&format!("  • Ingested Prompt Tokens:  {}\n", stats.total_prompt_tokens));
-    out.push_str(&format!("  • Generated Output Tokens: {}\n", stats.total_completion_tokens));
-    out.push_str(&format!("  • Reasoning Tokens:        {}\n", stats.total_reasoning_tokens));
+    out.push_str(&format!(
+        "  • Ingested Prompt Tokens:  {}\n",
+        stats.total_prompt_tokens
+    ));
+    out.push_str(&format!(
+        "  • Generated Output Tokens: {}\n",
+        stats.total_completion_tokens
+    ));
+    out.push_str(&format!(
+        "  • Reasoning Tokens:        {}\n",
+        stats.total_reasoning_tokens
+    ));
     out.push('\n');
 
-    out.push_str(&format!("💰 CLOUD ARBITRAGE ({} Rates)\n", stats.benchmark_model));
-    out.push_str(&format!("  • Virtual Cloud Cost:      ${:.2}\n", stats.estimated_cost_saved_usd));
+    out.push_str(&format!(
+        "💰 CLOUD ARBITRAGE ({} Rates)\n",
+        stats.benchmark_model
+    ));
+    out.push_str(&format!(
+        "  • Virtual Cloud Cost:      ${:.2}\n",
+        stats.estimated_cost_saved_usd
+    ));
     out.push_str("  • Actual Local Cost:       $0.00\n");
-    out.push_str(&format!("  • NET SAVINGS:             +${:.2}\n", stats.estimated_cost_saved_usd));
+    out.push_str(&format!(
+        "  • NET SAVINGS:             +${:.2}\n",
+        stats.estimated_cost_saved_usd
+    ));
     out.push('\n');
 
     if let Some(daily) = &stats.daily {
@@ -432,12 +467,16 @@ pub fn format_stats_card(stats: &Stats) -> String {
         out.push_str("🔧 TOOL USAGE BREAKDOWN\n");
         for (name, count) in &stats.tool_calls {
             let errs = stats.tool_errors.get(name).copied().unwrap_or(0);
-            out.push_str(&format!("  • {:<20} {:>5} calls ({} errors)\n", name, count, errs));
+            out.push_str(&format!(
+                "  • {:<20} {:>5} calls ({} errors)\n",
+                name, count, errs
+            ));
         }
         out.push('\n');
     }
 
-    if let (Some(first), Some(last)) = (&stats.first_recorded_session, &stats.last_recorded_session) {
+    if let (Some(first), Some(last)) = (&stats.first_recorded_session, &stats.last_recorded_session)
+    {
         out.push_str(&format!("🕒 Active Horizon: {} → {}\n", first, last));
     }
     out
@@ -482,7 +521,6 @@ fn utc_day(ms: i128) -> String {
         .map(|dt| dt.format("%Y-%m-%d").to_string())
         .unwrap_or_else(|| "1970-01-01".to_string())
 }
-
 
 /// List a directory's entries, returning an empty vec when the directory is
 /// missing or unreadable (a missing ledger dir is a valid state).
@@ -693,7 +731,6 @@ fn now_iso() -> String {
     iso_from_ms(ms)
 }
 
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -746,9 +783,18 @@ mod tests {
         );
 
         // Tasks: one of each terminal status.
-        write(&state.join("tasks/task_1.json"), "{\"id\":\"task_1\",\"status\":\"completed\"}");
-        write(&state.join("tasks/task_2.json"), "{\"id\":\"task_2\",\"status\":\"failed\"}");
-        write(&state.join("tasks/task_3.json"), "{\"id\":\"task_3\",\"status\":\"cancelled\"}");
+        write(
+            &state.join("tasks/task_1.json"),
+            "{\"id\":\"task_1\",\"status\":\"completed\"}",
+        );
+        write(
+            &state.join("tasks/task_2.json"),
+            "{\"id\":\"task_2\",\"status\":\"failed\"}",
+        );
+        write(
+            &state.join("tasks/task_3.json"),
+            "{\"id\":\"task_3\",\"status\":\"cancelled\"}",
+        );
 
         let s = derive_stats(&state, &Default::default());
         assert_eq!(s.total_sessions, 2);
@@ -847,7 +893,9 @@ mod tests {
         let v: Value = serde_json::from_str(line).expect("valid JSON line");
         assert_eq!(v.get("level").and_then(|x| x.as_str()), Some("INFO"));
         assert_eq!(
-            v.get("fields").and_then(|f| f.get("hello")).and_then(|x| x.as_str()),
+            v.get("fields")
+                .and_then(|f| f.get("hello"))
+                .and_then(|x| x.as_str()),
             Some("world")
         );
         assert!(v.get("timestamp").is_some());
@@ -1085,7 +1133,10 @@ mod tests {
         };
         let s2 = derive_stats(&state, &opts2);
         assert_eq!(s2.total_turns, 0, "the turn must fall outside cutoff+1");
-        assert_eq!(s2.total_tool_calls, 1, "the later tool_result is still in-window");
+        assert_eq!(
+            s2.total_tool_calls, 1,
+            "the later tool_result is still in-window"
+        );
         assert_eq!(s2.tool_calls.get("read_file"), Some(&1));
 
         let _ = fs::remove_dir_all(&state);
@@ -1120,12 +1171,26 @@ mod tests {
         let state = tmp_state();
         write(&state.join("sessions/sa/events.jsonl"), TWO_DAY_LEDGER);
 
-        let s_by_day =
-            derive_stats(&state, &StatsOptions { by_day: true, ..Default::default() });
+        let s_by_day = derive_stats(
+            &state,
+            &StatsOptions {
+                by_day: true,
+                ..Default::default()
+            },
+        );
         let card = format_stats_card(&s_by_day);
-        assert!(card.contains("DAILY BREAKDOWN"), "card should show daily: {card}");
-        assert!(card.contains("2026-09-05"), "card should list day 1: {card}");
-        assert!(card.contains("2026-09-06"), "card should list day 2: {card}");
+        assert!(
+            card.contains("DAILY BREAKDOWN"),
+            "card should show daily: {card}"
+        );
+        assert!(
+            card.contains("2026-09-05"),
+            "card should list day 1: {card}"
+        );
+        assert!(
+            card.contains("2026-09-06"),
+            "card should list day 2: {card}"
+        );
 
         let s_plain = derive_stats(&state, &Default::default());
         let card_plain = format_stats_card(&s_plain);
@@ -1157,7 +1222,13 @@ mod tests {
         assert_eq!(s_plain.total_tool_calls, 1);
 
         // With a window: the untimestamped events are excluded.
-        let s_win = derive_stats(&state, &StatsOptions { since_ms: Some(0), ..Default::default() });
+        let s_win = derive_stats(
+            &state,
+            &StatsOptions {
+                since_ms: Some(0),
+                ..Default::default()
+            },
+        );
         assert_eq!(s_win.total_turns, 0);
         assert_eq!(s_win.total_tool_calls, 0);
         assert_eq!(s_win.total_sessions, 0, "no in-window events → no session");

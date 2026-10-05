@@ -42,9 +42,7 @@ impl StateDir {
 
     /// Build directly from a root path.
     pub fn new(root: impl Into<PathBuf>) -> Self {
-        Self {
-            root: root.into(),
-        }
+        Self { root: root.into() }
     }
 
     pub fn root(&self) -> &Path {
@@ -138,9 +136,7 @@ impl PartialEq for ReleaseError {
     fn eq(&self, other: &Self) -> bool {
         use ReleaseError::*;
         match (self, other) {
-            (Foreign { name: a, pid: pa }, Foreign { name: b, pid: pb }) => {
-                a == b && pa == pb
-            }
+            (Foreign { name: a, pid: pa }, Foreign { name: b, pid: pb }) => a == b && pa == pb,
             (NotHeld { name: a }, NotHeld { name: b }) => a == b,
             (Io { name: a, .. }, Io { name: b, .. }) => a == b,
             _ => false,
@@ -156,9 +152,7 @@ pub struct Locks {
 
 impl Locks {
     pub fn new(dir: impl Into<PathBuf>) -> Self {
-        Self {
-            dir: dir.into(),
-        }
+        Self { dir: dir.into() }
     }
 
     pub fn from_state(state: &StateDir) -> Self {
@@ -194,15 +188,17 @@ impl Locks {
 
         // 2. Exists: reject if still within TTL.
         if let Some(info) = read_lock(&path)?
-            && now.saturating_sub(info.held_at) < ttl_ms {
-                return Ok(AcquireResult::HeldBy { pid: info.pid });
-            }
+            && now.saturating_sub(info.held_at) < ttl_ms
+        {
+            return Ok(AcquireResult::HeldBy { pid: info.pid });
+        }
 
         // 3. Stale (or unreadable): re-verify, rename to tombstone, O_EXCL.
         if let Some(info) = read_lock(&path)?
-            && now.saturating_sub(info.held_at) < ttl_ms {
-                return Ok(AcquireResult::HeldBy { pid: info.pid });
-            }
+            && now.saturating_sub(info.held_at) < ttl_ms
+        {
+            return Ok(AcquireResult::HeldBy { pid: info.pid });
+        }
         let fname = path
             .file_name()
             .map(|s| s.to_string_lossy().into_owned())
@@ -252,8 +248,8 @@ fn read_lock(path: &Path) -> io::Result<Option<LockInfo>> {
         Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(None),
         Err(e) => return Err(e),
     };
-    let v: serde_json::Value = serde_json::from_str(&raw)
-        .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
+    let v: serde_json::Value =
+        serde_json::from_str(&raw).map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
     let pid = v.get("pid").and_then(|x| x.as_u64()).unwrap_or(0) as u32;
     let held_at = v.get("held_at").and_then(|x| x.as_u64()).unwrap_or(0);
     let ttl_ms = v.get("ttl").and_then(|x| x.as_u64()).unwrap_or(0);
@@ -323,9 +319,7 @@ impl WedgeCounter {
 
     /// Atomically increment and return the new value.
     pub fn incr(&self) -> io::Result<u64> {
-        let _g = COUNTER_LOCK
-            .lock()
-            .unwrap_or_else(|e| e.into_inner());
+        let _g = COUNTER_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let next = self.read() + 1;
         if let Some(parent) = self.path.parent() {
             fs::create_dir_all(parent)?;
@@ -347,9 +341,7 @@ impl WedgeCounter {
 
     /// Reset the counter to zero.
     pub fn reset(&self) -> io::Result<()> {
-        let _g = COUNTER_LOCK
-            .lock()
-            .unwrap_or_else(|e| e.into_inner());
+        let _g = COUNTER_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         if let Some(parent) = self.path.parent() {
             fs::create_dir_all(parent)?;
         }
@@ -367,11 +359,7 @@ mod tests {
 
     fn tmp_dir() -> PathBuf {
         let n = TMP_COUNTER.fetch_add(1, Ordering::SeqCst);
-        let p = std::env::temp_dir().join(format!(
-            "castor-state-{}-{}",
-            std::process::id(),
-            n
-        ));
+        let p = std::env::temp_dir().join(format!("castor-state-{}-{}", std::process::id(), n));
         std::fs::create_dir_all(&p).unwrap();
         p
     }
@@ -464,7 +452,13 @@ mod tests {
         let now = now_millis();
         write_lock_file(&locks.path("f"), 777777, now, 60_000).unwrap();
         let err = locks.release("f").unwrap_err();
-        assert_eq!(err, ReleaseError::Foreign { name: "f".into(), pid: 777777 });
+        assert_eq!(
+            err,
+            ReleaseError::Foreign {
+                name: "f".into(),
+                pid: 777777
+            }
+        );
         assert!(locks.path("f").exists(), "foreign lock must be preserved");
     }
 
@@ -485,7 +479,12 @@ mod tests {
         let dir = tmp_dir();
         let locks = Locks::new(&dir);
         let err = locks.release("ghost").unwrap_err();
-        assert_eq!(err, ReleaseError::NotHeld { name: "ghost".into() });
+        assert_eq!(
+            err,
+            ReleaseError::NotHeld {
+                name: "ghost".into()
+            }
+        );
     }
 
     #[tokio::test]
@@ -496,9 +495,7 @@ mod tests {
         let mut handles = Vec::new();
         for _ in 0..n {
             let c = counter.clone();
-            handles.push(tokio::spawn(async move {
-                c.incr().unwrap()
-            }));
+            handles.push(tokio::spawn(async move { c.incr().unwrap() }));
         }
         let mut max = 0;
         for h in handles {

@@ -9,7 +9,7 @@ use std::fs::{self, OpenOptions};
 use std::io::Write;
 use std::path::PathBuf;
 
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 
 use crate::state::StateDir;
 
@@ -91,9 +91,15 @@ mod tests {
         let _ = fs::remove_dir_all(&dir);
         let state = StateDir::new(&dir);
         let logger = EventLogger::new(&state, "s1");
-        logger.append(json!({ "type": "dispatch", "turn": 1 })).unwrap();
-        logger.append(json!({ "type": "tool_result", "name": "bash" })).unwrap();
-        logger.append(json!({ "type": "final", "status": "completed" })).unwrap();
+        logger
+            .append(json!({ "type": "dispatch", "turn": 1 }))
+            .unwrap();
+        logger
+            .append(json!({ "type": "tool_result", "name": "bash" }))
+            .unwrap();
+        logger
+            .append(json!({ "type": "final", "status": "completed" }))
+            .unwrap();
 
         let events = logger.read_all();
         assert_eq!(events.len(), 3);

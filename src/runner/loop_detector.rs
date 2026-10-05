@@ -5,7 +5,7 @@
 //! times, an advisory is injected once; if it persists, the session is flagged
 //! as a loop and must stop.
 
-use std::collections::{hash_map::DefaultHasher, VecDeque};
+use std::collections::{VecDeque, hash_map::DefaultHasher};
 use std::hash::{Hash, Hasher};
 
 /// Outcome of recording an action.

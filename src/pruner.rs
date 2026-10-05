@@ -52,8 +52,7 @@ impl Default for PrunePolicy {
 
 impl PrunePolicy {
     fn now(&self) -> u64 {
-        self.now
-            .unwrap_or_else(now_millis)
+        self.now.unwrap_or_else(now_millis)
     }
 }
 
@@ -83,10 +82,7 @@ pub struct PrunePlan {
 impl PrunePlan {
     /// Total number of paths this plan would delete.
     pub fn len(&self) -> usize {
-        self.sessions.len()
-            + self.tasks.len()
-            + self.telemetry.len()
-            + self.evo.len()
+        self.sessions.len() + self.tasks.len() + self.telemetry.len() + self.evo.len()
     }
 
     pub fn is_empty(&self) -> bool {
@@ -323,9 +319,10 @@ fn session_has_terminal_event(session_dir: &Path) -> bool {
             Err(_) => continue,
         };
         if let Some(t) = ev.get("type").and_then(|x| x.as_str())
-            && (t == "session_end" || t == "session_error") {
-                return true;
-            }
+            && (t == "session_end" || t == "session_error")
+        {
+            return true;
+        }
     }
     false
 }
@@ -360,10 +357,9 @@ fn active_task_session_ids(state_dir: &Path) -> std::collections::HashSet<String
             .and_then(|s| s.as_str())
             .map(|s| matches!(s, "completed" | "failed" | "cancelled"))
             .unwrap_or(false);
-        if !done
-            && let Some(sid) = v.get("session_id").and_then(|s| s.as_str()) {
-                ids.insert(sid.to_string());
-            }
+        if !done && let Some(sid) = v.get("session_id").and_then(|s| s.as_str()) {
+            ids.insert(sid.to_string());
+        }
     }
     ids
 }
@@ -374,14 +370,16 @@ fn session_mtime(session_dir: &Path) -> u64 {
     let log_file = session_dir.join("events.jsonl");
     if let Ok(m) = fs::metadata(&log_file)
         && let Ok(t) = m.modified()
-            && let Ok(d) = t.duration_since(std::time::UNIX_EPOCH) {
-                return d.as_millis() as u64;
-            }
+        && let Ok(d) = t.duration_since(std::time::UNIX_EPOCH)
+    {
+        return d.as_millis() as u64;
+    }
     if let Ok(m) = fs::metadata(session_dir)
         && let Ok(t) = m.modified()
-            && let Ok(d) = t.duration_since(std::time::UNIX_EPOCH) {
-                return d.as_millis() as u64;
-            }
+        && let Ok(d) = t.duration_since(std::time::UNIX_EPOCH)
+    {
+        return d.as_millis() as u64;
+    }
     0
 }
 
@@ -450,9 +448,10 @@ fn plan_tasks(state_dir: &Path, policy: &PrunePolicy, now: u64) -> Vec<PathBuf> 
         // Active protection: task files referenced by live slots/locks are
         // never candidates.
         if let Some(id) = v.get("id").and_then(|s| s.as_str())
-            && protected.contains(id) {
-                continue;
-            }
+            && protected.contains(id)
+        {
+            continue;
+        }
         // Age gate.
         let mtime = mtime_of(&path);
         if now.saturating_sub(mtime) > policy.max_age_ms {
@@ -469,48 +468,50 @@ fn protected_task_ids(state_dir: &Path) -> std::collections::HashSet<String> {
     // Live slot leases: `<state>/tasks/slots/slot_N.json`.
     let slots_dir = state_dir.join("tasks").join("slots");
     if slots_dir.is_dir()
-        && let Ok(entries) = fs::read_dir(&slots_dir) {
-            for entry in entries.flatten() {
-                let name = entry.file_name().to_string_lossy().into_owned();
-                if !name.starts_with("slot_") || !name.ends_with(".json") {
-                    continue;
-                }
-                let raw = match fs::read_to_string(entry.path()) {
-                    Ok(r) => r,
-                    Err(_) => continue,
-                };
-                let v: serde_json::Value = match serde_json::from_str(&raw) {
-                    Ok(v) => v,
-                    Err(_) => continue,
-                };
-                if let Some(tid) = v.get("task_id").and_then(|s| s.as_str()) {
-                    ids.insert(tid.to_string());
-                }
+        && let Ok(entries) = fs::read_dir(&slots_dir)
+    {
+        for entry in entries.flatten() {
+            let name = entry.file_name().to_string_lossy().into_owned();
+            if !name.starts_with("slot_") || !name.ends_with(".json") {
+                continue;
+            }
+            let raw = match fs::read_to_string(entry.path()) {
+                Ok(r) => r,
+                Err(_) => continue,
+            };
+            let v: serde_json::Value = match serde_json::from_str(&raw) {
+                Ok(v) => v,
+                Err(_) => continue,
+            };
+            if let Some(tid) = v.get("task_id").and_then(|s| s.as_str()) {
+                ids.insert(tid.to_string());
             }
         }
+    }
 
     // Lockfiles: `<state>/locks/*.lock`.
     let locks_dir = state_dir.join("locks");
     if locks_dir.is_dir()
-        && let Ok(entries) = fs::read_dir(&locks_dir) {
-            for entry in entries.flatten() {
-                let name = entry.file_name().to_string_lossy().into_owned();
-                if !name.ends_with(".lock") {
-                    continue;
-                }
-                let raw = match fs::read_to_string(entry.path()) {
-                    Ok(r) => r,
-                    Err(_) => continue,
-                };
-                let v: serde_json::Value = match serde_json::from_str(&raw) {
-                    Ok(v) => v,
-                    Err(_) => continue,
-                };
-                if let Some(tid) = v.get("task_id").and_then(|s| s.as_str()) {
-                    ids.insert(tid.to_string());
-                }
+        && let Ok(entries) = fs::read_dir(&locks_dir)
+    {
+        for entry in entries.flatten() {
+            let name = entry.file_name().to_string_lossy().into_owned();
+            if !name.ends_with(".lock") {
+                continue;
+            }
+            let raw = match fs::read_to_string(entry.path()) {
+                Ok(r) => r,
+                Err(_) => continue,
+            };
+            let v: serde_json::Value = match serde_json::from_str(&raw) {
+                Ok(v) => v,
+                Err(_) => continue,
+            };
+            if let Some(tid) = v.get("task_id").and_then(|s| s.as_str()) {
+                ids.insert(tid.to_string());
             }
         }
+    }
 
     ids
 }
@@ -664,11 +665,7 @@ mod tests {
 
     fn tmp_dir() -> PathBuf {
         let n = TMP_COUNTER.fetch_add(1, Ordering::SeqCst);
-        let p = std::env::temp_dir().join(format!(
-            "castor-pruner-{}-{}",
-            std::process::id(),
-            n
-        ));
+        let p = std::env::temp_dir().join(format!("castor-pruner-{}-{}", std::process::id(), n));
         let _ = fs::remove_dir_all(&p);
         fs::create_dir_all(&p).unwrap();
         p
@@ -719,7 +716,13 @@ mod tests {
     }
 
     /// Create a task file.
-    fn make_task(root: &Path, id: &str, status: &str, session_id: &str, mtime: SystemTime) -> PathBuf {
+    fn make_task(
+        root: &Path,
+        id: &str,
+        status: &str,
+        session_id: &str,
+        mtime: SystemTime,
+    ) -> PathBuf {
         let path = root.join("tasks").join(format!("task_{id}.json"));
         let json = serde_json::json!({
             "id": id,
@@ -738,7 +741,10 @@ mod tests {
 
     /// Create a slot lease referencing a task.
     fn make_slot(root: &Path, idx: usize, task_id: &str) {
-        let path = root.join("tasks").join("slots").join(format!("slot_{idx}.json"));
+        let path = root
+            .join("tasks")
+            .join("slots")
+            .join(format!("slot_{idx}.json"));
         let json = serde_json::json!({
             "tenant": 999999,
             "task_id": task_id,
@@ -782,7 +788,12 @@ mod tests {
         let mut p = plan(&root, &policy_now(now));
 
         // Exactly the two old sessions.
-        assert_eq!(p.sessions.len(), 2, "expected 2 old sessions, got {:?}", p.sessions);
+        assert_eq!(
+            p.sessions.len(),
+            2,
+            "expected 2 old sessions, got {:?}",
+            p.sessions
+        );
         assert!(p.sessions.contains(&old1));
         assert!(p.sessions.contains(&old2));
         assert!(!p.sessions.contains(&new1));
@@ -860,9 +871,18 @@ mod tests {
 
         let mut p = plan(&root, &policy_now(now));
 
-        assert!(!p.tasks.contains(&live_task), "live-slot task must not be a candidate");
-        assert!(p.tasks.contains(&old_task), "old done task should be a candidate");
-        assert!(!p.tasks.contains(&new_task), "new task should not be a candidate");
+        assert!(
+            !p.tasks.contains(&live_task),
+            "live-slot task must not be a candidate"
+        );
+        assert!(
+            p.tasks.contains(&old_task),
+            "old done task should be a candidate"
+        );
+        assert!(
+            !p.tasks.contains(&new_task),
+            "new task should not be a candidate"
+        );
 
         let n = apply(&root, &mut p).unwrap();
         assert_eq!(n, 1);
@@ -894,7 +914,10 @@ mod tests {
         let locked_task = make_task(&root, "t_locked", "completed", "sess_l", old);
 
         let p = plan(&root, &policy_now(now));
-        assert!(!p.tasks.contains(&locked_task), "lockfile-referenced task must not be a candidate");
+        assert!(
+            !p.tasks.contains(&locked_task),
+            "lockfile-referenced task must not be a candidate"
+        );
 
         let _ = fs::remove_dir_all(&root);
     }
@@ -945,7 +968,12 @@ mod tests {
         let p = plan(&root, &policy);
 
         // 5 total, max 3 → evict 2 oldest (s0, s1).
-        assert_eq!(p.sessions.len(), 2, "expected 2 evicted, got {:?}", p.sessions);
+        assert_eq!(
+            p.sessions.len(),
+            2,
+            "expected 2 evicted, got {:?}",
+            p.sessions
+        );
         assert!(p.sessions.contains(&paths[0]));
         assert!(p.sessions.contains(&paths[1]));
         assert!(!p.sessions.contains(&paths[2]));
@@ -991,7 +1019,12 @@ mod tests {
         let p = plan(&root, &policy);
 
         // 3 × 1 MB = 3 MB > 2 MB → evict oldest (s0) → 2 MB ≤ 2 MB.
-        assert_eq!(p.sessions.len(), 1, "expected 1 evicted, got {:?}", p.sessions);
+        assert_eq!(
+            p.sessions.len(),
+            1,
+            "expected 1 evicted, got {:?}",
+            p.sessions
+        );
         assert!(p.sessions.contains(&paths[0]));
 
         let _ = fs::remove_dir_all(&root);

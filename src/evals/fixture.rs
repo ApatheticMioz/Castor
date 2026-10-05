@@ -112,7 +112,10 @@ impl Task {
             message: e.to_string(),
         })?;
 
-        Ok(Self { config, dir: dir.to_path_buf() })
+        Ok(Self {
+            config,
+            dir: dir.to_path_buf(),
+        })
     }
 
     /// The golden (expected-pass) trace of this task.
@@ -261,13 +264,12 @@ impl Trace {
             if trimmed.is_empty() {
                 continue;
             }
-            let step: TraceStep = serde_json::from_str(trimmed).map_err(|e| {
-                TraceError::MalformedLine {
+            let step: TraceStep =
+                serde_json::from_str(trimmed).map_err(|e| TraceError::MalformedLine {
                     path: path.to_path_buf(),
                     line: line_no,
                     message: e.to_string(),
-                }
-            })?;
+                })?;
             steps.push(step);
         }
         Ok(steps)
@@ -284,7 +286,9 @@ mod tests {
     use std::path::PathBuf;
 
     fn fixture_dir() -> PathBuf {
-        PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("evals").join("tasks")
+        PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("evals")
+            .join("tasks")
     }
 
     #[test]
@@ -313,7 +317,10 @@ mod tests {
         assert_eq!(cfg.scorer.checks[0].expect_exit, Some(0));
 
         let file_check = &cfg.scorer.checks[1];
-        assert_eq!((file_check.id.as_str(), file_check.kind.as_str()), ("test-file-untouched", "file"));
+        assert_eq!(
+            (file_check.id.as_str(), file_check.kind.as_str()),
+            ("test-file-untouched", "file")
+        );
         assert_eq!(file_check.path.as_deref(), Some("test/sum.test.js"));
         assert!(file_check.expect_sha256.is_some());
         assert!(file_check.expect_contains.is_none());
@@ -338,7 +345,9 @@ mod tests {
 
         // First line is a session_start with the task prompt.
         match &steps[0] {
-            TraceStep::SessionStart { prompt, harness, .. } => {
+            TraceStep::SessionStart {
+                prompt, harness, ..
+            } => {
                 assert_eq!(harness, "Castor");
                 assert!(prompt.contains("Fix the bug in src/sum.js"));
             }
@@ -347,11 +356,20 @@ mod tests {
 
         // An assistant_message carries the raw model response + tool call refs.
         match &steps[1] {
-            TraceStep::AssistantMessage { content, tool_calls, .. } => {
+            TraceStep::AssistantMessage {
+                content,
+                tool_calls,
+                ..
+            } => {
                 assert!(!content.is_empty());
                 assert_eq!(tool_calls.len(), 1);
                 assert_eq!(tool_calls[0].function.name, "read_file");
-                assert!(tool_calls[0].function.arguments.contains("test/sum.test.js"));
+                assert!(
+                    tool_calls[0]
+                        .function
+                        .arguments
+                        .contains("test/sum.test.js")
+                );
             }
             other => panic!("expected assistant_message, got {other:?}"),
         }
@@ -367,7 +385,12 @@ mod tests {
 
         // A tool_result carries the result payload.
         match &steps[3] {
-            TraceStep::ToolResult { tool_name, result, is_error, .. } => {
+            TraceStep::ToolResult {
+                tool_name,
+                result,
+                is_error,
+                ..
+            } => {
                 assert_eq!(tool_name, "read_file");
                 assert!(!is_error);
                 assert!(result.is_some());
@@ -377,7 +400,11 @@ mod tests {
 
         // Last line is session_end.
         match steps.last().unwrap() {
-            TraceStep::SessionEnd { status, turns_taken, .. } => {
+            TraceStep::SessionEnd {
+                status,
+                turns_taken,
+                ..
+            } => {
                 assert_eq!(status, "completed");
                 assert_eq!(*turns_taken, 3);
             }
@@ -394,11 +421,13 @@ mod tests {
         let steps = Trace::load(&path).expect("known-fail trace must load");
         assert_eq!(steps.len(), 9);
         // The known-fail run edits the test file — the scorer must catch it.
-        let edited_test = steps.iter().any(|s| matches!(
-            s,
-            TraceStep::ToolCall { name, args, .. }
-                if name == "edit_file" && args["path"] == "test/sum.test.js"
-        ));
+        let edited_test = steps.iter().any(|s| {
+            matches!(
+                s,
+                TraceStep::ToolCall { name, args, .. }
+                    if name == "edit_file" && args["path"] == "test/sum.test.js"
+            )
+        });
         assert!(edited_test, "known-fail trace must edit the test file");
     }
 
@@ -524,7 +553,11 @@ mod tests {
                 .known_fail_trace()
                 .unwrap_or_else(|e| panic!("{}: {e}", dir.display()));
             if dir.file_name().unwrap() != "canary-hard" {
-                assert!(known_fail.is_some(), "{}: missing known-fail", dir.display());
+                assert!(
+                    known_fail.is_some(),
+                    "{}: missing known-fail",
+                    dir.display()
+                );
             }
         }
     }

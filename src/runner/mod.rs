@@ -88,10 +88,7 @@ pub struct ToolOutcome {
 #[derive(Debug, Error)]
 pub enum ToolError {
     #[error("tool '{name}' failed: {message}")]
-    Execute {
-        name: String,
-        message: String,
-    },
+    Execute { name: String, message: String },
 }
 
 /// The async trait the runner depends on for engine chat.
@@ -136,7 +133,7 @@ pub struct SessionResult {
     /// `"reasoning_budget_exhausted"` is the honest terminal status for a
     /// session that stopped at its reasoning ceiling. It is *never* masked as a
     /// success; the salvage pass that recovers a plain-text report on that path
-    /// is annotated in [`final_text`].
+    /// is annotated in [`Self::final_text`].
     pub status: String,
 }
 
@@ -254,7 +251,10 @@ impl SessionOptions {
 /// logs the salvage outcome without writing a file (no crash).
 fn salvage_report_path(options: Option<&SessionOptions>, session_id: &str) -> Option<PathBuf> {
     let base = options?.scratch_root()?;
-    Some(base.join(".scratch").join(format!("salvage_{session_id}.md")))
+    Some(
+        base.join(".scratch")
+            .join(format!("salvage_{session_id}.md")),
+    )
 }
 
 /// Render the full salvage report (header + the model's plain-text summary)
@@ -262,7 +262,12 @@ fn salvage_report_path(options: Option<&SessionOptions>, session_id: &str) -> Op
 ///
 /// Never panics on I/O: a failure to create the directory or write the file is
 /// returned as an error so the caller can log it cleanly.
-fn write_salvage_report(path: &Path, session_id: &str, turns: u32, body: &str) -> std::io::Result<()> {
+fn write_salvage_report(
+    path: &Path,
+    session_id: &str,
+    turns: u32,
+    body: &str,
+) -> std::io::Result<()> {
     if let Some(parent) = path.parent() {
         fs::create_dir_all(parent)?;
     }
@@ -415,7 +420,8 @@ pub async fn run_session(
                                 tool_call_id: None,
                             });
                             for tc in &sc.tool_calls {
-                                let outcome = match executor.execute(&tc.name, &tc.arguments).await {
+                                let outcome = match executor.execute(&tc.name, &tc.arguments).await
+                                {
                                     Ok(o) => o,
                                     Err(e) => ToolOutcome {
                                         text: format!("Error: {e}"),
@@ -472,16 +478,18 @@ pub async fn run_session(
                         } else {
                             // 4. Persist the salvage report to .scratch/.
                             let written_path = match salvage_report_path(options, session_id) {
-                                Some(p) => match write_salvage_report(&p, session_id, turns, trimmed) {
-                                    Ok(()) => Some(p),
-                                    Err(e) => {
-                                        warn!(
-                                            session = %session_id,
-                                            "failed to write salvage report: {e}"
-                                        );
-                                        None
+                                Some(p) => {
+                                    match write_salvage_report(&p, session_id, turns, trimmed) {
+                                        Ok(()) => Some(p),
+                                        Err(e) => {
+                                            warn!(
+                                                session = %session_id,
+                                                "failed to write salvage report: {e}"
+                                            );
+                                            None
+                                        }
                                     }
-                                },
+                                }
                                 None => {
                                     warn!(
                                         session = %session_id,
@@ -722,15 +730,11 @@ mod tests {
             stream: bool,
             _reasoning_effort: Option<&str>,
         ) -> Result<Completion, EngineError> {
-            self.recorder
-                .calls
-                .lock()
-                .await
-                .push(RecordedCall {
-                    messages: messages.to_vec(),
-                    tools: tools.to_vec(),
-                    stream,
-                });
+            self.recorder.calls.lock().await.push(RecordedCall {
+                messages: messages.to_vec(),
+                tools: tools.to_vec(),
+                stream,
+            });
             self.responses
                 .lock()
                 .await
@@ -779,7 +783,11 @@ mod tests {
     }
 
     fn comp(content: &str, tool_calls: Vec<ToolCall>) -> Completion {
-        let finish = if tool_calls.is_empty() { "stop" } else { "tool_calls" };
+        let finish = if tool_calls.is_empty() {
+            "stop"
+        } else {
+            "tool_calls"
+        };
         Completion {
             content: content.into(),
             tool_calls,
@@ -869,13 +877,19 @@ mod tests {
 
         // The tool result was appended as a tool message (visible in the 2nd call).
         let second_call_msgs = &recorder.calls.lock().await[1].messages;
-        assert!(second_call_msgs
-            .iter()
-            .any(|m| m.role == "tool" && m.content == "file1\nfile2"));
+        assert!(
+            second_call_msgs
+                .iter()
+                .any(|m| m.role == "tool" && m.content == "file1\nfile2")
+        );
 
         // The final event was recorded.
         let events = logger.read_all();
-        assert!(events.iter().any(|e| e["type"] == "final" && e["status"] == "completed"));
+        assert!(
+            events
+                .iter()
+                .any(|e| e["type"] == "final" && e["status"] == "completed")
+        );
     }
 
     #[tokio::test]
@@ -953,14 +967,22 @@ mod tests {
 
         // The landing notice was injected into a call's messages.
         let calls = recorder.calls.lock().await;
-        let notice_injected = calls
-            .iter()
-            .any(|c| c.messages.iter().any(|m| m.content.contains("[Budget Notice]")));
-        assert!(notice_injected, "landing notice must be present in messages");
+        let notice_injected = calls.iter().any(|c| {
+            c.messages
+                .iter()
+                .any(|m| m.content.contains("[Budget Notice]"))
+        });
+        assert!(
+            notice_injected,
+            "landing notice must be present in messages"
+        );
 
         // The best-effort synthesis call had no tools (stripped).
         let last_call = calls.last().unwrap();
-        assert!(last_call.tools.is_empty(), "final synthesis must strip tools");
+        assert!(
+            last_call.tools.is_empty(),
+            "final synthesis must strip tools"
+        );
     }
 
     #[tokio::test]
@@ -1000,7 +1022,10 @@ mod tests {
         let salvage_injected = calls
             .iter()
             .any(|c| c.messages.iter().any(|m| m.content.contains("[Salvage]")));
-        assert!(salvage_injected, "salvage prompt must be present in messages");
+        assert!(
+            salvage_injected,
+            "salvage prompt must be present in messages"
+        );
     }
 
     #[tokio::test]
@@ -1040,10 +1065,15 @@ mod tests {
 
         // The advisory was injected into a call's messages.
         let calls = recorder.calls.lock().await;
-        let advisory_injected = calls
-            .iter()
-            .any(|c| c.messages.iter().any(|m| m.content.contains("[Loop Advisory]")));
-        assert!(advisory_injected, "loop advisory must be present in messages");
+        let advisory_injected = calls.iter().any(|c| {
+            c.messages
+                .iter()
+                .any(|m| m.content.contains("[Loop Advisory]"))
+        });
+        assert!(
+            advisory_injected,
+            "loop advisory must be present in messages"
+        );
     }
 
     #[tokio::test]
@@ -1100,9 +1130,11 @@ mod tests {
         // The tool error became a message (visible in the 2nd call).
         let calls = recorder.calls.lock().await;
         let second_call_msgs = &calls[1].messages;
-        assert!(second_call_msgs
-            .iter()
-            .any(|m| m.role == "tool" && m.content.contains("Error:")));
+        assert!(
+            second_call_msgs
+                .iter()
+                .any(|m| m.role == "tool" && m.content.contains("Error:"))
+        );
     }
 
     #[tokio::test]
@@ -1114,18 +1146,9 @@ mod tests {
         let executor = MockExecutor::new(Vec::new());
 
         let tools = vec![tool_schema("bash"), tool_schema("read")];
-        let res = run_session(
-            &engine,
-            &executor,
-            &logger,
-            "sys",
-            "work",
-            &tools,
-            80,
-            None,
-        )
-        .await
-        .unwrap();
+        let res = run_session(&engine, &executor, &logger, "sys", "work", &tools, 80, None)
+            .await
+            .unwrap();
 
         assert_eq!(res.final_text, "Done.");
         assert_eq!(res.status, "completed");
@@ -1278,8 +1301,15 @@ mod tests {
         // calls: 0=turn1(tool), 1=turn2(tool), 2=ceiling turn, 3=salvage.
         let salvage_call = &calls[3];
         // (3) The salvage call has full tools enabled and runs non-streaming.
-        assert_eq!(salvage_call.tools.len(), 1, "salvage must have full tools enabled");
-        assert!(!salvage_call.stream, "salvage must run non-streaming (low effort)");
+        assert_eq!(
+            salvage_call.tools.len(),
+            1,
+            "salvage must have full tools enabled"
+        );
+        assert!(
+            !salvage_call.stream,
+            "salvage must run non-streaming (low effort)"
+        );
         // The normal loop turns ran streaming (contrast).
         assert!(calls[0].stream, "turn 1 must be streaming");
 
@@ -1287,11 +1317,7 @@ mod tests {
         //     history — the original user prompt, both tool results, and the
         //     injected non-coercive salvage prompt.
         let salvage_msgs = &salvage_call.messages;
-        let has = |needle: &str| {
-            salvage_msgs
-                .iter()
-                .any(|m| m.content.contains(needle))
-        };
+        let has = |needle: &str| salvage_msgs.iter().any(|m| m.content.contains(needle));
         assert!(has("THE-PROMPT"), "original user prompt must be preserved");
         assert!(has("RESULT-A"), "first tool result must be preserved");
         assert!(has("RESULT-B"), "second tool result must be preserved");
@@ -1320,7 +1346,10 @@ mod tests {
             .root()
             .join(".scratch")
             .join("salvage_test_session.md");
-        assert!(report.exists(), "salvage report must be written: {report:?}");
+        assert!(
+            report.exists(),
+            "salvage report must be written: {report:?}"
+        );
         let body = std::fs::read_to_string(&report).unwrap();
         assert!(body.contains("reasoning_budget_exhausted"));
         assert!(body.contains("Findings: X=42"));
@@ -1329,7 +1358,9 @@ mod tests {
         // The ledger recorded a salvage event tagged with the ceiling reason.
         let events = logger.read_all();
         assert!(
-            events.iter().any(|e| e["type"] == "salvage" && e["reason"] == "reasoning_ceiling"),
+            events
+                .iter()
+                .any(|e| e["type"] == "salvage" && e["reason"] == "reasoning_ceiling"),
             "a salvage event tagged reasoning_ceiling must be in the ledger"
         );
 
@@ -1372,16 +1403,33 @@ mod tests {
         .unwrap();
 
         assert_eq!(res.status, "reasoning_budget_exhausted");
-        assert!(res.final_text.contains("scratchpad log verified 100% pass rate"));
+        assert!(
+            res.final_text
+                .contains("scratchpad log verified 100% pass rate")
+        );
 
         let calls = recorder.calls.lock().await;
         assert_eq!(calls.len(), 4);
-        assert_eq!(calls[2].tools.len(), 2, "salvage call must receive full tools");
-        assert!(calls[3].tools.is_empty(), "follow-up synthesis must be plain text");
+        assert_eq!(
+            calls[2].tools.len(),
+            2,
+            "salvage call must receive full tools"
+        );
+        assert!(
+            calls[3].tools.is_empty(),
+            "follow-up synthesis must be plain text"
+        );
 
         let events = logger.read_all();
-        assert!(events.iter().any(|e| e["type"] == "tool_result" && e["output"] == "SCRATCHPAD_LOG_CONTENT: 100% pass"));
-        assert!(events.iter().any(|e| e["type"] == "salvage" && e["reason"] == "reasoning_ceiling"));
+        assert!(
+            events.iter().any(|e| e["type"] == "tool_result"
+                && e["output"] == "SCRATCHPAD_LOG_CONTENT: 100% pass")
+        );
+        assert!(
+            events
+                .iter()
+                .any(|e| e["type"] == "salvage" && e["reason"] == "reasoning_ceiling")
+        );
 
         let _ = std::fs::remove_dir_all(state.root());
     }
@@ -1432,9 +1480,11 @@ mod tests {
 
         // The ledger still records the (empty) salvage attempt.
         let events = logger.read_all();
-        assert!(events
-            .iter()
-            .any(|e| e["type"] == "salvage" && e["reason"] == "reasoning_ceiling"));
+        assert!(
+            events
+                .iter()
+                .any(|e| e["type"] == "salvage" && e["reason"] == "reasoning_ceiling")
+        );
 
         let _ = std::fs::remove_dir_all(state.root());
     }
@@ -1476,9 +1526,9 @@ mod tests {
         );
         // The failed salvage is recorded in the ledger with the error.
         let events = logger.read_all();
-        assert!(events
-            .iter()
-            .any(|e| e["type"] == "salvage" && e["reason"] == "reasoning_ceiling" && e.get("error").is_some()));
+        assert!(events.iter().any(|e| e["type"] == "salvage"
+            && e["reason"] == "reasoning_ceiling"
+            && e.get("error").is_some()));
 
         let _ = std::fs::remove_dir_all(state.root());
     }
@@ -1497,7 +1547,10 @@ mod tests {
                 comp("", vec![tc("c1", "bash", r#"{"command":"ls"}"#)]),
                 comp("", vec![tc("c2", "bash", r#"{"command":"pwd"}"#)]),
                 comp("", vec![tc("c3", "bash", r#"{"command":"cat file.txt"}"#)]),
-                comp("", vec![tc("c4", "bash", r#"{"command":"head -1 other.txt"}"#)]),
+                comp(
+                    "",
+                    vec![tc("c4", "bash", r#"{"command":"head -1 other.txt"}"#)],
+                ),
                 comp("Done.", Vec::new()),
             ],
             recorder.clone(),
@@ -1526,9 +1579,11 @@ mod tests {
 
         // The probe advisory was injected into a subsequent call's messages.
         let calls = recorder.calls.lock().await;
-        let probe_advisory_injected = calls
-            .iter()
-            .any(|c| c.messages.iter().any(|m| m.content.contains("[Probe Advisory]")));
+        let probe_advisory_injected = calls.iter().any(|c| {
+            c.messages
+                .iter()
+                .any(|m| m.content.contains("[Probe Advisory]"))
+        });
         assert!(
             probe_advisory_injected,
             "probe advisory must be present after 4 consecutive non-scratch bash probes"
@@ -1549,7 +1604,14 @@ mod tests {
                 comp("", vec![tc("c1", "bash", r#"{"command":"ls"}"#)]),
                 comp("", vec![tc("c2", "bash", r#"{"command":"pwd"}"#)]),
                 comp("", vec![tc("c3", "bash", r#"{"command":"cat a.txt"}"#)]),
-                comp("", vec![tc("c4", "write_file", r#"{"path":"out.txt","content":"data"}"#)]),
+                comp(
+                    "",
+                    vec![tc(
+                        "c4",
+                        "write_file",
+                        r#"{"path":"out.txt","content":"data"}"#,
+                    )],
+                ),
                 comp("", vec![tc("c5", "bash", r#"{"command":"cat b.txt"}"#)]),
                 comp("Done.", Vec::new()),
             ],
@@ -1580,9 +1642,11 @@ mod tests {
 
         // No probe advisory should have been injected.
         let calls = recorder.calls.lock().await;
-        let probe_advisory_injected = calls
-            .iter()
-            .any(|c| c.messages.iter().any(|m| m.content.contains("[Probe Advisory]")));
+        let probe_advisory_injected = calls.iter().any(|c| {
+            c.messages
+                .iter()
+                .any(|m| m.content.contains("[Probe Advisory]"))
+        });
         assert!(
             !probe_advisory_injected,
             "mutating tool must reset the probe count; no advisory should fire"
@@ -1599,9 +1663,22 @@ mod tests {
         // Four distinct .scratch/ commands: all exempt, no probe advisory.
         let engine = RecordingEngine::new(
             vec![
-                comp("", vec![tc("c1", "bash", r#"{"command":"python .scratch/repro.py"}"#)]),
-                comp("", vec![tc("c2", "bash", r#"{"command":"bash .scratch/run.sh"}"#)]),
-                comp("", vec![tc("c3", "bash", r#"{"command":"cat .scratch/output.txt"}"#)]),
+                comp(
+                    "",
+                    vec![tc(
+                        "c1",
+                        "bash",
+                        r#"{"command":"python .scratch/repro.py"}"#,
+                    )],
+                ),
+                comp(
+                    "",
+                    vec![tc("c2", "bash", r#"{"command":"bash .scratch/run.sh"}"#)],
+                ),
+                comp(
+                    "",
+                    vec![tc("c3", "bash", r#"{"command":"cat .scratch/output.txt"}"#)],
+                ),
                 comp("", vec![tc("c4", "bash", r#"{"command":"ls .scratch/"}"#)]),
                 comp("Done.", Vec::new()),
             ],
@@ -1631,11 +1708,11 @@ mod tests {
 
         // No probe advisory, no loop advisory (all commands are distinct).
         let calls = recorder.calls.lock().await;
-        let any_advisory = calls
-            .iter()
-            .any(|c| c.messages.iter().any(|m| {
+        let any_advisory = calls.iter().any(|c| {
+            c.messages.iter().any(|m| {
                 m.content.contains("[Probe Advisory]") || m.content.contains("[Loop Advisory]")
-            }));
+            })
+        });
         assert!(
             !any_advisory,
             ".scratch/ commands must be exempt from both probe and loop advisories"
@@ -1688,9 +1765,11 @@ mod tests {
 
         // The loop advisory was injected before the hard stop.
         let calls = recorder.calls.lock().await;
-        let loop_advisory_injected = calls
-            .iter()
-            .any(|c| c.messages.iter().any(|m| m.content.contains("[Loop Advisory]")));
+        let loop_advisory_injected = calls.iter().any(|c| {
+            c.messages
+                .iter()
+                .any(|m| m.content.contains("[Loop Advisory]"))
+        });
         assert!(
             loop_advisory_injected,
             "loop advisory must be present before the hard stop"

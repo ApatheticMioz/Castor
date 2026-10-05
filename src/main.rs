@@ -21,11 +21,15 @@ use clap::{Parser, Subcommand};
 
 use crate::evals::runner::{Outcome, Variant};
 use crate::evo::lineage::Lineage;
-use crate::evo::{optimizer, watchdog};
 use crate::evo::watchdog::WatchdogVerdict;
+use crate::evo::{optimizer, watchdog};
 
 #[derive(Parser)]
-#[command(name = "castor", version, about = "Castor: Rust MCP toolchain, proxy, and evo engine")]
+#[command(
+    name = "castor",
+    version,
+    about = "Castor: Rust MCP toolchain, proxy, and evo engine"
+)]
 struct Cli {
     #[command(subcommand)]
     command: Option<Command>,
@@ -211,8 +215,8 @@ fn resolve_evals_dir(override_dir: Option<&str>) -> Result<std::path::PathBuf, S
 /// text to print.
 pub fn run_evo(evals_override: Option<&str>, state: &state::StateDir) -> Result<String, String> {
     let evals_dir = resolve_evals_dir(evals_override)?;
-    let report = optimizer::score_artifact(&evals_dir, Variant::Golden)
-        .map_err(|e| format!("evo: {e}"))?;
+    let report =
+        optimizer::score_artifact(&evals_dir, Variant::Golden).map_err(|e| format!("evo: {e}"))?;
 
     let path = evo_lineage_path(state);
     let mut lineage = Lineage::load(&path).map_err(|e| format!("evo: {e}"))?;
@@ -263,14 +267,12 @@ pub fn evo_status(state: &state::StateDir) -> Result<String, String> {
     let best = lineage.best_parent();
     out.push_str(&format!(
         "head: {}\n",
-        head
-            .map(|n| format!("{} (fitness={})", n.id, fmt_fitness(n.fitness)))
+        head.map(|n| format!("{} (fitness={})", n.id, fmt_fitness(n.fitness)))
             .unwrap_or_else(|| "n/a (no scored leaf)".to_string())
     ));
     out.push_str(&format!(
         "best_parent: {}\n",
-        best
-            .map(|n| format!("{} (fitness={})", n.id, fmt_fitness(n.fitness)))
+        best.map(|n| format!("{} (fitness={})", n.id, fmt_fitness(n.fitness)))
             .unwrap_or_else(|| "n/a (no scored node)".to_string())
     ));
 
@@ -280,16 +282,15 @@ pub fn evo_status(state: &state::StateDir) -> Result<String, String> {
 }
 
 fn fmt_fitness(f: Option<f64>) -> String {
-    f.map(|x| format!("{x:.4}")).unwrap_or_else(|| "n/a".to_string())
+    f.map(|x| format!("{x:.4}"))
+        .unwrap_or_else(|| "n/a".to_string())
 }
 
 fn fmt_verdict(v: &WatchdogVerdict) -> String {
     match v {
         WatchdogVerdict::Empty => "empty (no commits yet)".to_string(),
         WatchdogVerdict::Healthy => "healthy".to_string(),
-        WatchdogVerdict::StalledOld => {
-            "stalled (newest commit older than 7 days)".to_string()
-        }
+        WatchdogVerdict::StalledOld => "stalled (newest commit older than 7 days)".to_string(),
         WatchdogVerdict::StalledNoImprovement => {
             "stalled (no fitness improvement in the last 5 commits)".to_string()
         }
@@ -402,10 +403,7 @@ fn merge_into_config(path: &std::path::Path) -> Result<String, String> {
                 );
             }
             Err(e) => {
-                eprintln!(
-                    "install: corrupt {}: {e}; starting fresh",
-                    path.display()
-                );
+                eprintln!("install: corrupt {}: {e}; starting fresh", path.display());
             }
         }
     }
@@ -433,8 +431,13 @@ fn merge_into_config(path: &std::path::Path) -> Result<String, String> {
     let tmp = path.with_extension("json.tmp");
     std::fs::write(&tmp, &out)
         .map_err(|e| format!("install: cannot write {}: {e}", tmp.display()))?;
-    std::fs::rename(&tmp, path)
-        .map_err(|e| format!("install: cannot rename {} -> {}: {e}", tmp.display(), path.display()))?;
+    std::fs::rename(&tmp, path).map_err(|e| {
+        format!(
+            "install: cannot rename {} -> {}: {e}",
+            tmp.display(),
+            path.display()
+        )
+    })?;
 
     Ok(format!(
         "install: merged mcpServers.castor into {} (servers: {})",
@@ -453,7 +456,10 @@ fn merge_into_config(path: &std::path::Path) -> Result<String, String> {
 ///
 /// `config_path_override` replaces the default config path for ALL targets
 /// (test hook — no globals). Returns the lines to print, one per target.
-pub fn run_install(client: &str, config_path_override: Option<&std::path::Path>) -> Result<String, String> {
+pub fn run_install(
+    client: &str,
+    config_path_override: Option<&std::path::Path>,
+) -> Result<String, String> {
     let targets: Vec<&str> = match client {
         "claude" => vec!["claude"],
         "antigravity" => vec!["antigravity"],
@@ -461,7 +467,7 @@ pub fn run_install(client: &str, config_path_override: Option<&std::path::Path>)
         other => {
             return Err(format!(
                 "install: unknown client '{other}' (expected claude, antigravity, or all)"
-            ))
+            ));
         }
     };
 
@@ -675,15 +681,7 @@ mod tests {
     #[test]
     fn all_subcommands_parse() {
         for name in [
-            "mcp",
-            "proxy",
-            "status",
-            "server",
-            "config",
-            "install",
-            "clean",
-            "stats",
-            "evo",
+            "mcp", "proxy", "status", "server", "config", "install", "clean", "stats", "evo",
         ] {
             let args: Vec<&str> = match name {
                 "server" => vec!["castor", "server", "status"],
@@ -723,11 +721,7 @@ mod tests {
 
     fn clean_tmp_dir() -> std::path::PathBuf {
         let n = CLEAN_TMP.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-        let p = std::env::temp_dir().join(format!(
-            "castor-clean-{}-{}",
-            std::process::id(),
-            n
-        ));
+        let p = std::env::temp_dir().join(format!("castor-clean-{}-{}", std::process::id(), n));
         let _ = std::fs::remove_dir_all(&p);
         std::fs::create_dir_all(&p).unwrap();
         p
@@ -768,7 +762,10 @@ mod tests {
 
         let out = run_clean(&root, false).expect("dry run should succeed");
         // Plan text names the old session.
-        assert!(out.contains("s_old"), "plan should list the old session: {out}");
+        assert!(
+            out.contains("s_old"),
+            "plan should list the old session: {out}"
+        );
         // Nothing was deleted.
         assert!(session.exists(), "dry run must not delete the session");
         let _ = std::fs::remove_dir_all(&root);
@@ -785,8 +782,14 @@ mod tests {
 
         let out = run_clean(&root, true).expect("apply should succeed");
         // One line per deletion, plus the summary.
-        assert!(out.contains("deleted session"), "should report the deletion: {out}");
-        assert!(out.contains("s_old"), "deletion line should name the session: {out}");
+        assert!(
+            out.contains("deleted session"),
+            "should report the deletion: {out}"
+        );
+        assert!(
+            out.contains("s_old"),
+            "deletion line should name the session: {out}"
+        );
         // The session is actually gone.
         assert!(!session.exists(), "apply must delete the session");
         let _ = std::fs::remove_dir_all(&root);
@@ -798,11 +801,7 @@ mod tests {
 
     fn evo_tmp_dir() -> std::path::PathBuf {
         let n = EVO_TMP.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-        let p = std::env::temp_dir().join(format!(
-            "castor-evo-{}-{}",
-            std::process::id(),
-            n
-        ));
+        let p = std::env::temp_dir().join(format!("castor-evo-{}-{}", std::process::id(), n));
         let _ = std::fs::remove_dir_all(&p);
         std::fs::create_dir_all(&p).unwrap();
         p
@@ -834,8 +833,7 @@ mod tests {
         std::fs::create_dir_all(&evals).unwrap();
         write_pass_task(&evals.join("t1"));
 
-        let out = run_evo(Some(&evals.to_string_lossy()), &state)
-            .expect("run_evo should succeed");
+        let out = run_evo(Some(&evals.to_string_lossy()), &state).expect("run_evo should succeed");
         assert!(out.contains("mean fitness: 1.0000"), "{out}");
         assert!(out.contains("committed:"), "{out}");
 
@@ -992,11 +990,7 @@ mod tests {
 
     fn install_tmp_dir() -> std::path::PathBuf {
         let n = INSTALL_TMP.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-        let p = std::env::temp_dir().join(format!(
-            "castor-install-{}-{}",
-            std::process::id(),
-            n
-        ));
+        let p = std::env::temp_dir().join(format!("castor-install-{}-{}", std::process::id(), n));
         let _ = std::fs::remove_dir_all(&p);
         std::fs::create_dir_all(&p).unwrap();
         p
@@ -1014,7 +1008,10 @@ mod tests {
         let parsed: serde_json::Value =
             serde_json::from_str(&std::fs::read_to_string(&cfg).unwrap()).unwrap();
         let spec = parsed["mcpServers"]["castor"].clone();
-        assert!(spec["command"].is_string(), "spec must have a command: {spec}");
+        assert!(
+            spec["command"].is_string(),
+            "spec must have a command: {spec}"
+        );
         assert_eq!(spec["args"], serde_json::json!(["mcp"]));
         let _ = std::fs::remove_dir_all(&dir);
     }
@@ -1033,7 +1030,8 @@ mod tests {
         assert_eq!(first, second, "output lines must be identical");
         assert_eq!(bytes1, bytes2, "second install must be byte-identical");
 
-        let parsed: serde_json::Value = serde_json::from_str(&String::from_utf8_lossy(&bytes2)).unwrap();
+        let parsed: serde_json::Value =
+            serde_json::from_str(&String::from_utf8_lossy(&bytes2)).unwrap();
         let servers = parsed["mcpServers"].as_object().unwrap();
         assert_eq!(servers.len(), 1, "no duplicate keys: {servers:?}");
         let _ = std::fs::remove_dir_all(&dir);
@@ -1050,11 +1048,18 @@ mod tests {
         .unwrap();
 
         let out = run_install("antigravity", Some(&cfg)).unwrap();
-        assert!(out.contains("treemap"), "sibling server must be listed: {out}");
+        assert!(
+            out.contains("treemap"),
+            "sibling server must be listed: {out}"
+        );
 
         let parsed: serde_json::Value =
             serde_json::from_str(&std::fs::read_to_string(&cfg).unwrap()).unwrap();
-        assert_eq!(parsed["theme"], serde_json::json!("dark"), "unrelated key must survive");
+        assert_eq!(
+            parsed["theme"],
+            serde_json::json!("dark"),
+            "unrelated key must survive"
+        );
         assert_eq!(
             parsed["mcpServers"]["treemap"]["command"],
             serde_json::json!("treemap"),
@@ -1078,7 +1083,11 @@ mod tests {
         let parsed: serde_json::Value =
             serde_json::from_str(&std::fs::read_to_string(&cfg).unwrap()).unwrap();
         let spec = &parsed["mcpServers"]["castor"];
-        assert_ne!(spec["command"], serde_json::json!("stale"), "stale entry must be replaced");
+        assert_ne!(
+            spec["command"],
+            serde_json::json!("stale"),
+            "stale entry must be replaced"
+        );
         assert_eq!(spec["args"], serde_json::json!(["mcp"]));
         let _ = std::fs::remove_dir_all(&dir);
     }

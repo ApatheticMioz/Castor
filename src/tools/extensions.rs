@@ -134,8 +134,9 @@ impl ExtensionBridge {
         #[cfg(unix)]
         cmd.process_group(0);
 
-        let (transport, _stderr) =
-            TokioChildProcess::builder(cmd).spawn().map_err(|e| ExtError::SpawnFailed(e.to_string()))?;
+        let (transport, _stderr) = TokioChildProcess::builder(cmd)
+            .spawn()
+            .map_err(|e| ExtError::SpawnFailed(e.to_string()))?;
         // Capture the PID before `serve` consumes the transport.
         let pid = transport.id();
 
@@ -161,11 +162,14 @@ impl ExtensionBridge {
                 .map(|d| d.to_string())
                 .unwrap_or_else(|| format!("[ext:{name}] {raw}"));
             let parameters = Value::Object((*t.input_schema).clone());
-            tools.insert(namespaced, FrozenTool {
-                raw_name: raw,
-                description,
-                parameters,
-            });
+            tools.insert(
+                namespaced,
+                FrozenTool {
+                    raw_name: raw,
+                    description,
+                    parameters,
+                },
+            );
         }
 
         Ok(ExtServer {
@@ -211,7 +215,11 @@ impl ExtensionBridge {
         };
         let args_map = match args {
             Value::Object(m) => m,
-            _ => return Err(ExtError::CallFailed("arguments must be a JSON object".into())),
+            _ => {
+                return Err(ExtError::CallFailed(
+                    "arguments must be a JSON object".into(),
+                ));
+            }
         };
 
         let params = CallToolRequestParams::new(frozen.raw_name.clone()).with_arguments(args_map);
@@ -477,10 +485,7 @@ for line in sys.stdin:
             "expected a namespaced big tool, got {names:?}"
         );
         // Schemas carry the input schema from the server.
-        let echo = schemas
-            .iter()
-            .find(|s| s.name.ends_with("__echo"))
-            .unwrap();
+        let echo = schemas.iter().find(|s| s.name.ends_with("__echo")).unwrap();
         assert_eq!(echo.parameters["type"], "object");
         assert!(echo.parameters["properties"]["text"].is_object());
         bridge.shutdown_all().await;

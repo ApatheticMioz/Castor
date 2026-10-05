@@ -25,7 +25,7 @@ use std::path::{Path, PathBuf};
 
 use thiserror::Error;
 
-use crate::evals::runner::{run_task, Outcome, Variant};
+use crate::evals::runner::{Outcome, Variant, run_task};
 use crate::evo::lineage::{CommitId, Lineage, LineageError, LineageNode};
 
 /// One scored task within a [`ScoreReport`].
@@ -93,12 +93,11 @@ pub enum OptimizerError {
 /// A missing evals dir yields [`OptimizerError::EvalsDirMissing`]; an
 /// existing dir with no task subdirectories yields
 /// [`OptimizerError::NoTasks`].
-pub fn score_artifact(
-    evals_dir: &Path,
-    variant: Variant,
-) -> Result<ScoreReport, OptimizerError> {
+pub fn score_artifact(evals_dir: &Path, variant: Variant) -> Result<ScoreReport, OptimizerError> {
     if !evals_dir.is_dir() {
-        return Err(OptimizerError::EvalsDirMissing(evals_dir.display().to_string()));
+        return Err(OptimizerError::EvalsDirMissing(
+            evals_dir.display().to_string(),
+        ));
     }
 
     let mut task_dirs: Vec<PathBuf> = Vec::new();
@@ -210,10 +209,8 @@ mod tests {
     struct TempDir(PathBuf);
     impl TempDir {
         fn new(tag: &str) -> Self {
-            let p = std::env::temp_dir().join(format!(
-                "castor_evo_optimizer_{tag}_{}",
-                std::process::id()
-            ));
+            let p = std::env::temp_dir()
+                .join(format!("castor_evo_optimizer_{tag}_{}", std::process::id()));
             let _ = fs::remove_dir_all(&p);
             fs::create_dir_all(&p).unwrap();
             Self(p)

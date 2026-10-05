@@ -24,8 +24,8 @@ use crate::skills;
 use crate::state::StateDir;
 use crate::task::registry::{TaskRegistry, TaskStatus};
 use crate::task::semaphore::TaskSemaphore;
-use crate::tools::extensions::ExtensionBridge;
 use crate::tools::CompositeExecutor;
+use crate::tools::extensions::ExtensionBridge;
 
 /// A serialized job specification written by the MCP spawner for the detached worker.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -114,7 +114,10 @@ pub async fn run_job_with_engine(
     ];
     let all_skills = skills::load_skills(&skill_dirs);
     let active_skills: Vec<_> = if let Some(ref req) = spec.skills {
-        all_skills.into_iter().filter(|s| req.contains(&s.name)).collect()
+        all_skills
+            .into_iter()
+            .filter(|s| req.contains(&s.name))
+            .collect()
     } else {
         all_skills
     };
@@ -133,7 +136,8 @@ cleaner architectural alternative.\n\
 - Ground-Truth Hierarchy: Active code and compiler diagnostics are ground truth; historical audit \
 notes or deleted legacy references are reference ledgers.\n\
 - Verification Discipline: Never mask unverified mutations; verify against active test gates.\n\n{}",
-        host_cwd.display(), skills_index
+        host_cwd.display(),
+        skills_index
     );
 
     // 6. Initialize optional extensions and composite tool executor.
@@ -193,7 +197,11 @@ notes or deleted legacy references are reference ledgers.\n\
                 TaskStatus::Completed
             };
             let _ = registry
-                .transition(&spec.task_id, terminal_status, Some(session_res.final_text.clone()))
+                .transition(
+                    &spec.task_id,
+                    terminal_status,
+                    Some(session_res.final_text.clone()),
+                )
                 .await;
             let _ = sem.release(&lease);
             Ok(session_res.final_text)

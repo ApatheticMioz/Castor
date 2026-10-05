@@ -206,11 +206,8 @@ mod tests {
     /// A fresh, unique temp dir (created). Caller is responsible for cleanup.
     fn fresh_temp_dir() -> PathBuf {
         let n = COUNTER.fetch_add(1, Ordering::SeqCst);
-        let p = std::env::temp_dir().join(format!(
-            "castor_skills_test_{}_{}",
-            std::process::id(),
-            n
-        ));
+        let p =
+            std::env::temp_dir().join(format!("castor_skills_test_{}_{}", std::process::id(), n));
         let _ = fs::create_dir_all(&p);
         p
     }
@@ -219,11 +216,7 @@ mod tests {
     fn write_skill(root: &Path, name: &str, frontmatter: &str, body: &str) {
         let d = root.join(name);
         fs::create_dir_all(&d).unwrap();
-        fs::write(
-            d.join("SKILL.md"),
-            format!("---\n{frontmatter}---\n{body}"),
-        )
-        .unwrap();
+        fs::write(d.join("SKILL.md"), format!("---\n{frontmatter}---\n{body}")).unwrap();
     }
 
     #[test]
@@ -231,9 +224,24 @@ mod tests {
         let root = fresh_temp_dir();
         // Create 3 skills whose dir names are NOT in alphabetical order, to
         // prove the index sorts by name.
-        write_skill(&root, "zeta", "name: zeta\ndescription: Z skill\n", "Z body\n");
-        write_skill(&root, "alpha", "name: alpha\ndescription: A skill\n", "A body\n");
-        write_skill(&root, "mid", "name: mid\ndescription: M skill\n", "M body\n");
+        write_skill(
+            &root,
+            "zeta",
+            "name: zeta\ndescription: Z skill\n",
+            "Z body\n",
+        );
+        write_skill(
+            &root,
+            "alpha",
+            "name: alpha\ndescription: A skill\n",
+            "A body\n",
+        );
+        write_skill(
+            &root,
+            "mid",
+            "name: mid\ndescription: M skill\n",
+            "M body\n",
+        );
 
         let skills = load_skills(std::slice::from_ref(&root));
         assert_eq!(skills.len(), 3);
@@ -256,7 +264,12 @@ mod tests {
         // No description key at all.
         write_skill(&root, "nobody", "name: nobody\n", "body\n");
         // Empty description value.
-        write_skill(&root, "emptydesc", "name: emptydesc\ndescription:\n", "body\n");
+        write_skill(
+            &root,
+            "emptydesc",
+            "name: emptydesc\ndescription:\n",
+            "body\n",
+        );
 
         let skills = load_skills(std::slice::from_ref(&root));
         assert_eq!(skills.len(), 1, "only the well-formed skill should load");
@@ -282,8 +295,18 @@ mod tests {
     fn duplicate_names_first_dir_wins() {
         let root1 = fresh_temp_dir();
         let root2 = fresh_temp_dir();
-        write_skill(&root1, "dup", "name: dup\ndescription: from dir1\n", "body1\n");
-        write_skill(&root2, "dup", "name: dup\ndescription: from dir2\n", "body2\n");
+        write_skill(
+            &root1,
+            "dup",
+            "name: dup\ndescription: from dir1\n",
+            "body1\n",
+        );
+        write_skill(
+            &root2,
+            "dup",
+            "name: dup\ndescription: from dir2\n",
+            "body2\n",
+        );
 
         let skills = load_skills(&[root1.clone(), root2.clone()]);
         assert_eq!(skills.len(), 1, "duplicate name should collapse to one");

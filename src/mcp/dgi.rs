@@ -71,10 +71,7 @@ pub async fn evaluate_model_probe(
         .json()
         .await
         .map_err(|e| format!("malformed JSON response from {url}: {e}"))?;
-    let text = val["choices"][0]["text"]
-        .as_str()
-        .unwrap_or("")
-        .trim();
+    let text = val["choices"][0]["text"].as_str().unwrap_or("").trim();
 
     if text.starts_with("OVER") || text.starts_with("over") || text.starts_with("Over") {
         Ok(DgiVerdict::Reject(vec![
@@ -114,9 +111,9 @@ mod tests {
 
     #[tokio::test]
     async fn model_probe_rejects_on_overloaded() {
-        use axum::routing::post;
         use axum::Json;
         use axum::Router;
+        use axum::routing::post;
 
         async fn handler(Json(_body): Json<serde_json::Value>) -> Json<serde_json::Value> {
             Json(json!({
@@ -145,9 +142,9 @@ mod tests {
 
     #[tokio::test]
     async fn model_probe_admits_on_admissible() {
-        use axum::routing::post;
         use axum::Json;
         use axum::Router;
+        use axum::routing::post;
 
         async fn handler(Json(_body): Json<serde_json::Value>) -> Json<serde_json::Value> {
             Json(json!({

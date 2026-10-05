@@ -18,16 +18,16 @@ use std::net::SocketAddr;
 use std::sync::Arc;
 use std::time::Duration;
 
+use axum::Router;
 use axum::body::{Body, Bytes};
 use axum::extract::State;
 use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
 use axum::routing;
-use axum::Router;
 use futures_util::stream::unfold;
 use serde_json::json;
 
-use crate::proxy::sanitize::{sanitize_request_body, SseSanitizer};
+use crate::proxy::sanitize::{SseSanitizer, sanitize_request_body};
 use crate::state::{AcquireResult, Locks, StateDir};
 
 /// Inbound request body limit (50 MB, matching the JS proxy).
@@ -91,7 +91,10 @@ impl ProxyServer {
     pub async fn serve(self, port: u16) -> std::io::Result<()> {
         let addr = SocketAddr::from(([127, 0, 0, 1], port));
         let listener = tokio::net::TcpListener::bind(addr).await?;
-        eprintln!("[castor-proxy] listening on {addr} -> {}", self.inner.upstream);
+        eprintln!(
+            "[castor-proxy] listening on {addr} -> {}",
+            self.inner.upstream
+        );
         axum::serve(listener, self.router()).await
     }
 
@@ -164,16 +167,14 @@ async fn proxy_handler(
     let mut body_to_send = body_bytes.clone();
     if is_chat
         && let Ok(mut v) = serde_json::from_slice::<serde_json::Value>(&body_bytes)
-            && sanitize_request_body(&mut v) {
-                body_to_send = Bytes::from(v.to_string());
-            }
+        && sanitize_request_body(&mut v)
+    {
+        body_to_send = Bytes::from(v.to_string());
+    }
 
     // Forward to the upstream engine.
     let upstream_url = format!("http://{}{}{}", server.inner.upstream, path, query);
-    let mut req_builder = server
-        .inner
-        .client
-        .request(method, &upstream_url);
+    let mut req_builder = server.inner.client.request(method, &upstream_url);
     for (name, value) in &headers {
         if name.as_str() != "host" {
             req_builder = req_builder.header(name, value);
@@ -379,11 +380,7 @@ mod tests {
 
     fn tmp_state() -> StateDir {
         let n = TMP.fetch_add(1, Ord::SeqCst);
-        let p = std::env::temp_dir().join(format!(
-            "castor-proxy-{}-{}",
-            std::process::id(),
-            n
-        ));
+        let p = std::env::temp_dir().join(format!("castor-proxy-{}-{}", std::process::id(), n));
         let s = StateDir::new(p);
         s.ensure().unwrap();
         s
@@ -391,10 +388,7 @@ mod tests {
 
     /// Start a mock upstream engine on an ephemeral port.
     async fn start_mock_upstream() -> SocketAddr {
-        let app = Router::new().route(
-            "/v1/chat/completions",
-            routing::post(mock_upstream_handler),
-        );
+        let app = Router::new().route("/v1/chat/completions", routing::post(mock_upstream_handler));
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let addr = listener.local_addr().unwrap();
         tokio::spawn(async move {
@@ -432,10 +426,8 @@ mod tests {
                 let split_at = pos + 2;
                 let chunk1 = Bytes::from(bytes[..split_at].to_vec());
                 let chunk2 = Bytes::from(bytes[split_at..].to_vec());
-                let stream = futures_util::stream::iter(vec![
-                    Ok::<_, Infallible>(chunk1),
-                    Ok(chunk2),
-                ]);
+                let stream =
+                    futures_util::stream::iter(vec![Ok::<_, Infallible>(chunk1), Ok(chunk2)]);
                 Response::builder()
                     .status(200)
                     .header("content-type", "text/event-stream")
@@ -565,7 +557,10 @@ mod tests {
             "got: {body}"
         );
         assert!(body.contains("finish_reason"), "got: {body}");
-        assert!(body.contains("[DONE]"), "breaker must append [DONE]: {body}");
+        assert!(
+            body.contains("[DONE]"),
+            "breaker must append [DONE]: {body}"
+        );
     }
 
     #[tokio::test]
@@ -577,7 +572,10 @@ mod tests {
         assert!(proxy.try_acquire_lock());
         // Second server (same state dir) should find the lock held.
         let proxy2 = ProxyServer::new(&state, upstream);
-        assert!(!proxy2.try_acquire_lock(), "second server must see lock held");
+        assert!(
+            !proxy2.try_acquire_lock(),
+            "second server must see lock held"
+        );
         // Release; now the second can acquire.
         proxy.release_lock();
         assert!(proxy2.try_acquire_lock());

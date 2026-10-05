@@ -181,18 +181,20 @@ impl CastorMcpServer {
                 Err(e) => {
                     return CallToolResult::error(vec![ContentBlock::text(format!(
                         "Invalid coworker arguments: {e}"
-                    ))])
+                    ))]);
                 }
             },
             None => {
                 return CallToolResult::error(vec![ContentBlock::text(
                     "Missing arguments for coworker tool",
-                )])
+                )]);
             }
         };
 
         if params.prompt.trim().is_empty() {
-            return CallToolResult::error(vec![ContentBlock::text("Error: Prompt cannot be empty.")]);
+            return CallToolResult::error(vec![ContentBlock::text(
+                "Error: Prompt cannot be empty.",
+            )]);
         }
 
         // Fail fast on a bad reasoning tier (Issue #3): the served template
@@ -204,13 +206,17 @@ impl CastorMcpServer {
         let loaded = match crate::config::load() {
             Ok(c) => c,
             Err(e) => {
-                return CallToolResult::error(vec![ContentBlock::text(format!("Config error: {e}"))])
+                return CallToolResult::error(vec![ContentBlock::text(format!(
+                    "Config error: {e}"
+                ))]);
             }
         };
 
         // DGI Gatekeeper: model-driven 1-forward pass logit probe via guided_choice.
         // Replaces brittle regexes with the loaded model's own decomposition reasoning.
-        let dgi = if let (Some(base_url), Some(model)) = (&loaded.config.base_url, &loaded.config.model) {
+        let dgi = if let (Some(base_url), Some(model)) =
+            (&loaded.config.base_url, &loaded.config.model)
+        {
             let http = reqwest::Client::builder()
                 .timeout(std::time::Duration::from_millis(10000))
                 .build()
@@ -233,7 +239,9 @@ impl CastorMcpServer {
                 }
             }
         } else {
-            tracing::warn!("⚠️ LOUD DGI ADVISORY: DGI running without configured engine/model; 1-forward pass probe inactive.");
+            tracing::warn!(
+                "⚠️ LOUD DGI ADVISORY: DGI running without configured engine/model; 1-forward pass probe inactive."
+            );
             dgi::DgiVerdict::Review(0)
         };
 
@@ -282,7 +290,7 @@ impl CastorMcpServer {
             Err(e) => {
                 return CallToolResult::error(vec![ContentBlock::text(format!(
                     "Failed to register task: {e}"
-                ))])
+                ))]);
             }
         };
 
@@ -308,7 +316,8 @@ impl CastorMcpServer {
         }
 
         // Spawn detached worker process.
-        let mut bin = std::env::current_exe().unwrap_or_else(|_| std::path::PathBuf::from("castor"));
+        let mut bin =
+            std::env::current_exe().unwrap_or_else(|_| std::path::PathBuf::from("castor"));
         let bin_str = bin.to_string_lossy();
         if let Some(clean) = bin_str.strip_suffix(" (deleted)") {
             bin = std::path::PathBuf::from(clean);
@@ -353,32 +362,33 @@ impl CastorMcpServer {
                     let sync_dur = std::time::Duration::from_secs(sync_timeout_secs);
                     if let Ok(Ok(_)) = tokio::time::timeout(sync_dur, child.wait()).await {
                         let rec = registry.get(&task_id).await.or_else(|| {
-                                match registry.read_disk(&task_id) {
-                                    crate::task::registry::DiskRead::Ok(r) => Some(r),
-                                    _ => None,
-                                }
-                            });
+                            match registry.read_disk(&task_id) {
+                                crate::task::registry::DiskRead::Ok(r) => Some(r),
+                                _ => None,
+                            }
+                        });
 
-                            if let Some(r) = rec {
-                                match r.status {
-                                    crate::task::registry::TaskStatus::Completed => {
-                                        let out = r
-                                            .reason
-                                            .unwrap_or_else(|| "Task completed successfully.".to_string());
-                                        return CallToolResult::success(vec![ContentBlock::text(out)]);
-                                    }
-                                    crate::task::registry::TaskStatus::Failed => {
-                                        let err = r.reason.unwrap_or_else(|| "Task failed.".to_string());
-                                        return CallToolResult::error(vec![ContentBlock::text(format!(
-                                            "Task failed: {err}"
-                                        ))]);
-                                    }
-                                    _ => {}
+                        if let Some(r) = rec {
+                            match r.status {
+                                crate::task::registry::TaskStatus::Completed => {
+                                    let out = r.reason.unwrap_or_else(|| {
+                                        "Task completed successfully.".to_string()
+                                    });
+                                    return CallToolResult::success(vec![ContentBlock::text(out)]);
                                 }
+                                crate::task::registry::TaskStatus::Failed => {
+                                    let err =
+                                        r.reason.unwrap_or_else(|| "Task failed.".to_string());
+                                    return CallToolResult::error(vec![ContentBlock::text(
+                                        format!("Task failed: {err}"),
+                                    )]);
+                                }
+                                _ => {}
                             }
                         }
                     }
                 }
+            }
             Err(e) => {
                 let _ = registry
                     .transition(
@@ -394,9 +404,11 @@ impl CastorMcpServer {
         }
 
         let status_port = loaded.config.ports.status;
-        let (wait_cmd_win, wait_cmd_wsl) =
-            wait_commands(status_port, &task_id);
-        let status_cmd = format!("{}_task(action: \"status\", task_id: \"{task_id}\")", self.prefix);
+        let (wait_cmd_win, wait_cmd_wsl) = wait_commands(status_port, &task_id);
+        let status_cmd = format!(
+            "{}_task(action: \"status\", task_id: \"{task_id}\")",
+            self.prefix
+        );
 
         let mut text = format!(
             "### Castor Task Dispatched (Background Execution)\n\
@@ -423,18 +435,22 @@ impl CastorMcpServer {
                 Err(e) => {
                     return CallToolResult::error(vec![ContentBlock::text(format!(
                         "Invalid task arguments: {e}"
-                    ))])
+                    ))]);
                 }
             },
             None => {
-                return CallToolResult::error(vec![ContentBlock::text("Missing arguments for task tool")])
+                return CallToolResult::error(vec![ContentBlock::text(
+                    "Missing arguments for task tool",
+                )]);
             }
         };
 
         let loaded = match crate::config::load() {
             Ok(c) => c,
             Err(e) => {
-                return CallToolResult::error(vec![ContentBlock::text(format!("Config error: {e}"))])
+                return CallToolResult::error(vec![ContentBlock::text(format!(
+                    "Config error: {e}"
+                ))]);
             }
         };
         let state = crate::state::StateDir::from_config(&loaded.config);
@@ -484,7 +500,7 @@ impl CastorMcpServer {
                     None => {
                         return CallToolResult::error(vec![ContentBlock::text(
                             "Error: 'task_id' parameter is required for status.",
-                        )])
+                        )]);
                     }
                 };
                 let rec = match registry.get(task_id).await {
@@ -492,7 +508,7 @@ impl CastorMcpServer {
                     None => {
                         return CallToolResult::error(vec![ContentBlock::text(format!(
                             "Task '{task_id}' not found."
-                        ))])
+                        ))]);
                     }
                 };
                 let status_port = loaded.config.ports.status;
@@ -531,7 +547,7 @@ impl CastorMcpServer {
                     None => {
                         return CallToolResult::error(vec![ContentBlock::text(
                             "Error: 'task_id' parameter is required for cancel.",
-                        )])
+                        )]);
                     }
                 };
                 let rec = match registry.get(task_id).await {
@@ -539,7 +555,7 @@ impl CastorMcpServer {
                     None => {
                         return CallToolResult::error(vec![ContentBlock::text(format!(
                             "Task '{task_id}' not found."
-                        ))])
+                        ))]);
                     }
                 };
                 if let Some(pid) = rec.pid {
@@ -552,7 +568,9 @@ impl CastorMcpServer {
                         Some("Cancelled by request.".into()),
                     )
                     .await;
-                CallToolResult::success(vec![ContentBlock::text(format!("Task '{task_id}' cancelled."))])
+                CallToolResult::success(vec![ContentBlock::text(format!(
+                    "Task '{task_id}' cancelled."
+                ))])
             }
             "extend_lease" => {
                 let task_id = match params.task_id {
@@ -560,21 +578,22 @@ impl CastorMcpServer {
                     None => {
                         return CallToolResult::error(vec![ContentBlock::text(
                             "Error: 'task_id' parameter is required for extend_lease.",
-                        )])
+                        )]);
                     }
                 };
                 match registry.extend_budget(task_id, 25).await {
                     Ok(new_budget) => CallToolResult::success(vec![ContentBlock::text(format!(
                         "Budget for '{task_id}' extended to {new_budget} turns."
                     ))]),
-                    Err(e) => {
-                        CallToolResult::error(vec![ContentBlock::text(format!("Failed to extend budget: {e}"))])
-                    }
+                    Err(e) => CallToolResult::error(vec![ContentBlock::text(format!(
+                        "Failed to extend budget: {e}"
+                    ))]),
                 }
             }
             "stats" => {
                 let stats = crate::telemetry::derive_stats(state.root(), &Default::default());
-                let text = serde_json::to_string_pretty(&stats).unwrap_or_else(|_| "{}".to_string());
+                let text =
+                    serde_json::to_string_pretty(&stats).unwrap_or_else(|_| "{}".to_string());
                 CallToolResult::success(vec![ContentBlock::text(text)])
             }
             other => CallToolResult::error(vec![ContentBlock::text(format!(
@@ -591,18 +610,22 @@ impl CastorMcpServer {
                 Err(e) => {
                     return CallToolResult::error(vec![ContentBlock::text(format!(
                         "Invalid server arguments: {e}"
-                    ))])
+                    ))]);
                 }
             },
             None => {
-                return CallToolResult::error(vec![ContentBlock::text("Missing arguments for server tool")])
+                return CallToolResult::error(vec![ContentBlock::text(
+                    "Missing arguments for server tool",
+                )]);
             }
         };
 
         let loaded = match crate::config::load() {
             Ok(c) => c,
             Err(e) => {
-                return CallToolResult::error(vec![ContentBlock::text(format!("Config error: {e}"))])
+                return CallToolResult::error(vec![ContentBlock::text(format!(
+                    "Config error: {e}"
+                ))]);
             }
         };
         let state = crate::state::StateDir::from_config(&loaded.config);
@@ -623,12 +646,7 @@ impl CastorMcpServer {
 
 impl ServerHandler for CastorMcpServer {
     fn get_info(&self) -> ServerConfig {
-        ServerConfig::new(
-            ServerCapabilities::builder()
-                .enable_tools()
-                .build(),
-        )
-        .with_server_info(
+        ServerConfig::new(ServerCapabilities::builder().enable_tools().build()).with_server_info(
             rmcp::model::Implementation::new("castor", env!("CARGO_PKG_VERSION"))
                 .with_description("Castor: Rust MCP toolchain, proxy, and evo engine"),
         )
@@ -744,8 +762,7 @@ mod tests {
     #[test]
     fn validate_reasoning_effort_rejects_invalid_tiers_with_clear_error() {
         for tier in ["bogus", "high", "off", "none", "minimal", "max", "xhigh2"] {
-            let msg = validate_reasoning_effort(Some(tier))
-                .unwrap_err(); // must reject
+            let msg = validate_reasoning_effort(Some(tier)).unwrap_err(); // must reject
             assert!(msg.contains(tier), "error must name the bad value: {msg}");
             assert!(
                 msg.contains("xhigh") && msg.contains("medium") && msg.contains("low"),
@@ -760,7 +777,10 @@ mod tests {
         // doc comment must keep advertising the valid tier set so MCP
         // clients can self-validate before dispatch.
         let server = CastorMcpServer::new(DEFAULT_TOOL_PREFIX);
-        let coworker = server.tools().into_iter().find(|t| t.name.as_ref() == "castor_coworker")
+        let coworker = server
+            .tools()
+            .into_iter()
+            .find(|t| t.name.as_ref() == "castor_coworker")
             .expect("coworker tool present");
         let schema = coworker.input_schema.as_ref();
         let props = schema
@@ -818,11 +838,7 @@ mod tests {
             .iter()
             .map(|b| format!("{DEFAULT_TOOL_PREFIX}_{b}"))
             .collect();
-        assert_eq!(
-            names,
-            expected,
-            "tool names must match manifest constants"
-        );
+        assert_eq!(names, expected, "tool names must match manifest constants");
 
         for t in &tools {
             assert!(
@@ -840,10 +856,11 @@ mod tests {
 
         let coworker = &tools[0];
         let schema = coworker.input_schema.as_ref();
-        let required = schema
-            .get("required")
-            .and_then(|v| v.as_array())
-            .map(|a| a.iter().map(|v| v.as_str().unwrap_or("")).collect::<Vec<_>>());
+        let required = schema.get("required").and_then(|v| v.as_array()).map(|a| {
+            a.iter()
+                .map(|v| v.as_str().unwrap_or(""))
+                .collect::<Vec<_>>()
+        });
         assert!(
             required.as_deref() == Some(&["prompt"]),
             "coworker schema must require `prompt`, got {required:?}"
@@ -851,10 +868,11 @@ mod tests {
 
         let task = &tools[1];
         let schema = task.input_schema.as_ref();
-        let required = schema
-            .get("required")
-            .and_then(|v| v.as_array())
-            .map(|a| a.iter().map(|v| v.as_str().unwrap_or("")).collect::<Vec<_>>());
+        let required = schema.get("required").and_then(|v| v.as_array()).map(|a| {
+            a.iter()
+                .map(|v| v.as_str().unwrap_or(""))
+                .collect::<Vec<_>>()
+        });
         assert!(
             required.as_deref() == Some(&["action"]),
             "task schema must require `action`, got {required:?}"
@@ -862,10 +880,11 @@ mod tests {
 
         let server_tool = &tools[2];
         let schema = server_tool.input_schema.as_ref();
-        let required = schema
-            .get("required")
-            .and_then(|v| v.as_array())
-            .map(|a| a.iter().map(|v| v.as_str().unwrap_or("")).collect::<Vec<_>>());
+        let required = schema.get("required").and_then(|v| v.as_array()).map(|a| {
+            a.iter()
+                .map(|v| v.as_str().unwrap_or(""))
+                .collect::<Vec<_>>()
+        });
         assert!(
             required.as_deref() == Some(&["action"]),
             "server schema must require `action`, got {required:?}"
@@ -912,11 +931,7 @@ mod tests {
         let mut child = cmd.spawn().expect("failed to spawn castor binary");
         let stdout = child.stdout.take().expect("no stdout");
         let stdin = child.stdin.take().expect("no stdin");
-        (
-            child,
-            tokio::io::BufReader::new(stdout),
-            stdin,
-        )
+        (child, tokio::io::BufReader::new(stdout), stdin)
     }
 
     async fn send_line(stdin: &mut tokio::process::ChildStdin, line: &str) {
@@ -996,8 +1011,7 @@ mod tests {
             .map(|b| format!("{DEFAULT_TOOL_PREFIX}_{b}"))
             .collect();
         assert_eq!(
-            names,
-            expected,
+            names, expected,
             "tools/list over stdio must match manifest constants"
         );
 
@@ -1069,8 +1083,7 @@ mod tests {
 
     #[tokio::test]
     async fn default_subcommand_is_mcp_server() {
-        let (mut child, mut reader, mut stdin) =
-            spawn_and_handshake(&[], &[]).await;
+        let (mut child, mut reader, mut stdin) = spawn_and_handshake(&[], &[]).await;
 
         send_line(
             &mut stdin,
@@ -1091,8 +1104,7 @@ mod tests {
 
     #[tokio::test]
     async fn stdio_task_status_and_cancel() {
-        let (mut child, mut reader, mut stdin) =
-            spawn_and_handshake(&[], &[]).await;
+        let (mut child, mut reader, mut stdin) = spawn_and_handshake(&[], &[]).await;
 
         send_line(
             &mut stdin,
@@ -1129,8 +1141,13 @@ mod tests {
         )
         .await;
         let status_resp = read_jsonrpc_line(&mut reader).await;
-        let status_text = status_resp["result"]["content"][0]["text"].as_str().unwrap();
-        assert!(status_text.contains(task_id), "status response must mention task_id");
+        let status_text = status_resp["result"]["content"][0]["text"]
+            .as_str()
+            .unwrap();
+        assert!(
+            status_text.contains(task_id),
+            "status response must mention task_id"
+        );
 
         // 3. Cancel task
         send_line(
@@ -1141,8 +1158,13 @@ mod tests {
         )
         .await;
         let cancel_resp = read_jsonrpc_line(&mut reader).await;
-        let cancel_text = cancel_resp["result"]["content"][0]["text"].as_str().unwrap();
-        assert!(cancel_text.contains("cancelled"), "cancel response must confirm cancellation, got: {cancel_text}");
+        let cancel_text = cancel_resp["result"]["content"][0]["text"]
+            .as_str()
+            .unwrap();
+        assert!(
+            cancel_text.contains("cancelled"),
+            "cancel response must confirm cancellation, got: {cancel_text}"
+        );
 
         // 4. Query stats
         send_line(
