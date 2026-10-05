@@ -678,9 +678,9 @@ mod tests {
     }
 
     // ------------------------------------------------------------------
-    // Issue #3: reasoning_effort payload shape, per the config knob.
-    // A capturing handler records the received request body in a shared
-    // slot; the test then asserts on exactly what was serialized.
+    // reasoning_effort payload shape. A capturing handler records the
+    // received request body; the test asserts on exactly what was
+    // serialized.
     // ------------------------------------------------------------------
 
     fn assert_effort_fields(body: &Value, effort: Option<&str>) {

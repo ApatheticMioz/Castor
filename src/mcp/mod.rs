@@ -95,8 +95,7 @@ fn now_epoch_ms() -> u64 {
 /// Valid reasoning-effort tiers for the default serving engine (Qwen via
 /// vLLM). The served template 400s on any other value (`off`, `high`,
 /// `minimal`, …), so the schema fails fast here instead of letting the
-/// upstream reject a dispatched session mid-run (Issue #3; matches the
-/// legacy JS `REASONING_EFFORT_TIERS` contract).
+/// upstream reject a dispatched session mid-run.
 pub const REASONING_EFFORT_TIERS: [&str; 3] = ["xhigh", "medium", "low"];
 
 /// Validate a per-dispatch `reasoning_effort` value against
@@ -197,8 +196,8 @@ impl CastorMcpServer {
             )]);
         }
 
-        // Fail fast on a bad reasoning tier (Issue #3): the served template
-        // would 400 the whole session later, so reject at dispatch instead.
+        // Fail fast on a bad reasoning tier: the served template would 400
+        // the whole session later, so reject at dispatch instead.
         if let Err(e) = validate_reasoning_effort(params.reasoning_effort.as_deref()) {
             return CallToolResult::error(vec![ContentBlock::text(format!("Error: {e}"))]);
         }
@@ -731,9 +730,8 @@ mod tests {
     // ------------------------------------------------------------------
 
     // ------------------------------------------------------------------
-    // Issue #3: per-dispatch reasoning_effort tier validation — fail fast
-    // on values the served template would 400 on, accept the known set
-    // (and absence).
+    // Per-dispatch reasoning_effort tier validation — fail fast on values
+    // the served template would 400 on, accept the known set (and absence).
     // ------------------------------------------------------------------
 
     #[test]

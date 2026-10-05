@@ -223,7 +223,7 @@ pub fn check_binary(path: &Path) -> Result<PathBuf, SandboxError> {
 }
 
 // ---------------------------------------------------------------------------
-// Symmetric allowed-read / write roots (Issue #17 Part C & #6)
+// Symmetric allowed-read / write roots
 // ---------------------------------------------------------------------------
 
 /// The access a resolved path is granted under the [`SandboxPolicy`].
@@ -1118,7 +1118,7 @@ mod tests {
     }
 
     // ========================================================================
-    // SandboxPolicy tests (Issue #17 Part C & #6)
+    // SandboxPolicy tests
     // ========================================================================
 
     /// Build a stand-in `~/.castor` state dir under a *fake* home directory

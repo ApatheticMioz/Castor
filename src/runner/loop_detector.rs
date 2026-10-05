@@ -88,7 +88,7 @@ fn is_mutating_tool(name: &str) -> bool {
 
 /// The probe-budget advisory injected when the model has executed `budget`
 /// consecutive non-mutating, non-scratchpad bash commands without making
-/// any file changes (Issue #17 Part B).
+/// any file changes.
 pub const PROBE_ADVISORY: &str = "[Probe Advisory] You have executed consecutive non-mutating \
     exploratory probes without modifying files. Proceed with targeted AST edits or code mutations.";
 

@@ -436,9 +436,8 @@ mod tests {
 
     #[test]
     fn search_resolves_representative_languages() {
-        // Issue #17 Part A: prove extension→SupportLang resolution + parsing
-        // across a representative spread of the 28 bundled grammars, not just
-        // the original JS/TS/Python/Rust subset.
+        // Prove extension→SupportLang resolution + parsing across a
+        // representative spread of the bundled grammars.
         let root = test_root("representative");
         // (relative fixture path, language alias, ast-grep pattern, expected match text, source)
         let cases: &[(&str, &str, &str, &str, &str)] = &[
@@ -538,8 +537,7 @@ mod tests {
 
     #[test]
     fn infer_lang_by_extension_maps_representative_extensions() {
-        // Direct check of the canonical extension→SupportLang mapping that the
-        // hand-rolled 5-branch match used to provide (and under-delivered on).
+        // Direct check of the canonical extension→SupportLang mapping.
         let table: &[(&str, SupportLang)] = &[
             ("a.go", SupportLang::Go),
             ("a.c", SupportLang::C),

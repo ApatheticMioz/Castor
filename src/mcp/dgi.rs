@@ -1,7 +1,7 @@
-//! DGI Gatekeeper — Decomposition Granularity Index (Issue #16).
+//! DGI Gatekeeper — Decomposition Granularity Index.
 //!
-//! Replaces brittle regexes, markdown table scanners, and length heuristics with:
-//! 1. A 1-forward pass vLLM logit probe via guided_choice: ["ADMISSIBLE", "OVERLOADED"].
+//! Classifies a dispatch prompt in one of two ways:
+//! 1. A 1-forward pass vLLM logit probe via guided_choice: ["ADMIT", "OVERLOADED"].
 //! 2. A non-blocking soft heuristic fallback when offline.
 //!
 //! Domain agnosticism: no repo-specific patterns, no hardcoded file extensions,

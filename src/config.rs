@@ -65,7 +65,7 @@ pub struct Config {
     pub brave_api_key: Option<String>,
     pub boot_timeout_secs: u64,
     /// Consecutive non-mutating bash probes before a probe-budget advisory
-    /// is injected (Issue #17 Part B).
+    /// is injected.
     pub probe_budget: usize,
     pub state_dir: PathBuf,
 }

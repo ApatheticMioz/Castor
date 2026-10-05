@@ -33,7 +33,7 @@ const LANDING_WINDOW: u32 = 5;
 
 /// `finish_reason` value the engine reports when a response is truncated at
 /// its reasoning/output token ceiling. This is the signal for a
-/// `reasoning_budget_exhausted` termination (Issue #3 / R2).
+/// `reasoning_budget_exhausted` termination.
 const REASONING_CEILING_FINISH: &str = "length";
 
 /// Peer-empowered salvage prompt injected when the reasoning ceiling is hit.
@@ -66,12 +66,12 @@ const LOOP_WINDOW: usize = 6;
 const LOOP_THRESHOLD: usize = 3;
 
 /// Default probe budget: consecutive non-mutating bash probes before the
-/// probe-budget advisory is injected (Issue #17 Part B).
+/// probe-budget advisory is injected.
 pub const DEFAULT_PROBE_BUDGET: usize = 4;
 
 /// The async trait the runner depends on for tool execution.
 ///
-/// M7 implements real tools behind this trait; the runner depends only on it.
+/// The concrete tools implement this trait; the runner depends only on it.
 #[async_trait]
 pub trait ToolExecutor: Send + Sync {
     /// Execute a tool by name with JSON arguments.
@@ -97,7 +97,7 @@ pub enum ToolError {
 #[async_trait]
 pub trait ChatEngine: Send + Sync {
     /// One chat turn: send messages + tool schemas, get a completion,
-    /// optionally carrying a per-session reasoning_effort tier (Issue #3).
+    /// optionally carrying a per-session reasoning_effort tier.
     async fn chat(
         &self,
         messages: &[Message],
@@ -190,7 +190,7 @@ fn metrics_json(m: &Metrics) -> serde_json::Value {
 /// This is deliberately *only* the durable-location context — not the engine,
 /// executor, or budget — because those already flow through [`run_session`]
 /// directly. It exists so a session can persist a salvage report outside the
-/// event ledger at terminal (Issue #3 / R2).
+/// event ledger at terminal.
 #[derive(Debug, Clone)]
 pub struct SessionOptions {
     /// The castor state directory. `.scratch/` salvage reports are written here
@@ -199,13 +199,13 @@ pub struct SessionOptions {
     /// The session's working directory. Used as the fallback `.scratch/`
     /// location when no state dir is available.
     pub workspace: Option<PathBuf>,
-    /// Per-session reasoning-effort tier (Issue #3), forwarded to the engine
-    /// on every chat turn. `None` means "no override": the client sends
+    /// Per-session reasoning-effort tier, forwarded to the engine on every
+    /// chat turn. `None` means "no override": the client sends
     /// neither `reasoning_effort` nor `chat_template_kwargs` and the
     /// server-side default applies (zero behaviour change).
     pub reasoning_effort: Option<String>,
     /// Consecutive non-mutating bash probes before the probe-budget advisory
-    /// is injected (Issue #17 Part B). Defaults to 4.
+    /// is injected. Defaults to 4.
     pub probe_budget: usize,
 }
 
@@ -323,11 +323,11 @@ pub async fn run_session(
     let mut landing_injected = false;
     let mut status = "completed".to_string();
 
-    // Per-session reasoning-effort override (Issue #3). Applied uniformly to
-    // every engine call in the session (main turns, salvage, synthesis) —
-    // a mid-session tier change would break the prefix cache, so the tier
+    // Per-session reasoning-effort override, applied uniformly to every
+    // engine call in the session (main turns, salvage, synthesis) — a
+    // mid-session tier change would break the prefix cache, so the tier
     // is session-scoped. `None` leaves the payload byte-identical to the
-    // pre-override shape (the server-side default applies).
+    // no-override shape (the server-side default applies).
     let effort = options
         .and_then(|o| o.reasoning_effort.as_deref())
         .filter(|e| !e.is_empty());
@@ -387,11 +387,11 @@ pub async fn run_session(
             final_text = completion.content;
             final_produced = true;
 
-            // Deliberation-ceiling salvage pass (Issue #3 / R2): the model
-            // stopped at its reasoning ceiling on a non-tool turn. We keep the
-            // honest status, never wipe the accumulated conversation history,
-            // empower the peer engineer with full tools to inspect scratchpads
-            // or verify test outputs, and extract a grounded status report.
+            // Deliberation-ceiling salvage pass: the model stopped at its
+            // reasoning ceiling on a non-tool turn. The honest status is kept,
+            // the accumulated conversation history is preserved, the peer
+            // engineer is empowered with full tools to inspect scratchpads or
+            // verify test outputs, and a grounded status report is extracted.
             if ceiling_hit {
                 status = "reasoning_budget_exhausted".to_string();
 
@@ -622,11 +622,11 @@ impasse, state your findings and ask for alignment rather than continuing to re-
                 }
             }
 
-            // Probe budget tracking (Issue #17 Part B): consecutive
-            // non-mutating bash probes that do not target `.scratch/` are
-            // counted; at the budget threshold a one-shot advisory is
-            // injected to nudge the model toward code mutations.  Mutating
-            // tools reset the counter; `.scratch/` commands are exempt.
+            // Probe budget tracking: consecutive non-mutating bash probes
+            // that do not target `.scratch/` are counted; at the budget
+            // threshold a one-shot advisory is injected to nudge the model
+            // toward code mutations. Mutating tools reset the counter;
+            // `.scratch/` commands are exempt.
             if probe_tracker.record(&tc.name, &tc.arguments) {
                 messages.push(msg("user", PROBE_ADVISORY));
             }
@@ -1530,7 +1530,7 @@ mod tests {
         let _ = std::fs::remove_dir_all(state.root());
     }
 
-    // --- Probe budget integration tests (Issue #17 Part B) -------------------
+    // --- Probe budget integration tests -------------------------------------
 
     #[tokio::test]
     async fn non_scratch_bash_probes_trip_probe_budget_advisory() {

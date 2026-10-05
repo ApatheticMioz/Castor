@@ -93,8 +93,7 @@ pub async fn run_job_with_engine(
     // 3. Initialize EventLogger and record session start.
     let logger = EventLogger::new(state, &spec.session_id);
     // The effective tier is recorded on session_start (null when unset) so
-    // the session ledger is self-explanatory: pre-override sessions show
-    // null = "server default applied" (Issue #3).
+    // the session ledger is self-explanatory: null = "server default applied".
     let _ = logger.append(json!({
         "type": "session_start",
         "sessionId": spec.session_id,
@@ -168,9 +167,9 @@ notes or deleted legacy references are reference ledgers.\n\
     let turns_budget = spec.turns_budget.unwrap_or(runner::DEFAULT_TURNS_BUDGET);
 
     // Terminal artifacts (the reasoning-ceiling salvage report) are persisted
-    // under the state dir's `.scratch/` (Issue #3 / R2). The per-session
-    // reasoning-effort tier (validated at dispatch) is threaded into the
-    // runner so every engine call in the session carries it.
+    // under the state dir's `.scratch/`. The per-session reasoning-effort
+    // tier (validated at dispatch) is threaded into the runner so every
+    // engine call in the session carries it.
     let mut options = runner::SessionOptions::with_state(state.clone());
     options.reasoning_effort = spec.reasoning_effort.clone();
     options.probe_budget = config.probe_budget;
@@ -335,8 +334,8 @@ mod tests {
 
     /// A dispatch carrying a per-session `reasoning_effort` tier records the
     /// tier on the `session_start` event and threads it into
-    /// [`runner::SessionOptions`] (which the runner forwards to the engine
-    /// on every chat turn — Issue #3).
+    /// [`runner::SessionOptions`] (which the runner forwards to the engine on
+    /// every chat turn).
     #[tokio::test]
     async fn session_start_carries_reasoning_effort() {
         let (state, dir) = tmp_state();

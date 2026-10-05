@@ -583,11 +583,11 @@ fn parse_session_events(raw: &str, since: Option<i128>) -> Option<SessionAgg> {
         // canonical order for both the horizon and the `--since` window).
         let ms = v.get("timestamp").and_then(parse_timestamp_ms);
 
-        // `--since` time-window filter (Issue #18): keep the event only when
-        // its timestamp is at or after the cutoff. Without a cutoff, nothing
-        // is filtered and untimestamped events pass (historical behavior).
-        // With a cutoff, an untimestamped event cannot be proven inside the
-        // window and is excluded.
+        // `--since` time-window filter: keep the event only when its
+        // timestamp is at or after the cutoff. Without a cutoff, nothing is
+        // filtered and untimestamped events pass. With a cutoff, an
+        // untimestamped event cannot be proven inside the window and is
+        // excluded.
         let in_window = match (since, ms) {
             (None, _) => true,
             (Some(cutoff), Some(m)) => m >= cutoff,
@@ -971,7 +971,7 @@ mod tests {
     }
 
     /// `parse_timestamp_ms` reads RFC-3339 (and a JSON epoch-millis number)
-    /// and rejects every legacy shape the old reader used to special-case.
+    /// and returns `None` for every other shape.
     #[test]
     fn parse_timestamp_ms_reads_rfc3339_only() {
         // RFC-3339 with Z (verified against `date -u` / `python3`).
