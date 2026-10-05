@@ -46,7 +46,11 @@ impl CompositeExecutor {
         extensions: Option<ExtensionBridge>,
     ) -> Result<Self, fs::FsError> {
         let root = crate::platform::to_host_path(workspace_root.into());
-        let fs = FsExecutor::new(&root)?;
+        let state_dir = crate::config::load()
+            .ok()
+            .map(|l| l.config.state_dir);
+        let policy = sandbox::SandboxPolicy::for_workspace(&root, state_dir.as_deref());
+        let fs = FsExecutor::with_policy(policy);
         let web = WebClient::with_base_urls(searxng_url, None, None);
         Ok(Self {
             fs,

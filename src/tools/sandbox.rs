@@ -14,8 +14,9 @@
 
 use std::fs;
 use std::io::Read;
-use std::path::{Component, Path, PathBuf};
+use std::path::{Path, PathBuf};
 
+use path_clean::PathClean;
 use thiserror::Error;
 
 #[derive(Debug, Error)]
@@ -126,19 +127,9 @@ pub fn refuse_out_of_tree(root: &Path, target: &Path) -> Result<PathBuf, Sandbox
     Ok(target.to_path_buf())
 }
 
-/// Lexically collapse `.` and `..` components without touching the filesystem.
+/// Lexically collapse `.` and `..` components via path-clean crate.
 fn normalize_lexical(p: &Path) -> PathBuf {
-    let mut out = PathBuf::new();
-    for c in p.components() {
-        match c {
-            Component::CurDir => {}
-            Component::ParentDir => {
-                out.pop();
-            }
-            other => out.push(other.as_os_str()),
-        }
-    }
-    out
+    p.clean()
 }
 
 fn is_reserved_device(name: &str) -> bool {
@@ -205,57 +196,364 @@ pub fn normalize_traversal(root: &Path, input: &str) -> Result<PathBuf, SandboxE
     Ok(normalized)
 }
 
-/// Magic-number signatures: (prefix bytes, mime, label).
-const MAGIC_SIGNATURES: &[(&[u8], &str, &str)] = &[
-    (b"%PDF-", "application/pdf", "PDF"),
-    (&[0x89, b'P', b'N', b'G', 0x0D, 0x0A, 0x1A, 0x0A], "image/png", "PNG"),
-    (&[0xFF, 0xD8, 0xFF], "image/jpeg", "JPEG"),
-    (b"GIF8", "image/gif", "GIF"),
-    (b"PK\x03\x04", "application/zip", "ZIP"),
-    (&[0x1F, 0x8B], "application/gzip", "GZIP"),
-    (&[0x37, 0x7A, 0xBC, 0xAF, 0x27, 0x1C], "application/x-7z", "7z"),
-    (b"BZh", "application/x-bzip2", "bzip2"),
-    (&[0xFD, 0x37, 0x7A, 0x58, 0x5A, 0x00], "application/x-xz", "xz"),
-    (b"\x7FELF", "application/x-elf", "ELF"),
-    (b"MZ", "application/x-dosexec", "PE/COFF"),
-    (b"ID3", "audio/mpeg", "MP3"),
-    (b"SQLite format 3\x00", "application/x-sqlite3", "SQLite"),
-    (b"\x00asm", "application/wasm", "WASM"),
-    (b"wOF2", "font/woff2", "WOFF2"),
-    (b"wOFF", "font/woff", "WOFF"),
-    (b"RIFF", "audio/wav", "WAV/RIFF"),
-];
-
-fn sniff_magic(b: &[u8]) -> Option<(&'static str, &'static str)> {
-    for (sig, mime, label) in MAGIC_SIGNATURES {
-        if b.len() >= sig.len() && &b[..sig.len()] == *sig {
-            return Some((mime, label));
-        }
-    }
-    if b.len() >= 2 && b[0] == 0xFF && matches!(b[1], 0xFB | 0xF3 | 0xF7) {
-        return Some(("audio/mpeg", "MP3"));
-    }
-    if b.len() >= 12 && &b[4..8] == b"ftyp" {
-        return Some(("video/mp4", "MP4"));
-    }
-    None
-}
-
-/// Layer 5: binary read fail-fast. Sniff the first 4100 bytes; a known
-/// binary signature yields `SandboxError::BinaryFile` (never coerced to text).
+/// Layer 5: binary read fail-fast. Sniff the first 4096 bytes via the `infer` crate;
+/// a known binary signature or presence of null bytes yields `SandboxError::BinaryFile`.
 pub fn check_binary(path: &Path) -> Result<PathBuf, SandboxError> {
     let mut f = fs::File::open(path)?;
-    let mut buf = vec![0u8; 4100];
+    let mut buf = vec![0u8; 4096];
     let n = f.read(&mut buf)?;
     buf.truncate(n);
-    if let Some((mime, label)) = sniff_magic(&buf) {
+    if let Some(kind) = infer::get(&buf) {
         return Err(SandboxError::BinaryFile {
             file: path.to_path_buf(),
-            detected_type: format!("{mime} ({label})"),
-            reason: format!("magic bytes identify it as {mime}"),
+            detected_type: format!("{} ({})", kind.mime_type(), kind.extension()),
+            reason: format!("magic bytes identify it as {}", kind.mime_type()),
+        });
+    }
+    if buf.contains(&0) {
+        return Err(SandboxError::BinaryFile {
+            file: path.to_path_buf(),
+            detected_type: "application/octet-stream (binary)".to_string(),
+            reason: "null bytes detected in file header".to_string(),
         });
     }
     Ok(path.to_path_buf())
+}
+
+// ---------------------------------------------------------------------------
+// Symmetric allowed-read / write roots (Issue #17 Part C & #6)
+// ---------------------------------------------------------------------------
+
+/// The access a resolved path is granted under the [`SandboxPolicy`].
+///
+/// `ReadWrite` roots permit both reading and mutating; `ReadOnly` roots permit
+/// reading only. `Deny` is the terminal class (a path in neither set); [`
+/// SandboxPolicy::resolve`] maps it to a [`SandboxError::PathEscape`] rather
+/// than returning it, but the variant is kept so callers can express "no
+/// access" explicitly.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AccessClass {
+    /// Path lands under a write root: reads and writes both allowed.
+    ReadWrite,
+    /// Path lands under a read-only root: reads allowed, writes denied.
+    ReadOnly,
+    /// Path lands in neither set: no access (normally surfaced as `PathEscape`).
+    Deny,
+}
+
+/// A path together with the access class the [`SandboxPolicy`] grants it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ResolvedPath {
+    pub path: PathBuf,
+    pub class: AccessClass,
+}
+
+impl ResolvedPath {
+    /// Whether this resolution satisfies a read (RO ∪ RW) operation.
+    pub fn permits_read(&self) -> bool {
+        self.class != AccessClass::Deny
+    }
+    /// Whether this resolution satisfies a write (RW-only) operation.
+    pub fn permits_write(&self) -> bool {
+        self.class == AccessClass::ReadWrite
+    }
+}
+
+fn canonical_or_self(p: &Path) -> PathBuf {
+    fs::canonicalize(p).unwrap_or_else(|_| p.to_path_buf())
+}
+
+fn dedupe(mut v: Vec<PathBuf>) -> Vec<PathBuf> {
+    v.sort();
+    v.dedup();
+    v
+}
+
+/// Canonical `$HOME` for the current user (platform-aware).
+fn home_dir() -> Option<PathBuf> {
+    if cfg!(windows) {
+        std::env::var_os("USERPROFILE").map(PathBuf::from)
+    } else {
+        std::env::var_os("HOME").map(PathBuf::from)
+    }
+}
+
+/// Symmetric filesystem policy: a set of read-write roots and a (superset) set
+/// of read-only roots.
+///
+/// This is the single source of truth that both the filesystem tools and the
+/// (Linux) Landlock confinement derive their allowed-path classification from,
+/// so the two layers never disagree.
+///
+/// Layers 1–5 (workspace-root resolution, symlink containment, out-of-tree
+/// refusal, lexical normalization, binary sniff) remain intact as free
+/// functions above; this policy *generalizes* the single-root model to a
+/// read/write split and adds tilde expansion, while delegating lexical
+/// normalization to [`normalize_lexical`] and device-name refusal to
+/// [`is_reserved_device`] so those invariants are preserved.
+#[derive(Debug, Clone)]
+pub struct SandboxPolicy {
+    write_roots: Vec<PathBuf>,
+    read_roots: Vec<PathBuf>,
+}
+
+impl SandboxPolicy {
+    /// Construct from explicit (already canonicalized) root lists.
+    ///
+    /// Read roots are a superset of write roots by convention: a path is
+    /// `ReadWrite` iff it is under a write root, else `ReadOnly` iff it is
+    /// under a read root, else `Deny` (surfaced as `PathEscape`).
+    pub fn new(write_roots: Vec<PathBuf>, read_roots: Vec<PathBuf>) -> Self {
+        Self {
+            write_roots: dedupe(write_roots),
+            read_roots: dedupe(read_roots),
+        }
+    }
+
+    /// The tight policy used by [`crate::tools::fs::FsExecutor::new`] and the
+    /// eval runner, where only the workspace itself may be touched. This
+    /// preserves the historical single-root behavior (and its tests).
+    pub fn workspace_only(root: &Path) -> Self {
+        let ws = canonical_or_self(root);
+        Self::new(vec![ws.clone()], vec![ws])
+    }
+
+    /// The production policy built by [`crate::tools::CompositeExecutor`]:
+    ///
+    /// - **write roots**: canonicalized `workspace_root` + `std::env::temp_dir()`
+    /// - **read roots**: canonicalized `workspace_root` + optional `state_dir`
+    ///   (`~/.castor`) + (on Linux) `/usr`, `/bin`, `/lib`, `/etc`
+    pub fn for_workspace(root: &Path, state_dir: Option<&Path>) -> Self {
+        let ws = canonical_or_self(root);
+        let write_roots = vec![ws.clone(), std::env::temp_dir()];
+        let mut read_roots = vec![ws];
+        if let Some(sd) = state_dir {
+            read_roots.push(canonical_or_self(sd));
+        }
+        #[cfg(target_os = "linux")]
+        for p in ["/usr", "/bin", "/lib", "/etc"] {
+            read_roots.push(PathBuf::from(p));
+        }
+        Self::new(write_roots, read_roots)
+    }
+
+    pub fn write_roots(&self) -> &[PathBuf] {
+        &self.write_roots
+    }
+    pub fn read_roots(&self) -> &[PathBuf] {
+        &self.read_roots
+    }
+
+    /// Expand a leading `~` / `~user` prefix to the canonical `$HOME` before
+    /// classification.
+    ///
+    /// Per the spec, both a bare `~` and a `~user` form collapse to the
+    /// current user's canonical home (a conservative mapping that keeps every
+    /// tilde reference classifiable against the home-rooted read roots).
+    /// Trailing sub-paths are preserved: `~/a/b` → `$HOME/a/b`.
+    pub fn expand_tilde_prefix(&self, input: &str) -> String {
+        let s = input.trim();
+        let home = match home_dir() {
+            Some(h) => h,
+            None => return input.to_string(),
+        };
+        let join = |sub: &str| {
+            if sub.is_empty() {
+                home.to_string_lossy().into_owned()
+            } else {
+                home.join(sub).to_string_lossy().into_owned()
+            }
+        };
+        let Some(after) = s.strip_prefix('~') else {
+            return input.to_string();
+        };
+        if after.is_empty() {
+            return join(""); // "~"
+        }
+        if let Some(sub) = after.strip_prefix('/') {
+            return join(sub); // "~/sub/..."
+        }
+        // "~user" or "~user/sub": drop the `user` segment, keep the rest.
+        let sub = after.split('/').skip(1).collect::<Vec<_>>().join("/");
+        join(&sub)
+    }
+
+    /// Classify a raw path string against the policy.
+    ///
+    /// Order of operations (preserving the 5-layer invariants, generalized to the
+    /// root sets):
+    /// 1. null-byte refusal (layer 4),
+    /// 2. tilde expansion to canonical `$HOME`,
+    /// 3. backslash→slash normalization + lexical `.`/`..` collapse (layer 4),
+    /// 4. reserved-device-name refusal (layer 4),
+    /// 5. lexical membership: a path whose *lexical* form is outside every root is
+    ///    an out-of-tree [`SandboxError::PathEscape`] (layer 3, checked first);
+    /// 6. symlink containment: if the path exists and its canonical (symlink-
+    ///    resolved) location falls outside every root, it is a
+    ///    [`SandboxError::SymlinkEscape`] (layer 2, generalized);
+    /// 7. the granted class reflects the *canonical* location — `ReadWrite` if
+    ///    under a write root, else `ReadOnly` if under a read root — so a symlink
+    ///    from a write root into a read-only root is treated as read-only, never
+    ///    read-write.
+    ///
+    /// The returned [`ResolvedPath::path`] is the lexically-normalized path (stable
+    /// and printable); its `class` is derived from the canonical location.
+    pub fn resolve(&self, input: &str) -> Result<ResolvedPath, SandboxError> {
+        if input.contains('\0') {
+            return Err(SandboxError::NullByte(
+                "NullByteError: Path contains prohibited null byte character".into(),
+            ));
+        }
+        let expanded = self.expand_tilde_prefix(input);
+        let posix = expanded.replace('\\', "/");
+        // A relative path is resolved against the primary write root (the
+        // workspace); an absolute path is used as-is.
+        let base = self.write_roots.first().cloned().unwrap_or_default();
+        let p = if Path::new(&posix).is_absolute() {
+            PathBuf::from(posix)
+        } else {
+            base.join(&posix)
+        };
+        let normalized = normalize_lexical(&p);
+        if let Some(name) = normalized.file_name()
+            && is_reserved_device(&name.to_string_lossy())
+        {
+            return Err(SandboxError::DeviceName(format!(
+                "DeviceNameError: Prohibited access to Windows reserved device '{}'",
+                name.to_string_lossy().to_uppercase()
+            )));
+        }
+
+        // (5) Lexical out-of-tree check first — a plainly-absolute path outside
+        // every root is a PathEscape (layer 3), not a symlink error.
+        let lexical_in_write = self.write_roots.iter().any(|r| normalized.strip_prefix(r).is_ok());
+        let lexical_in_read = self
+            .read_roots
+            .iter()
+            .any(|r| normalized.strip_prefix(r).is_ok());
+        if !lexical_in_write && !lexical_in_read {
+            return Err(SandboxError::PathEscape(format!(
+                "PathEscapeError: Access denied. Path '{}' escapes all allowed roots",
+                input
+            )));
+        }
+
+        // (6) Symlink containment: resolve to the real location; it must itself
+        // land inside a root or the symlink escapes the sandbox.
+        let real = if normalized.exists() {
+            fs::canonicalize(&normalized).unwrap_or(normalized.clone())
+        } else {
+            normalized.clone()
+        };
+        let real_in_write = self.write_roots.iter().any(|r| real.strip_prefix(r).is_ok());
+        let real_in_read = self.read_roots.iter().any(|r| real.strip_prefix(r).is_ok());
+        if !real_in_write && !real_in_read {
+            return Err(SandboxError::SymlinkEscape(format!(
+                "SymlinkEscapeError: Path '{}' resolves to '{}' escaping all allowed roots",
+                normalized.display(),
+                real.display()
+            )));
+        }
+
+        // (7) Class from the canonical location: RW beats RO.
+        let class = if real_in_write {
+            AccessClass::ReadWrite
+        } else {
+            AccessClass::ReadOnly
+        };
+        Ok(ResolvedPath {
+            path: normalized,
+            class,
+        })
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Landlock confinement (Linux) — additive over the 5-layer in-process policy.
+// ---------------------------------------------------------------------------
+//
+// The kernel is the authoritative confiner for the *sandboxed shell child*:
+// the in-process 5-layer policy above governs the filesystem *tools* and the
+// lexical path classification, while Landlock governs what the spawned
+// `bash -c` child may touch at the syscall level. The two derive from the
+// *same* `SandboxPolicy` root sets so they never disagree about which paths
+// are write vs. read.
+//
+// The ruleset is built in the **parent** (before `fork`), then handed to the
+// child via `pre_exec` → `restrict_self()`. The parent never restricts
+// itself. Every failure mode — Landlock unavailable (kernel < 5.13 / disabled
+// → the crate's best-effort yields a no-op ruleset), an unsupportable
+// filesystem (e.g. a `9p`/drvfs mount that refuses a `PathBeneath` rule), or
+// a failed `restrict_self` — is handled by the caller falling back cleanly to
+// the in-process 5-layer sandbox. Landlock is strictly additive; a failure
+// never aborts the command.
+
+#[cfg(target_os = "linux")]
+impl SandboxPolicy {
+    /// Build a Landlock ruleset from this policy's root sets.
+    ///
+    /// - Read roots are granted read-only access (`AccessFs::from_read`).
+    /// - Write roots are granted full access (`AccessFs::from_all`).
+    ///
+    /// Returns `Ok(None)` when Landlock is unavailable or the ruleset cannot
+    /// be fully populated (an unsupportable filesystem). Returns `Ok(Some(rs))`
+    /// with a ruleset ready to be `try_clone`d into a child and `restrict_self`ed.
+    /// `Err` is reserved for a genuine build failure (the caller treats it the
+    /// same as `None` — degrade to the in-process sandbox).
+    pub fn build_landlock_ruleset(
+        &self,
+    ) -> Result<Option<landlock::RulesetCreated>, SandboxError> {
+        use landlock::{Access, AccessFs, Ruleset, RulesetAttr, RulesetCreatedAttr, ABI};
+
+        let abi = ABI::V3; // Refer (V2) + Truncate (V3); best-effort on older kernels.
+        let ro = AccessFs::from_read(abi);
+        let rw = AccessFs::from_all(abi);
+
+        // No usable access (Landlock absent): the crate's best-effort still
+        // yields a no-op ruleset, but we skip straight to "not enforced".
+        if ro.is_empty() && rw.is_empty() {
+            return Ok(None);
+        }
+
+        let mut ruleset = Ruleset::default()
+            .handle_access(ro | rw)
+            .and_then(|r| r.create())
+            .map_err(|e| SandboxError::InvalidPath(format!("landlock create: {e}")))?;
+
+        // Read roots first (broader), then write roots (narrower, more access).
+        for root in self.read_roots() {
+            let Some(rule) = open_beneath(root, ro)? else {
+                return Ok(None); // unsupportable / missing path → degrade
+            };
+            ruleset = ruleset
+                .add_rule(rule)
+                .map_err(|e| SandboxError::InvalidPath(format!("landlock add_rule: {e}")))?;
+        }
+        for root in self.write_roots() {
+            let Some(rule) = open_beneath(root, rw)? else {
+                return Ok(None);
+            };
+            ruleset = ruleset
+                .add_rule(rule)
+                .map_err(|e| SandboxError::InvalidPath(format!("landlock add_rule: {e}")))?;
+        }
+
+        Ok(Some(ruleset))
+    }
+}
+
+#[cfg(target_os = "linux")]
+fn open_beneath(
+    root: &Path,
+    access: landlock::BitFlags<landlock::AccessFs>,
+) -> Result<Option<landlock::PathBeneath<landlock::PathFd>>, SandboxError> {
+    use landlock::{PathBeneath, PathFd};
+    match PathFd::new(root) {
+        Ok(fd) => Ok(Some(PathBeneath::new(fd, access))),
+        // A path that cannot be opened (missing, or a filesystem that rejects
+        // O_PATH) is a degrade signal: no rule, caller falls back.
+        Err(_) => Ok(None),
+    }
 }
 
 #[cfg(test)]
@@ -774,7 +1072,9 @@ mod tests {
         let root = test_root("security_table");
         for v in vectors.iter().filter(|v| v.runnable) {
             if v.layer == "ShellPolicy" {
-                let err = shell::validate(v.input).unwrap_err();
+                let res = shell::validate(v.input);
+                assert!(res.is_err(), "Runnable vector '{}' should be blocked but was allowed", v.input);
+                let err = res.unwrap_err();
                 match &err {
                     ShellPolicyError::ProhibitedPattern(_)
                     | ShellPolicyError::ProtectedRoot(_, _)
@@ -798,5 +1098,192 @@ mod tests {
                 ),
             }
         }
+    }
+
+    // ========================================================================
+    // SandboxPolicy tests (Issue #17 Part C & #6)
+    // ========================================================================
+
+    /// Build a stand-in `~/.castor` state dir under a *fake* home directory
+    /// (under `temp_dir()`, but not under the workspace), mirroring the
+    /// production `$HOME/.castor` layout.
+    fn fake_home_state_dir(tag: &str) -> PathBuf {
+        let home = std::env::temp_dir()
+            .join(format!("castor_fake_home_{}_{}", std::process::id(), tag));
+        let _ = fs::remove_dir_all(&home);
+        let state = home.join(".castor");
+        fs::create_dir_all(&state).unwrap();
+        state
+    }
+
+    /// A policy whose write roots are exactly `[workspace]` and whose read roots
+    /// are `[workspace, state_dir]`. This isolates the RW/RO split from the
+    /// `temp_dir()` write root that `for_workspace` adds, so a state dir under
+    /// `temp_dir()` is unambiguously read-only.
+    fn rw_ro_policy(ws: &Path, state: &Path) -> SandboxPolicy {
+        SandboxPolicy::new(
+            vec![canonical_or_self(ws)],
+            vec![canonical_or_self(ws), canonical_or_self(state)],
+        )
+    }
+
+    #[test]
+    fn policy_read_in_state_dir_succeeds_write_fails() {
+        let ws = test_root("policy_state");
+        let state = fake_home_state_dir("state");
+        let policy = rw_ro_policy(&ws, &state);
+
+        // Reading a file under the state dir is permitted (read-only root).
+        let file = state.join("config.json");
+        fs::write(&file, "{}\n").unwrap();
+        let ro = policy
+            .resolve(&file.to_string_lossy())
+            .expect("state dir file must be readable");
+        assert_eq!(ro.class, AccessClass::ReadOnly, "state dir is a read root");
+        assert!(ro.permits_read() && !ro.permits_write());
+
+        // A path under the workspace is read-write (both ops permitted).
+        let wfile = ws.join("src").join("a.txt");
+        fs::write(&wfile, "hi\n").unwrap();
+        let rw = policy
+            .resolve("src/a.txt")
+            .expect("workspace file must be read-write");
+        assert_eq!(rw.class, AccessClass::ReadWrite);
+        assert!(rw.permits_read() && rw.permits_write());
+
+        let _ = fs::remove_dir_all(state.parent().unwrap());
+    }
+
+    #[test]
+    fn policy_write_in_state_dir_fails_read_only() {
+        // Even though the state dir is readable, it is read-only: `resolve`
+        // must classify it `ReadOnly` so write tools can refuse it.
+        let ws = test_root("policy_rw_split");
+        let state = fake_home_state_dir("ro");
+        let policy = rw_ro_policy(&ws, &state);
+        let file = state.join("x.txt");
+        fs::write(&file, "x\n").unwrap();
+        let resolved = policy.resolve(&file.to_string_lossy()).unwrap();
+        assert_eq!(resolved.class, AccessClass::ReadOnly);
+        assert!(!resolved.permits_write(), "state dir writes must be denied");
+        let _ = fs::remove_dir_all(state.parent().unwrap());
+    }
+
+    #[test]
+    fn policy_out_of_tree_path_fails() {
+        let ws = test_root("policy_oot");
+        let policy = SandboxPolicy::for_workspace(&ws, None);
+        // /proc is neither a read nor write root on any platform (and is
+        // guaranteed to escape the temp-dir workspace), so it must be denied.
+        let err = policy.resolve("/proc/self/status").unwrap_err();
+        assert!(matches!(err, SandboxError::PathEscape(_)), "{err}");
+        // A relative traversal that escapes the workspace is also denied.
+        let err = policy.resolve("../../outside.txt").unwrap_err();
+        assert!(matches!(err, SandboxError::PathEscape(_)), "{err}");
+    }
+
+    #[test]
+    fn policy_linux_system_read_roots_are_readable() {
+        #[cfg(target_os = "linux")]
+        {
+            let ws = test_root("policy_linux_sys");
+            let policy = SandboxPolicy::for_workspace(&ws, None);
+            // /etc is a read-only root on Linux.
+            let resolved = policy.resolve("/etc/hostname").unwrap();
+            assert_eq!(resolved.class, AccessClass::ReadOnly);
+            assert!(resolved.permits_read());
+            assert!(!resolved.permits_write());
+        }
+        #[cfg(not(target_os = "linux"))]
+        {
+            let _ = test_root("policy_nolinux");
+        }
+    }
+
+    #[test]
+    fn policy_tilde_expansion_classifies() {
+        let ws = test_root("policy_tilde");
+        let policy = SandboxPolicy::workspace_only(&ws);
+        // No HOME-based roots here, so a tilde path resolves to $HOME, which
+        // is outside the tight workspace policy -> PathEscape (still classified,
+        // never silently coerced).
+        let expanded = policy.expand_tilde_prefix("~/some/file.txt");
+        assert!(!expanded.starts_with('~'), "tilde must be expanded: {expanded}");
+        if home_dir().is_some() {
+            let err = policy.resolve("~/some/file.txt").unwrap_err();
+            assert!(matches!(err, SandboxError::PathEscape(_)), "{err}");
+        }
+    }
+
+    #[test]
+    fn policy_null_byte_and_device_refused() {
+        let ws = test_root("policy_nulldev");
+        let policy = SandboxPolicy::workspace_only(&ws);
+        assert!(matches!(
+            policy.resolve("a\0b"),
+            Err(SandboxError::NullByte(_))
+        ));
+        assert!(matches!(
+            policy.resolve("NUL"),
+            Err(SandboxError::DeviceName(_))
+        ));
+    }
+
+    #[test]
+    fn workspace_only_policy_matches_single_root() {
+        let ws = test_root("policy_ws_only");
+        let policy = SandboxPolicy::workspace_only(&ws);
+        // In-tree read/write.
+        let in_tree = policy.resolve("src/a.txt").unwrap();
+        assert_eq!(in_tree.class, AccessClass::ReadWrite);
+        // Absolute out-of-tree path (e.g. /etc/passwd) is denied under the
+        // tight policy, regardless of the platform system-read roots.
+        let err = policy.resolve("/etc/passwd").unwrap_err();
+        assert!(matches!(err, SandboxError::PathEscape(_)), "{err}");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn policy_symlink_escaping_workspace_is_symlink_escape() {
+        let ws = test_root("policy_symlink");
+        let policy = SandboxPolicy::workspace_only(&ws);
+        // A target that exists outside the workspace but is lexically inside it
+        // (a symlink whose target is elsewhere) must be refused as SymlinkEscape,
+        // because its canonical location escapes every root.
+        let outside = std::env::temp_dir().join(format!(
+            "castor_policy_symlink_target_{}_{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        fs::create_dir_all(&outside).unwrap();
+        let outside_file = outside.join("secret.txt");
+        fs::write(&outside_file, "top secret\n").unwrap();
+        let link = ws.join("src").join("link_out");
+        std::os::unix::fs::symlink(&outside_file, &link).unwrap();
+
+        // Lexically the link is under the workspace, but it resolves outside.
+        let err = policy.resolve("src/link_out").unwrap_err();
+        assert!(
+            matches!(err, SandboxError::SymlinkEscape(_)),
+            "expected SymlinkEscape, got {err}"
+        );
+        let _ = fs::remove_dir_all(&outside);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn policy_symlink_within_workspace_is_allowed() {
+        let ws = test_root("policy_symlink_in");
+        let policy = SandboxPolicy::workspace_only(&ws);
+        let target = ws.join("src").join("real.txt");
+        fs::write(&target, "hello\n").unwrap();
+        let link = ws.join("alias.txt");
+        std::os::unix::fs::symlink(&target, &link).unwrap();
+        let resolved = policy.resolve("alias.txt").unwrap();
+        assert_eq!(resolved.class, AccessClass::ReadWrite);
+        assert!(resolved.permits_read());
     }
 }

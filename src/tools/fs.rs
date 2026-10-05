@@ -12,7 +12,7 @@ use thiserror::Error;
 
 use crate::runner::{ToolError, ToolExecutor, ToolOutcome};
 
-use super::sandbox::{self, SandboxError};
+use super::sandbox::{self, AccessClass, SandboxError, SandboxPolicy};
 
 #[derive(Debug, Error)]
 pub enum FsError {
@@ -27,20 +27,60 @@ pub enum FsError {
 }
 
 pub struct FsExecutor {
-    root: PathBuf,
+    policy: SandboxPolicy,
 }
 
 impl FsExecutor {
+    /// Construct with the tight single-root policy (workspace only). This is
+    /// what the eval replay runner uses, where only the workspace may be
+    /// touched.
     pub fn new(root: &Path) -> Result<Self, FsError> {
-        let resolved = sandbox::resolve_workspace_root(root)?;
-        Ok(Self { root: resolved })
+        let policy = SandboxPolicy::workspace_only(root);
+        Ok(Self { policy })
     }
 
-    fn resolve(&self, input: &str) -> Result<PathBuf, FsError> {
-        let normalized = sandbox::normalize_traversal(&self.root, input)?;
-        sandbox::refuse_out_of_tree(&self.root, &normalized)?;
-        sandbox::verify_symlink_containment(&normalized, &self.root)?;
-        Ok(normalized)
+    /// Construct with an explicit [`SandboxPolicy`] (e.g. the production policy
+    /// built by [`crate::tools::CompositeExecutor::with_config`], which adds the
+    /// read-only state dir and, on Linux, the system read roots).
+    pub fn with_policy(policy: SandboxPolicy) -> Self {
+        Self { policy }
+    }
+
+    /// The primary write root (the workspace), used as the cwd and as the base
+    /// for relative-path resolution / relative display.
+    fn root(&self) -> &Path {
+        self.policy
+            .write_roots()
+            .first()
+            .map(|p| p.as_path())
+            .unwrap_or_else(|| Path::new("."))
+    }
+
+    /// Resolve `input` for a **read** operation (RW ∪ RO roots allowed).
+    fn resolve_read(&self, input: &str) -> Result<PathBuf, FsError> {
+        self.resolve_with(input, AccessClass::ReadOnly)
+    }
+
+    /// Resolve `input` for a **write** operation (RW roots only).
+    fn resolve_write(&self, input: &str) -> Result<PathBuf, FsError> {
+        self.resolve_with(input, AccessClass::ReadWrite)
+    }
+
+    fn resolve_with(&self, input: &str, required: AccessClass) -> Result<PathBuf, FsError> {
+        let resolved = self.policy.resolve(input)?;
+        let ok = match required {
+            AccessClass::ReadWrite => resolved.class == AccessClass::ReadWrite,
+            AccessClass::ReadOnly => resolved.permits_read(),
+            AccessClass::Deny => false,
+        };
+        if !ok {
+            return Err(SandboxError::PathEscape(format!(
+                "PathEscapeError: Access denied. Path '{}' does not permit this operation",
+                input
+            ))
+            .into());
+        }
+        Ok(resolved.path)
     }
 
     fn read_file(
@@ -49,7 +89,7 @@ impl FsExecutor {
         start_line: usize,
         end_line: Option<usize>,
     ) -> Result<String, FsError> {
-        let resolved = self.resolve(path)?;
+        let resolved = self.resolve_read(path)?;
         if !resolved.exists() {
             return Err(FsError::InvalidArgs(format!("File not found: {path}")));
         }
@@ -89,8 +129,8 @@ impl FsExecutor {
         content: &str,
         overwrite: bool,
     ) -> Result<String, FsError> {
-        let resolved = self.resolve(path)?;
-        if resolved == self.root {
+        let resolved = self.resolve_write(path)?;
+        if resolved == self.root() {
             return Err(FsError::InvalidArgs(format!(
                 "Target path '{path}' resolves to the workspace root directory, not a file"
             )));
@@ -126,7 +166,7 @@ impl FsExecutor {
         if target.is_empty() {
             return Err(FsError::EditError("target_content cannot be empty".into()));
         }
-        let resolved = self.resolve(path)?;
+        let resolved = self.resolve_write(path)?;
         if !resolved.exists() {
             return Err(FsError::InvalidArgs(format!("File not found for edit: {path}")));
         }
@@ -176,7 +216,7 @@ impl FsExecutor {
     }
 
     fn list_dir(&self, path: &str, max_depth: usize) -> Result<String, FsError> {
-        let resolved = self.resolve(path)?;
+        let resolved = self.resolve_read(path)?;
         if !resolved.exists() {
             return Err(FsError::InvalidArgs(format!("Directory not found: {path}")));
         }
@@ -244,9 +284,9 @@ impl FsExecutor {
         path: &str,
         max_results: usize,
     ) -> Result<String, FsError> {
-        let resolved = self.resolve(path)?;
+        let resolved = self.resolve_read(path)?;
         let search_dir = if resolved.is_file() {
-            resolved.parent().unwrap_or(&self.root).to_path_buf()
+            resolved.parent().unwrap_or_else(|| self.root()).to_path_buf()
         } else {
             resolved
         };
@@ -276,7 +316,7 @@ impl FsExecutor {
         search_dir: &Path,
         max_results: usize,
     ) -> Result<String, FsError> {
-        let rel = search_dir.strip_prefix(&self.root).unwrap_or(search_dir);
+        let rel = search_dir.strip_prefix(self.root()).unwrap_or(search_dir);
         let rel_str = rel.to_string_lossy().to_string();
 
         let mut args = vec!["grep", "-n", "-I", "-F", "--untracked", "-e", query];
@@ -287,7 +327,7 @@ impl FsExecutor {
 
         let output = std::process::Command::new("git")
             .args(&args)
-            .current_dir(&self.root)
+            .current_dir(self.root())
             .output()?;
 
         if output.status.code() == Some(1) {

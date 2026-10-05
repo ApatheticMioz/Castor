@@ -12,7 +12,7 @@
 //! via `tokio::process` with `process_group(0)`, stdout/stderr captured with
 //! byte caps, and timeout kills the whole process group.
 
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::process::Stdio;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, OnceLock};
@@ -43,7 +43,11 @@ const HOME: &str = "/home/user";
 const MAX_UNWRAP_DEPTH: usize = 4;
 
 const DESTRUCTIVE: &[&str] = &["rm", "del", "rmdir", "rd", "remove-item", "ri", "erase"];
-const TRANSPARENT: &[&str] = &["sudo", "doas", "env", "nice", "nohup", "xargs"];
+/// Wrappers whose own argument (not an `=value`) is the real command.
+/// `env` is handled separately in `analyze_segment` (it consumes
+/// `KEY=VAL` prefix tokens before the real command) and is intentionally
+/// absent here.
+const TRANSPARENT: &[&str] = &["sudo", "doas", "nice", "nohup", "xargs"];
 const WIN_FLAGS: &[&str] = &["/f", "/s", "/q", "/p", "/a", "/c", "/e", "/t", "/y", "/i"];
 
 // ---------------------------------------------------------------------------
@@ -266,21 +270,16 @@ fn to_posix(p: &str) -> String {
 }
 
 fn posix_normalize(p: &str) -> String {
-    let mut parts: Vec<&str> = Vec::new();
-    for comp in p.split('/') {
-        if comp.is_empty() || comp == "." {
-            continue;
-        }
-        if comp == ".." {
-            parts.pop();
-        } else {
-            parts.push(comp);
-        }
+    use path_clean::PathClean;
+    let cleaned = std::path::Path::new(p).clean();
+    let s = cleaned.to_string_lossy().replace('\\', "/");
+    if s.is_empty() || s == "." {
+        "/".to_string()
+    } else if !s.starts_with('/') {
+        format!("/{s}")
+    } else {
+        s
     }
-    if parts.is_empty() {
-        return "/".to_string();
-    }
-    format!("/{}", parts.join("/"))
 }
 
 /// Unicode/homoglyph defense: fold fullwidth & compatibility forms to their
@@ -344,15 +343,18 @@ fn normalize_operand(operand: &str, cwd: &str, is_win: bool) -> String {
 // Protected roots
 // ---------------------------------------------------------------------------
 
-fn protected_roots() -> Vec<String> {
-    let mut v = vec!["/".to_string(), "/root".to_string(), "/home".to_string()];
-    for c in b'a'..=b'z' {
-        v.push(format!("/mnt/{}", c as char));
-    }
-    v.push("/mnt/c/windows".to_string());
-    v.push("/mnt/c/users".to_string());
-    v.push("/mnt/c/program files".to_string());
-    v
+fn protected_roots() -> &'static [String] {
+    static ROOTS: OnceLock<Vec<String>> = OnceLock::new();
+    ROOTS.get_or_init(|| {
+        let mut v = vec!["/".to_string(), "/root".to_string(), "/home".to_string()];
+        for c in b'a'..=b'z' {
+            v.push(format!("/mnt/{}", c as char));
+        }
+        v.push("/mnt/c/windows".to_string());
+        v.push("/mnt/c/users".to_string());
+        v.push("/mnt/c/program files".to_string());
+        v
+    })
 }
 
 fn is_home_user(p: &str) -> bool {
@@ -398,10 +400,10 @@ fn is_protected_root(p: &str) -> bool {
         return true;
     }
     for root in protected_roots() {
-        if p == root {
+        if p == *root {
             return true;
         }
-        let w = if root == "/" { "/*" } else { &format!("{root}/*") };
+        let w = if *root == "/" { "/*" } else { &format!("{root}/*") };
         if p == w {
             return true;
         }
@@ -621,16 +623,86 @@ async fn capture_capped<R: tokio::io::AsyncRead + Unpin>(mut r: R, cap: usize) -
     (out, truncated)
 }
 
+#[cfg(target_os = "linux")]
+fn build_landlock_ruleset(cwd: &Path) -> Result<landlock::RulesetCreated, String> {
+    use landlock::{Access, AccessFs, PathBeneath, PathFd, Ruleset, RulesetAttr, RulesetCreatedAttr, ABI};
+    let abi = ABI::V1;
+    let mut ruleset = Ruleset::default()
+        .handle_access(AccessFs::from_all(abi))
+        .map_err(|e| format!("Landlock handle_access: {e}"))?
+        .create()
+        .map_err(|e| format!("Landlock create: {e}"))?;
+
+    // Read-Write for workspace root (cwd)
+    let ws_fd = PathFd::new(cwd).map_err(|e| format!("PathFd cwd {}: {e}", cwd.display()))?;
+    ruleset = ruleset
+        .add_rule(PathBeneath::new(ws_fd, AccessFs::from_all(abi)))
+        .map_err(|e| format!("Landlock add_rule cwd: {e}"))?;
+
+    // Read-Write for /tmp
+    if let Ok(tmp_fd) = PathFd::new("/tmp") {
+        ruleset = ruleset
+            .add_rule(PathBeneath::new(tmp_fd, AccessFs::from_all(abi)))
+            .map_err(|e| format!("Landlock add_rule /tmp: {e}"))?;
+    }
+
+    // Read-Only for system paths
+    let ro = AccessFs::from_read(abi);
+    for dir in ["/usr", "/bin", "/lib", "/lib64", "/etc", "/dev", "/proc"] {
+        if let Ok(fd) = PathFd::new(dir) {
+            ruleset = ruleset
+                .add_rule(PathBeneath::new(fd, ro))
+                .map_err(|e| format!("Landlock add_rule {dir}: {e}"))?;
+        }
+    }
+
+    // Read-Only for ~/.castor if it exists
+    if let Some(home) = std::env::var_os("HOME").map(PathBuf::from) {
+        let state_dir = home.join(".castor");
+        if let Ok(fd) = PathFd::new(&state_dir) {
+            ruleset = ruleset
+                .add_rule(PathBeneath::new(fd, ro))
+                .map_err(|e| format!("Landlock add_rule state_dir: {e}"))?;
+        }
+    }
+
+    Ok(ruleset)
+}
+
 async fn execute(cmd: &str, cwd: &Path, timeout: Duration) -> Result<ShellOutput, ShellError> {
     let t0 = Instant::now();
-    let mut child = tokio::process::Command::new("bash")
+    let mut cmd_builder = tokio::process::Command::new("bash");
+    cmd_builder
         .arg("-c")
         .arg(cmd)
         .current_dir(cwd)
         .process_group(0)
         .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .spawn()?;
+        .stderr(Stdio::piped());
+
+    #[cfg(target_os = "linux")]
+    {
+        let mut ruleset_opt = Some(build_landlock_ruleset(cwd).map_err(|e| {
+            ShellError::Policy(ShellPolicyError::ProhibitedPattern(format!(
+                "Landlock LSM confinement setup failed: {e}"
+            )))
+        })?);
+        unsafe {
+            cmd_builder.pre_exec(move || {
+                if let Some(r) = ruleset_opt.take() {
+                    r.restrict_self().map_err(|e| {
+                        std::io::Error::new(
+                            std::io::ErrorKind::PermissionDenied,
+                            format!("Landlock restrict_self failed: {e}"),
+                        )
+                    })?;
+                }
+                Ok(())
+            });
+        }
+    }
+
+    let mut child = cmd_builder.spawn()?;
     let pid = child.id().unwrap_or(0);
 
     let stdout = child.stdout.take().expect("piped stdout");
@@ -964,6 +1036,25 @@ mod run_tests {
         assert_eq!(out.exit_code, 0);
         assert!(out.truncated);
         assert_eq!(out.stdout.len(), MAX_CAPTURE_BYTES);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    #[cfg(target_os = "linux")]
+    fn landlock_confinement_blocks_unauthorized_paths() {
+        let dir = tmp_dir("landlock");
+        // Within workspace: writing succeeds
+        let out_ok = run("echo hello > ok.txt", &dir, Duration::from_secs(10)).unwrap();
+        assert_eq!(out_ok.exit_code, 0);
+        assert!(dir.join("ok.txt").exists());
+
+        // Denied paths: writing to /etc or reading /root fails with permission denied
+        let out_denied = run("touch /etc/test_landlock_fail 2>&1 || ls /root 2>&1", &dir, Duration::from_secs(10)).unwrap();
+        let combined = format!("{} {}", out_denied.stdout, out_denied.stderr);
+        assert!(
+            combined.contains("Permission denied") || combined.contains("denied"),
+            "Landlock must deny unauthorized paths: {combined}"
+        );
         let _ = std::fs::remove_dir_all(&dir);
     }
 }

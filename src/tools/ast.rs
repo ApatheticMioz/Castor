@@ -18,7 +18,7 @@ use std::path::{Path, PathBuf};
 
 use ast_grep_core::matcher::Pattern;
 use ast_grep_core::tree_sitter::LanguageExt;
-use ast_grep_core::Node;
+use ast_grep_core::{Language, Node};
 use ast_grep_language::SupportLang;
 use thiserror::Error;
 
@@ -70,21 +70,17 @@ pub struct ReplaceSummary {
     pub rolled_back: Vec<String>,
 }
 
-/// Map a file extension to a language alias. Returns `None` when the
-/// extension is not in the supported set (file is skipped on directory scans).
-fn infer_lang_by_extension(path: &Path) -> Option<&'static str> {
-    let ext = path.extension()?.to_str()?.to_lowercase();
-    Some(match ext.as_str() {
-        "js" | "mjs" | "cjs" | "jsx" => "js",
-        "ts" | "mts" | "cts" => "ts",
-        "tsx" => "tsx",
-        "py" | "pyw" => "python",
-        "rs" => "rust",
-        _ => return None,
-    })
+/// Resolve a file path to its canonical `SupportLang` via
+/// `SupportLang::from_path`, which knows the full 28-language extension map
+/// (e.g. `.go` → Go, `.sh` → Bash, `.json` → Json, `.rs` → Rust). Returns
+/// `None` for unrecognized extensions (the file is skipped on directory scans).
+fn infer_lang_by_extension(path: &Path) -> Option<SupportLang> {
+    SupportLang::from_path(path)
 }
 
-/// Parse a language alias into a `SupportLang`.
+/// Parse a language alias (e.g. `"js"`, `"ts"`, `"py"`, `"rs"`) into a
+/// `SupportLang`. All 28 canonical aliases from `SupportLang::all_langs` are
+/// accepted (case-insensitively).
 fn parse_lang(alias: &str) -> Result<SupportLang, AstError> {
     alias
         .parse::<SupportLang>()
@@ -156,8 +152,9 @@ fn resolve_target(root: &Path, raw: &str) -> Result<PathBuf, AstError> {
 
 /// Search for a syntactic pattern under `root` (or within `path` if specified).
 ///
-/// `lang` is the target language alias (e.g. `"ts"`, `"js"`, `"python"`, `"rs"`).
-/// Files whose language does not match `lang` are skipped.
+/// `lang` is a target language alias from the 28-language `SupportLang` set
+/// (e.g. `"ts"`, `"js"`, `"py"`, `"go"`, `"rs"`). Files whose extension maps to
+/// a different language are skipped.
 pub fn ast_search(
     root: &Path,
     pattern: &str,
@@ -183,13 +180,7 @@ pub fn ast_search(
         if matches.len() >= MAX_MATCHES {
             break;
         }
-        let file_lang = match infer_lang_by_extension(file) {
-            Some(l) => match parse_lang(l) {
-                Ok(parsed) => parsed,
-                Err(_) => continue,
-            },
-            None => target_lang,
-        };
+        let file_lang = infer_lang_by_extension(file).unwrap_or(target_lang);
         if file_lang != target_lang {
             continue;
         }
@@ -247,13 +238,7 @@ pub fn ast_replace(
     };
 
     for file in &files {
-        let file_lang = match infer_lang_by_extension(file) {
-            Some(l) => match parse_lang(l) {
-                Ok(parsed) => parsed,
-                Err(_) => continue,
-            },
-            None => target_lang,
-        };
+        let file_lang = infer_lang_by_extension(file).unwrap_or(target_lang);
         if file_lang != target_lang {
             continue;
         }
@@ -435,6 +420,141 @@ mod tests {
         assert_eq!(ts_matches[0].file, ts_file.to_string_lossy());
 
         let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn search_resolves_representative_languages() {
+        // Issue #17 Part A: prove extension→SupportLang resolution + parsing
+        // across a representative spread of the 28 bundled grammars, not just
+        // the original JS/TS/Python/Rust subset.
+        let root = test_root("representative");
+        // (relative fixture path, language alias, ast-grep pattern, expected match text, source)
+        let cases: &[(&str, &str, &str, &str, &str)] = &[
+            (
+                "src/greet.go",
+                "go",
+                "return a + b",
+                "a + b",
+                "package main\n\nfunc add(a int, b int) int {\n\treturn a + b\n}\n",
+            ),
+            (
+                "src/add.c",
+                "c",
+                "return a + b;",
+                "a + b",
+                "int add(int a, int b) {\n    return a + b;\n}\n",
+            ),
+            (
+                "src/add.cpp",
+                "cpp",
+                "return a + b;",
+                "a + b",
+                "int add(int a, int b) {\n    return a + b;\n}\n",
+            ),
+            (
+                "src/Program.cs",
+                "cs",
+                "System.Console.WriteLine($MSG);",
+                "hi",
+                "class Program {\n    void Main() {\n        System.Console.WriteLine(\"hi\");\n    }\n}\n",
+            ),
+            (
+                "src/App.java",
+                "java",
+                "System.out.println($MSG);",
+                "hi",
+                "class App {\n    public void run() {\n        System.out.println(\"hi\");\n    }\n}\n",
+            ),
+            (
+                "src/greet.sh",
+                "bash",
+                "echo $MSG",
+                "hi",
+                "#!/bin/sh\ngreet() {\n    echo \"hi\"\n}\n",
+            ),
+            (
+                "src/meta.json",
+                "json",
+                "{ $$$ }",
+                "\"name\"",
+                "{\n    \"name\": \"castor\",\n    \"version\": \"1.0.2\"\n}\n",
+            ),
+            (
+                "src/add.py",
+                "py",
+                "return a + b",
+                "a + b",
+                "def add(a, b):\n    return a + b\n",
+            ),
+            (
+                "src/add.rs",
+                "rs",
+                "a + b",
+                "a + b",
+                "fn add(a: i32, b: i32) -> i32 {\n    a + b\n}\n",
+            ),
+        ];
+
+        for (rel, _, _, _, src) in cases {
+            let file = root.join(rel);
+            fs::create_dir_all(file.parent().unwrap()).unwrap();
+            fs::write(&file, src).unwrap();
+        }
+
+        for (rel, lang, pattern, expected_text, _) in cases {
+            let expected = root.join(rel);
+            let matches = ast_search(&root, pattern, lang, None).unwrap();
+            assert!(
+                !matches.is_empty(),
+                "language '{lang}' ({rel}) should match pattern: {pattern}"
+            );
+            assert_eq!(
+                matches[0].file,
+                expected.to_string_lossy(),
+                "language '{lang}' resolved to wrong file: {}",
+                matches[0].file
+            );
+            assert!(
+                matches[0].text.contains(expected_text),
+                "language '{lang}' match text should contain '{expected_text}', got: {}",
+                matches[0].text
+            );
+        }
+
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn infer_lang_by_extension_maps_representative_extensions() {
+        // Direct check of the canonical extension→SupportLang mapping that the
+        // hand-rolled 5-branch match used to provide (and under-delivered on).
+        let table: &[(&str, SupportLang)] = &[
+            ("a.go", SupportLang::Go),
+            ("a.c", SupportLang::C),
+            ("a.cpp", SupportLang::Cpp),
+            ("a.cs", SupportLang::CSharp),
+            ("a.java", SupportLang::Java),
+            ("a.sh", SupportLang::Bash),
+            ("a.json", SupportLang::Json),
+            ("a.py", SupportLang::Python),
+            ("a.rs", SupportLang::Rust),
+            ("a.ts", SupportLang::TypeScript),
+            ("a.tsx", SupportLang::Tsx),
+            ("a.md", SupportLang::Markdown),
+            ("a.yaml", SupportLang::Yaml),
+        ];
+        for (name, expected) in table {
+            let path = std::path::Path::new(name);
+            let lang = infer_lang_by_extension(path)
+                .unwrap_or_else(|| panic!("extension '{name}' should resolve"));
+            assert_eq!(lang, *expected, "extension '{name}' mis-mapped");
+        }
+
+        // Unknown extension stays out of the supported set.
+        assert_eq!(
+            infer_lang_by_extension(std::path::Path::new("a.xyz_unknown")),
+            None
+        );
     }
 
     #[test]
