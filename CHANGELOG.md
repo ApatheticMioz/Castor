@@ -8,10 +8,11 @@ The project adheres to **[Semantic Versioning](https://semver.org/)**:
 
 ---
 
-## [Unreleased]
+## [1.0.2] — 2026-10-05
 
 ### 🛡️ Landlock LSM Confinement & Security Hardening (Issue #6, #17)
 - **Landlock LSM Integration**: Kernel-enforced filesystem confinement on Linux/WSL using standard `landlock = "0.4"` crate in `src/tools/shell.rs`. Confines child bash processes to workspace root and `/tmp` (RW) while granting read-only access to system paths and `~/.castor`.
+- **Character Device & Toolchain Hardening**: Granted read-write access to `/dev` to ensure `/dev/null`, `/dev/zero`, and `/dev/urandom` work for writing (unblocking `git` and shell redirections). Granted read-only access to user toolchains (`~/.cargo`, `~/.rustup`, `~/.local`) and prepended `$HOME/.cargo/bin:$HOME/.local/bin` to `PATH`.
 - **Symmetric Multi-Root Scoping**: Parity between shell confinement and filesystem tools via `SandboxPolicy::for_workspace`.
 - **28 Tree-Sitter Languages**: Expanded AST tooling in `src/tools/ast.rs` with all 28 language features in `ast-grep-language`.
 
@@ -26,11 +27,18 @@ The project adheres to **[Semantic Versioning](https://semver.org/)**:
 ### ⏱️ Runner Probe Budget Governor (Issue #17)
 - **Proactive Loop Breaker**: Consecutive probe warnings trigger at 4 non-mutating bash commands, with an explicit bypass exemption for sanctioned `.scratch/` scripts.
 
+### 🔎 Default Search Provider
+- **SearXNG on :8888**: Configured local SearXNG at `http://127.0.0.1:8888` as primary default web search provider, with seamless fallback to Brave and DuckDuckGo.
+
 ### 📈 Telemetry Windowed Queries (Issue #18)
-- **`--since <duration>`**: Time-bound `castor stats` to a rolling window ending at now (e.g. `--since 24h`, `--since 7d`, `--since 30m`). Duration parsing uses the standard ecosystem crate `humantime` (2.1); invalid strings produce a clean, actionable error (`stats: invalid --since duration '…' (expected a duration like 24h, 7d, 30m)`) with a non-zero exit code.
+- **`--since <duration>`**: Time-bound `castor stats` to a rolling window ending at now (e.g. `--since 24h`, `--since 7d`, `--since 30m`). Duration parsing uses standard `humantime` (2.1).
 - **`--by-day`**: Aggregate session events by UTC civil date (`YYYY-MM-DD`) using `chrono`. The daily breakdown covers turns, prompt / completion / reasoning tokens, tool calls / errors, attributed session count, and attributed session duration.
-- **Card & JSON surfaces**: The `format_stats_card` operator card gains a `📅 DAILY BREAKDOWN (UTC)` table when `--by-day` is active; the `--json` surface gains a top-level `daily` object (keyed `YYYY-MM-DD`) when requested — and omits it entirely otherwise, preserving backwards-compatible JSON shape for existing consumers (MCP `castor_task stats`, `stats.json` writer).
-- **Pure derivation, no new writer**: Both options are pure query-time projections over the existing `<state>/sessions/*/events.jsonl` ledgers; no second stats writer, no new on-disk artifacts. The `since_ms` cutoff is computed in `main.rs` from the wall clock and passed into the pure `derive_stats` (which takes a `StatsOptions`), so the derivation stays deterministic and unit-testable with fixed timestamps.
+- **Card & JSON surfaces**: The `format_stats_card` operator card gains a `📅 DAILY BREAKDOWN (UTC)` table when `--by-day` is active; the `--json` surface gains a top-level `daily` object.
+- **Dual Snake/CamelCase Serde**: Robust aggregation support for both canonical `snake_case` and `camelCase` token metric fields.
+
+### 🚀 Lean Build & Dependency Optimization
+- **Stripped Unused Dependencies**: Removed unreferenced `shlex = "1.3"` from `Cargo.toml`.
+- **Release Profile Tuning**: Configured `[profile.release]` with `opt-level = 3`, `lto = "thin"`, `codegen-units = 1`, `strip = true`, and `panic = "abort"` for minimal binary footprint.
 
 ---
 
