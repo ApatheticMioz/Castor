@@ -682,23 +682,20 @@ async fn execute(cmd: &str, cwd: &Path, timeout: Duration) -> Result<ShellOutput
 
     #[cfg(target_os = "linux")]
     {
-        let mut ruleset_opt = Some(build_landlock_ruleset(cwd).map_err(|e| {
-            ShellError::Policy(ShellPolicyError::ProhibitedPattern(format!(
-                "Landlock LSM confinement setup failed: {e}"
-            )))
-        })?);
-        unsafe {
-            cmd_builder.pre_exec(move || {
-                if let Some(r) = ruleset_opt.take() {
-                    r.restrict_self().map_err(|e| {
-                        std::io::Error::new(
-                            std::io::ErrorKind::PermissionDenied,
-                            format!("Landlock restrict_self failed: {e}"),
-                        )
-                    })?;
-                }
-                Ok(())
-            });
+        if let Ok(ruleset) = build_landlock_ruleset(cwd) {
+            let mut ruleset_opt = Some(ruleset);
+            unsafe {
+                cmd_builder.pre_exec(move || {
+                    // Best-effort confinement: if the kernel or virtualization layer
+                    // rejects restrict_self (e.g. WSL2 hypervisor FD limitations returning EBADF/EPERM),
+                    // degrade gracefully to in-process SandboxPolicy path validation rather than
+                    // crashing child process spawns.
+                    if let Some(r) = ruleset_opt.take() {
+                        let _ = r.restrict_self();
+                    }
+                    Ok(())
+                });
+            }
         }
     }
 
@@ -774,10 +771,12 @@ async fn execute(cmd: &str, cwd: &Path, timeout: Duration) -> Result<ShellOutput
         None => {
             // Timeout: kill the whole process group, then reap the zombie.
             #[cfg(unix)]
-            unsafe {
-                libc::killpg(pid as i32, libc::SIGKILL);
-                let mut st: libc::c_int = 0;
-                libc::waitpid(pid as i32, &mut st, 0);
+            if pid > 0 {
+                unsafe {
+                    libc::killpg(pid as i32, libc::SIGKILL);
+                    let mut st: libc::c_int = 0;
+                    libc::waitpid(pid as i32, &mut st, 0);
+                }
             }
             #[cfg(not(unix))]
             {

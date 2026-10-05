@@ -116,6 +116,7 @@ pub struct Metrics {
     /// object). `None` when the engine did not report it.
     pub prompt_tokens: Option<u64>,
     pub completion_tokens: Option<u64>,
+    pub reasoning_tokens: Option<u64>,
 }
 
 #[derive(Debug, Clone)]
@@ -217,6 +218,7 @@ impl EngineClient {
         let mut ttft: Option<std::time::Duration> = None;
         let mut prompt_tokens: Option<u64> = None;
         let mut completion_tokens: Option<u64> = None;
+        let mut reasoning_tokens: Option<u64> = None;
         let mut tool_calls: BTreeMap<usize, ToolCall> = BTreeMap::new();
 
         while let Some(chunk) = stream.next().await {
@@ -237,6 +239,7 @@ impl EngineClient {
                         ttft,
                         prompt_tokens,
                         completion_tokens,
+                        reasoning_tokens,
                         t0,
                     ));
                 }
@@ -256,6 +259,13 @@ impl EngineClient {
                     }
                     if let Some(p) = usage.get("prompt_tokens").and_then(Value::as_u64) {
                         prompt_tokens = Some(p);
+                    }
+                    if let Some(r) = usage
+                        .get("completion_tokens_details")
+                        .and_then(|d| d.get("reasoning_tokens"))
+                        .and_then(Value::as_u64)
+                    {
+                        reasoning_tokens = Some(r);
                     }
                 }
                 for choice in frame
@@ -315,6 +325,7 @@ impl EngineClient {
             ttft,
             prompt_tokens,
             completion_tokens,
+            reasoning_tokens,
             t0,
         ))
     }
@@ -367,6 +378,10 @@ impl EngineClient {
         let completion_tokens = usage
             .and_then(|u| u.get("completion_tokens"))
             .and_then(Value::as_u64);
+        let reasoning_tokens = usage
+            .and_then(|u| u.get("completion_tokens_details"))
+            .and_then(|d| d.get("reasoning_tokens"))
+            .and_then(Value::as_u64);
         let ttft = if content.is_empty() && tool_calls.is_empty() {
             None
         } else {
@@ -379,11 +394,13 @@ impl EngineClient {
             ttft,
             prompt_tokens,
             completion_tokens,
+            reasoning_tokens,
             t0,
         ))
     }
 }
 
+#[allow(clippy::too_many_arguments)] // each argument is a distinct per-turn metric
 fn assemble(
     content: &str,
     tool_calls: BTreeMap<usize, ToolCall>,
@@ -391,6 +408,7 @@ fn assemble(
     ttft: Option<std::time::Duration>,
     prompt_tokens: Option<u64>,
     completion_tokens: Option<u64>,
+    reasoning_tokens: Option<u64>,
     t0: Instant,
 ) -> Completion {
     let total = t0.elapsed();
@@ -412,6 +430,7 @@ fn assemble(
             tokens_per_sec,
             prompt_tokens,
             completion_tokens,
+            reasoning_tokens,
         },
     }
 }

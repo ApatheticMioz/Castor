@@ -166,8 +166,7 @@ fn msg(role: &str, content: impl Into<String>) -> Message {
 ///
 /// Only the engine-reported token counts are emitted, so an absent field is
 /// omitted rather than zero-filled (honest telemetry: `None` never masquerades
-/// as a measured zero). `prompt_tokens` is engine-reported; `reasoning_tokens`
-/// is not captured by the provider yet, so it is omitted.
+/// as a measured zero).
 fn metrics_json(m: &Metrics) -> serde_json::Value {
     let mut o = serde_json::Map::new();
     if let Some(p) = m.prompt_tokens {
@@ -175,6 +174,9 @@ fn metrics_json(m: &Metrics) -> serde_json::Value {
     }
     if let Some(c) = m.completion_tokens {
         o.insert("completionTokens".into(), serde_json::json!(c));
+    }
+    if let Some(r) = m.reasoning_tokens {
+        o.insert("reasoningTokens".into(), serde_json::json!(r));
     }
     if let Some(r) = m.tokens_per_sec {
         o.insert("tokensPerSec".into(), serde_json::json!(r));
@@ -583,6 +585,7 @@ pub async fn run_session(
                     "tool_call_id": tc.id,
                     "name": tc.name,
                     "is_error": outcome.text.starts_with("Error:"),
+                    "output": outcome.text,
                 }))
                 .map_err(RunnerError::Io)?;
 
@@ -784,6 +787,7 @@ mod tests {
                 tokens_per_sec: None,
                 prompt_tokens: None,
                 completion_tokens: None,
+                reasoning_tokens: None,
             },
         }
     }
@@ -1144,6 +1148,7 @@ mod tests {
                 tokens_per_sec: None,
                 prompt_tokens: None,
                 completion_tokens: None,
+                reasoning_tokens: None,
             },
         }
     }

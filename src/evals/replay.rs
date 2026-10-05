@@ -99,6 +99,7 @@ impl ReplayEngine {
                             tokens_per_sec: None,
                             prompt_tokens: None,
                             completion_tokens: None,
+                            reasoning_tokens: None,
                         },
                     })
                 }
@@ -146,6 +147,7 @@ impl ChatEngine for ReplayEngine {
                         tokens_per_sec: None,
                         prompt_tokens: None,
                         completion_tokens: None,
+                        reasoning_tokens: None,
                     },
                 })
             }

@@ -286,6 +286,7 @@ mod tests {
                     tokens_per_sec: None,
                     prompt_tokens: None,
                     completion_tokens: None,
+                    reasoning_tokens: None,
                 },
             }])),
         };
@@ -362,6 +363,7 @@ mod tests {
                     tokens_per_sec: None,
                     prompt_tokens: None,
                     completion_tokens: None,
+                    reasoning_tokens: None,
                 },
             }])),
         };
