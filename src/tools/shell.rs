@@ -639,16 +639,18 @@ fn build_landlock_ruleset(cwd: &Path) -> Result<landlock::RulesetCreated, String
         .add_rule(PathBeneath::new(ws_fd, AccessFs::from_all(abi)))
         .map_err(|e| format!("Landlock add_rule cwd: {e}"))?;
 
-    // Read-Write for /tmp
-    if let Ok(tmp_fd) = PathFd::new("/tmp") {
-        ruleset = ruleset
-            .add_rule(PathBeneath::new(tmp_fd, AccessFs::from_all(abi)))
-            .map_err(|e| format!("Landlock add_rule /tmp: {e}"))?;
+    // Read-Write for /tmp and /dev (required for /dev/null, /dev/zero, /dev/urandom)
+    for rw_dir in ["/tmp", "/dev"] {
+        if let Ok(fd) = PathFd::new(rw_dir) {
+            ruleset = ruleset
+                .add_rule(PathBeneath::new(fd, AccessFs::from_all(abi)))
+                .map_err(|e| format!("Landlock add_rule {rw_dir}: {e}"))?;
+        }
     }
 
     // Read-Only for system paths
     let ro = AccessFs::from_read(abi);
-    for dir in ["/usr", "/bin", "/lib", "/lib64", "/etc", "/dev", "/proc"] {
+    for dir in ["/usr", "/bin", "/lib", "/lib64", "/etc", "/proc"] {
         if let Ok(fd) = PathFd::new(dir) {
             ruleset = ruleset
                 .add_rule(PathBeneath::new(fd, ro))
@@ -656,13 +658,15 @@ fn build_landlock_ruleset(cwd: &Path) -> Result<landlock::RulesetCreated, String
         }
     }
 
-    // Read-Only for ~/.castor if it exists
+    // Read-Only for user toolchains and state directories (~/.castor, ~/.cargo, ~/.rustup, ~/.local)
     if let Some(home) = std::env::var_os("HOME").map(PathBuf::from) {
-        let state_dir = home.join(".castor");
-        if let Ok(fd) = PathFd::new(&state_dir) {
-            ruleset = ruleset
-                .add_rule(PathBeneath::new(fd, ro))
-                .map_err(|e| format!("Landlock add_rule state_dir: {e}"))?;
+        for sub in [".castor", ".cargo", ".rustup", ".local"] {
+            let p = home.join(sub);
+            if let Ok(fd) = PathFd::new(&p) {
+                ruleset = ruleset
+                    .add_rule(PathBeneath::new(fd, ro))
+                    .map_err(|e| format!("Landlock add_rule {}: {e}", p.display()))?;
+            }
         }
     }
 
@@ -679,6 +683,24 @@ async fn execute(cmd: &str, cwd: &Path, timeout: Duration) -> Result<ShellOutput
         .process_group(0)
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
+
+    #[cfg(target_os = "linux")]
+    if let Some(home) = std::env::var_os("HOME").map(PathBuf::from) {
+        let cargo_bin = home.join(".cargo/bin");
+        let local_bin = home.join(".local/bin");
+        let current_path = std::env::var("PATH").unwrap_or_default();
+        let mut new_path = String::new();
+        if cargo_bin.is_dir() {
+            new_path.push_str(&cargo_bin.to_string_lossy());
+            new_path.push(':');
+        }
+        if local_bin.is_dir() {
+            new_path.push_str(&local_bin.to_string_lossy());
+            new_path.push(':');
+        }
+        new_path.push_str(&current_path);
+        cmd_builder.env("PATH", new_path);
+    }
 
     #[cfg(target_os = "linux")]
     {
@@ -1054,6 +1076,22 @@ mod run_tests {
             combined.contains("Permission denied") || combined.contains("denied"),
             "Landlock must deny unauthorized paths: {combined}"
         );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    #[cfg(target_os = "linux")]
+    fn landlock_allows_dev_null_writes_and_toolchains() {
+        let dir = tmp_dir("landlock_devnull");
+        // Writing to /dev/null must succeed under Landlock (required by git, redirection, etc.)
+        let out_devnull = run("echo test > /dev/null 2>&1", &dir, Duration::from_secs(10)).unwrap();
+        assert_eq!(out_devnull.exit_code, 0, "Writing to /dev/null must succeed: {out_devnull:?}");
+
+        // If cargo is installed in ~/.cargo/bin, it must be executable under Landlock
+        if std::env::var_os("HOME").map(|h| PathBuf::from(h).join(".cargo/bin/cargo").exists()).unwrap_or(false) {
+            let out_cargo = run("cargo --version", &dir, Duration::from_secs(10)).unwrap();
+            assert_eq!(out_cargo.exit_code, 0, "cargo --version must succeed under Landlock: {out_cargo:?}");
+        }
         let _ = std::fs::remove_dir_all(&dir);
     }
 }

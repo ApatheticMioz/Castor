@@ -317,12 +317,12 @@ fn replace_in_memory(
 fn syntax_gate(content: &str, lang: SupportLang) -> bool {
     let doc = lang.ast_grep(content);
     let mut has_error = false;
-    walk_for_errors(doc.root(), &mut has_error);
+    walk_for_errors(&doc.root(), &mut has_error);
     has_error
 }
 
 fn walk_for_errors(
-    node: Node<ast_grep_core::tree_sitter::StrDoc<SupportLang>>,
+    node: &Node<ast_grep_core::tree_sitter::StrDoc<SupportLang>>,
     out: &mut bool,
 ) {
     if *out {
@@ -334,7 +334,7 @@ fn walk_for_errors(
         return;
     }
     for child in node.children() {
-        walk_for_errors(child, out);
+        walk_for_errors(&child, out);
     }
 }
 

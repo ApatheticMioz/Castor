@@ -145,7 +145,7 @@ pub fn run_task(task_dir: &Path, variant: Variant) -> EvalReport {
     // 3. Copy the fixture tree into a fresh temp workspace.
     let workspace = match make_temp_workspace(task_dir) {
         Ok(w) => w,
-        Err(e) => return error_report(task_id, variant, e.to_string()),
+        Err(e) => return error_report(task_id, variant, e),
     };
 
     // 4. Apply the optional setup script.

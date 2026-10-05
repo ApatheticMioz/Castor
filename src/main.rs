@@ -618,11 +618,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             // evo work must run outside the `#[tokio::main]` runtime. We
             // spawn a plain std thread for that.
             let (tx, rx) = std::sync::mpsc::channel();
-            let state2 = state.clone();
             std::thread::spawn(move || {
                 let result = match action {
-                    EvoAction::Run { evals } => run_evo(evals.as_deref(), &state2),
-                    EvoAction::Status => evo_status(&state2),
+                    EvoAction::Run { evals } => run_evo(evals.as_deref(), &state),
+                    EvoAction::Status => evo_status(&state),
                 };
                 let _ = tx.send(result);
             });
