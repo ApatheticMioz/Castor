@@ -159,7 +159,7 @@ fn msg(role: &str, content: impl Into<String>) -> Message {
 
 /// The per-turn `metrics` object embedded in a `dispatch` event, in the same
 /// camelCase shape the telemetry projection (`parse_session_events`) reads
-/// (`promptTokens` / `completionTokens` / `reasoningTokens`).
+/// (`prompt_tokens` / `completion_tokens` / `reasoning_tokens`).
 ///
 /// Only the engine-reported token counts are emitted, so an absent field is
 /// omitted rather than zero-filled (honest telemetry: `None` never masquerades
@@ -168,23 +168,20 @@ fn metrics_json(m: &Metrics) -> serde_json::Value {
     let mut o = serde_json::Map::new();
     if let Some(p) = m.prompt_tokens {
         o.insert("prompt_tokens".into(), serde_json::json!(p));
-        o.insert("promptTokens".into(), serde_json::json!(p));
     }
     if let Some(c) = m.completion_tokens {
         o.insert("completion_tokens".into(), serde_json::json!(c));
-        o.insert("completionTokens".into(), serde_json::json!(c));
     }
     if let Some(r) = m.reasoning_tokens {
         o.insert("reasoning_tokens".into(), serde_json::json!(r));
-        o.insert("reasoningTokens".into(), serde_json::json!(r));
     }
     if let Some(r) = m.tokens_per_sec {
-        o.insert("tokensPerSec".into(), serde_json::json!(r));
+        o.insert("tokens_per_sec".into(), serde_json::json!(r));
     }
     if let Some(t) = m.ttft_ms {
-        o.insert("ttftMs".into(), serde_json::json!(t));
+        o.insert("ttft_ms".into(), serde_json::json!(t));
     }
-    o.insert("totalMs".into(), serde_json::json!(m.total_ms));
+    o.insert("total_ms".into(), serde_json::json!(m.total_ms));
     serde_json::Value::Object(o)
 }
 

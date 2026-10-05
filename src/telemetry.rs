@@ -672,19 +672,9 @@ fn parse_session_events(raw: &str, since: Option<i128>) -> Option<SessionAgg> {
 /// field is `None` (never a silent zero).
 fn read_turn_tokens(v: &Value) -> (Option<u64>, Option<u64>, Option<u64>) {
     let src = v.get("metrics").unwrap_or(v);
-    let prompt = src
-        .get("prompt_tokens")
-        .or_else(|| src.get("promptTokens"))
-        .and_then(Value::as_u64);
-    let completion = src
-        .get("completion_tokens")
-        .or_else(|| src.get("completionTokens"))
-        .and_then(Value::as_u64);
-    let reasoning = src
-        .get("reasoning_tokens")
-        .or_else(|| src.get("reasoningTokens"))
-        .or_else(|| v.get("reasoningTokens"))
-        .and_then(Value::as_u64);
+    let prompt = src.get("prompt_tokens").and_then(Value::as_u64);
+    let completion = src.get("completion_tokens").and_then(Value::as_u64);
+    let reasoning = src.get("reasoning_tokens").and_then(Value::as_u64);
     (prompt, completion, reasoning)
 }
 
