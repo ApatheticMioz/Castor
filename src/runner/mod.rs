@@ -19,11 +19,11 @@ use async_trait::async_trait;
 use thiserror::Error;
 use tracing::warn;
 
-use crate::engine::{EngineClient, EngineError, Message, ToolSchema};
+use crate::engine::{EngineClient, EngineError, Message, Metrics, ToolSchema};
 use crate::state::StateDir;
 
 use events::EventLogger;
-use loop_detector::{LoopDetector, LoopState};
+use loop_detector::{LoopDetector, LoopState, PROBE_ADVISORY, ProbeTracker};
 
 /// Default turn budget (from the task record; extendable up to `MAX_ELASTIC_TURNS`).
 pub const DEFAULT_TURNS_BUDGET: u32 = 80;
@@ -65,6 +65,10 @@ const LOOP_WINDOW: usize = 6;
 /// Consecutive identical actions that trip loop detection.
 const LOOP_THRESHOLD: usize = 3;
 
+/// Default probe budget: consecutive non-mutating bash probes before the
+/// probe-budget advisory is injected (Issue #17 Part B).
+pub const DEFAULT_PROBE_BUDGET: usize = 4;
+
 /// The async trait the runner depends on for tool execution.
 ///
 /// M7 implements real tools behind this trait; the runner depends only on it.
@@ -95,12 +99,14 @@ pub enum ToolError {
 /// [`EngineClient`] implements this; tests inject a scripted engine.
 #[async_trait]
 pub trait ChatEngine: Send + Sync {
-    /// One chat turn: send messages + tool schemas, get a completion.
+    /// One chat turn: send messages + tool schemas, get a completion,
+    /// optionally carrying a per-session reasoning_effort tier (Issue #3).
     async fn chat(
         &self,
         messages: &[Message],
         tools: &[ToolSchema],
         stream: bool,
+        reasoning_effort: Option<&str>,
     ) -> Result<crate::engine::Completion, EngineError>;
 }
 
@@ -111,8 +117,9 @@ impl ChatEngine for EngineClient {
         messages: &[Message],
         tools: &[ToolSchema],
         stream: bool,
+        reasoning_effort: Option<&str>,
     ) -> Result<crate::engine::Completion, EngineError> {
-        EngineClient::chat(self, messages, tools, stream).await
+        EngineClient::chat(self, messages, tools, stream, reasoning_effort).await
     }
 }
 
@@ -153,6 +160,32 @@ fn msg(role: &str, content: impl Into<String>) -> Message {
     }
 }
 
+/// The per-turn `metrics` object embedded in a `dispatch` event, in the same
+/// camelCase shape the telemetry projection (`parse_session_events`) reads
+/// (`promptTokens` / `completionTokens` / `reasoningTokens`).
+///
+/// Only the engine-reported token counts are emitted, so an absent field is
+/// omitted rather than zero-filled (honest telemetry: `None` never masquerades
+/// as a measured zero). `prompt_tokens` is engine-reported; `reasoning_tokens`
+/// is not captured by the provider yet, so it is omitted.
+fn metrics_json(m: &Metrics) -> serde_json::Value {
+    let mut o = serde_json::Map::new();
+    if let Some(p) = m.prompt_tokens {
+        o.insert("promptTokens".into(), serde_json::json!(p));
+    }
+    if let Some(c) = m.completion_tokens {
+        o.insert("completionTokens".into(), serde_json::json!(c));
+    }
+    if let Some(r) = m.tokens_per_sec {
+        o.insert("tokensPerSec".into(), serde_json::json!(r));
+    }
+    if let Some(t) = m.ttft_ms {
+        o.insert("ttftMs".into(), serde_json::json!(t));
+    }
+    o.insert("totalMs".into(), serde_json::json!(m.total_ms));
+    serde_json::Value::Object(o)
+}
+
 /// State / workspace context the runner uses for terminal artifacts.
 ///
 /// This is deliberately *only* the durable-location context — not the engine,
@@ -167,17 +200,35 @@ pub struct SessionOptions {
     /// The session's working directory. Used as the fallback `.scratch/`
     /// location when no state dir is available.
     pub workspace: Option<PathBuf>,
+    /// Per-session reasoning-effort tier (Issue #3), forwarded to the engine
+    /// on every chat turn. `None` means "no override": the client sends
+    /// neither `reasoning_effort` nor `chat_template_kwargs` and the
+    /// server-side default applies (zero behaviour change).
+    pub reasoning_effort: Option<String>,
+    /// Consecutive non-mutating bash probes before the probe-budget advisory
+    /// is injected (Issue #17 Part B). Defaults to 4.
+    pub probe_budget: usize,
 }
 
 impl SessionOptions {
     /// Build options from just a state directory (the common worker case).
     pub fn with_state(state: StateDir) -> Self {
-        Self { state: Some(state), workspace: None }
+        Self {
+            state: Some(state),
+            workspace: None,
+            reasoning_effort: None,
+            probe_budget: DEFAULT_PROBE_BUDGET,
+        }
     }
 
     /// Build options from just a workspace path (e.g. an offline replay).
     pub fn with_workspace(workspace: PathBuf) -> Self {
-        Self { state: None, workspace: Some(workspace) }
+        Self {
+            state: None,
+            workspace: Some(workspace),
+            reasoning_effort: None,
+            probe_budget: DEFAULT_PROBE_BUDGET,
+        }
     }
 
     /// The directory `.scratch/` salvage reports are written under: the state
@@ -256,12 +307,23 @@ pub async fn run_session(
 
     let mut messages = vec![msg("system", system_prompt), msg("user", user_prompt)];
     let mut loop_detector = LoopDetector::new(LOOP_WINDOW, LOOP_THRESHOLD);
+    let probe_budget = options.map_or(DEFAULT_PROBE_BUDGET, |o| o.probe_budget);
+    let mut probe_tracker = ProbeTracker::new(probe_budget);
     let mut turns: u32 = 0;
     let mut final_text = String::new();
     let mut final_produced = false;
     let mut tool_activity = false;
     let mut landing_injected = false;
     let mut status = "completed".to_string();
+
+    // Per-session reasoning-effort override (Issue #3). Applied uniformly to
+    // every engine call in the session (main turns, salvage, synthesis) —
+    // a mid-session tier change would break the prefix cache, so the tier
+    // is session-scoped. `None` leaves the payload byte-identical to the
+    // pre-override shape (the server-side default applies).
+    let effort = options
+        .and_then(|o| o.reasoning_effort.as_deref())
+        .filter(|e| !e.is_empty());
 
     while turns < budget {
         // Cooperative landing: in the last ~5 turns, inject a budget notice.
@@ -279,9 +341,10 @@ pub async fn run_session(
         turns += 1;
 
         // Build the request: messages first, tool schemas last (APC contract).
-        let completion = engine.chat(&messages, tools, true).await?;
+        let completion = engine.chat(&messages, tools, true, effort).await?;
 
-        // Record the dispatch event.
+        // Record the dispatch event (with the engine's per-turn token usage,
+        // so current Rust runs contribute to the telemetry token totals).
         logger
             .append(serde_json::json!({
                 "type": "dispatch",
@@ -297,6 +360,7 @@ pub async fn run_session(
                         "arguments": tc.arguments,
                     }))
                     .collect::<Vec<_>>(),
+                "metrics": metrics_json(&completion.metrics),
             }))
             .map_err(RunnerError::Io)?;
 
@@ -332,7 +396,7 @@ pub async fn run_session(
                 // 3. Call the engine with full tools enabled to give the peer
                 //    engineer full agency to inspect scratchpad files or check
                 //    logs before reporting.
-                let salvage = engine.chat(&messages, tools, false).await;
+                let salvage = engine.chat(&messages, tools, false, effort).await;
                 match salvage {
                     Ok(mut sc) => {
                         // If the peer engineer executed tools during salvage,
@@ -368,7 +432,7 @@ pub async fn run_session(
                                 });
                             }
                             // Single follow-up request to synthesize findings based on tool outputs.
-                            match engine.chat(&messages, &[], false).await {
+                            match engine.chat(&messages, &[], false, effort).await {
                                 Ok(follow_up) => {
                                     sc = follow_up;
                                 }
@@ -471,7 +535,7 @@ pub async fn run_session(
                     "[Salvage] Your previous response was empty. Provide a proper summary of \
                      your findings and the work you have completed.",
                 ));
-                let salvage = engine.chat(&messages, &[], true).await?;
+                let salvage = engine.chat(&messages, &[], true, effort).await?;
                 logger
                     .append(serde_json::json!({
                         "type": "salvage",
@@ -546,6 +610,15 @@ impasse, state your findings and ask for alignment rather than continuing to re-
                     });
                 }
             }
+
+            // Probe budget tracking (Issue #17 Part B): consecutive
+            // non-mutating bash probes that do not target `.scratch/` are
+            // counted; at the budget threshold a one-shot advisory is
+            // injected to nudge the model toward code mutations.  Mutating
+            // tools reset the counter; `.scratch/` commands are exempt.
+            if probe_tracker.record(&tc.name, &tc.arguments) {
+                messages.push(msg("user", PROBE_ADVISORY));
+            }
         }
     }
 
@@ -557,7 +630,7 @@ impasse, state your findings and ask for alignment rather than continuing to re-
             "[Final] Your turn budget is exhausted. Synthesize your final deliverable, findings, \
              and grounded conclusions now.",
         ));
-        let completion = engine.chat(&messages, &[], true).await?;
+        let completion = engine.chat(&messages, &[], true, effort).await?;
         logger
             .append(serde_json::json!({
                 "type": "dispatch",
@@ -565,6 +638,7 @@ impasse, state your findings and ask for alignment rather than continuing to re-
                 "finish_reason": completion.finish_reason,
                 "content": completion.content,
                 "tool_calls": [],
+                "metrics": metrics_json(&completion.metrics),
             }))
             .map_err(RunnerError::Io)?;
         final_text = completion.content;
@@ -640,6 +714,7 @@ mod tests {
             messages: &[Message],
             tools: &[ToolSchema],
             stream: bool,
+            _reasoning_effort: Option<&str>,
         ) -> Result<Completion, EngineError> {
             self.recorder
                 .calls
@@ -707,6 +782,7 @@ mod tests {
                 ttft_ms: None,
                 total_ms: 1.0,
                 tokens_per_sec: None,
+                prompt_tokens: None,
                 completion_tokens: None,
             },
         }
@@ -1066,6 +1142,7 @@ mod tests {
                 ttft_ms: None,
                 total_ms: 1.0,
                 tokens_per_sec: None,
+                prompt_tokens: None,
                 completion_tokens: None,
             },
         }
@@ -1130,6 +1207,7 @@ mod tests {
             _messages: &[Message],
             _tools: &[ToolSchema],
             _stream: bool,
+            _reasoning_effort: Option<&str>,
         ) -> Result<Completion, EngineError> {
             let n = *self.calls.lock().await;
             if n == self.fail_at {
@@ -1393,6 +1471,222 @@ mod tests {
         assert!(events
             .iter()
             .any(|e| e["type"] == "salvage" && e["reason"] == "reasoning_ceiling" && e.get("error").is_some()));
+
+        let _ = std::fs::remove_dir_all(state.root());
+    }
+
+    // --- Probe budget integration tests (Issue #17 Part B) -------------------
+
+    #[tokio::test]
+    async fn non_scratch_bash_probes_trip_probe_budget_advisory() {
+        let state = tmp_state();
+        let logger = logger_for(&state);
+        let recorder = std::sync::Arc::new(CallRecorder::default());
+        // Four distinct non-scratch bash commands: the probe budget (default 4)
+        // trips on the fourth.
+        let engine = RecordingEngine::new(
+            vec![
+                comp("", vec![tc("c1", "bash", r#"{"command":"ls"}"#)]),
+                comp("", vec![tc("c2", "bash", r#"{"command":"pwd"}"#)]),
+                comp("", vec![tc("c3", "bash", r#"{"command":"cat file.txt"}"#)]),
+                comp("", vec![tc("c4", "bash", r#"{"command":"head -1 other.txt"}"#)]),
+                comp("Done.", Vec::new()),
+            ],
+            recorder.clone(),
+        );
+        let executor = MockExecutor::new(vec![
+            "file-list".into(),
+            "/workspace".into(),
+            "file content".into(),
+            "first line".into(),
+        ]);
+
+        let res = run_session(
+            &engine,
+            &executor,
+            &logger,
+            "sys",
+            "work",
+            &[tool_schema("bash")],
+            80,
+            None,
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(res.status, "completed");
+
+        // The probe advisory was injected into a subsequent call's messages.
+        let calls = recorder.calls.lock().await;
+        let probe_advisory_injected = calls
+            .iter()
+            .any(|c| c.messages.iter().any(|m| m.content.contains("[Probe Advisory]")));
+        assert!(
+            probe_advisory_injected,
+            "probe advisory must be present after 4 consecutive non-scratch bash probes"
+        );
+
+        let _ = std::fs::remove_dir_all(state.root());
+    }
+
+    #[tokio::test]
+    async fn mutating_tool_resets_probe_count() {
+        let state = tmp_state();
+        let logger = logger_for(&state);
+        let recorder = std::sync::Arc::new(CallRecorder::default());
+        // Three non-scratch probes, then a write_file (reset), then one more
+        // probe. The probe count goes 1→2→3→0→1, so the advisory never fires.
+        let engine = RecordingEngine::new(
+            vec![
+                comp("", vec![tc("c1", "bash", r#"{"command":"ls"}"#)]),
+                comp("", vec![tc("c2", "bash", r#"{"command":"pwd"}"#)]),
+                comp("", vec![tc("c3", "bash", r#"{"command":"cat a.txt"}"#)]),
+                comp("", vec![tc("c4", "write_file", r#"{"path":"out.txt","content":"data"}"#)]),
+                comp("", vec![tc("c5", "bash", r#"{"command":"cat b.txt"}"#)]),
+                comp("Done.", Vec::new()),
+            ],
+            recorder.clone(),
+        );
+        let executor = MockExecutor::new(vec![
+            "file-list".into(),
+            "/workspace".into(),
+            "a content".into(),
+            "wrote out.txt".into(),
+            "b content".into(),
+        ]);
+
+        let res = run_session(
+            &engine,
+            &executor,
+            &logger,
+            "sys",
+            "work",
+            &[tool_schema("bash"), tool_schema("write_file")],
+            80,
+            None,
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(res.status, "completed");
+
+        // No probe advisory should have been injected.
+        let calls = recorder.calls.lock().await;
+        let probe_advisory_injected = calls
+            .iter()
+            .any(|c| c.messages.iter().any(|m| m.content.contains("[Probe Advisory]")));
+        assert!(
+            !probe_advisory_injected,
+            "mutating tool must reset the probe count; no advisory should fire"
+        );
+
+        let _ = std::fs::remove_dir_all(state.root());
+    }
+
+    #[tokio::test]
+    async fn scratchpad_bash_commands_are_exempt_from_probe_budget() {
+        let state = tmp_state();
+        let logger = logger_for(&state);
+        let recorder = std::sync::Arc::new(CallRecorder::default());
+        // Four distinct .scratch/ commands: all exempt, no probe advisory.
+        let engine = RecordingEngine::new(
+            vec![
+                comp("", vec![tc("c1", "bash", r#"{"command":"python .scratch/repro.py"}"#)]),
+                comp("", vec![tc("c2", "bash", r#"{"command":"bash .scratch/run.sh"}"#)]),
+                comp("", vec![tc("c3", "bash", r#"{"command":"cat .scratch/output.txt"}"#)]),
+                comp("", vec![tc("c4", "bash", r#"{"command":"ls .scratch/"}"#)]),
+                comp("Done.", Vec::new()),
+            ],
+            recorder.clone(),
+        );
+        let executor = MockExecutor::new(vec![
+            "python output".into(),
+            "bash output".into(),
+            "scratch output".into(),
+            "scratch listing".into(),
+        ]);
+
+        let res = run_session(
+            &engine,
+            &executor,
+            &logger,
+            "sys",
+            "work",
+            &[tool_schema("bash")],
+            80,
+            None,
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(res.status, "completed");
+
+        // No probe advisory, no loop advisory (all commands are distinct).
+        let calls = recorder.calls.lock().await;
+        let any_advisory = calls
+            .iter()
+            .any(|c| c.messages.iter().any(|m| {
+                m.content.contains("[Probe Advisory]") || m.content.contains("[Loop Advisory]")
+            }));
+        assert!(
+            !any_advisory,
+            ".scratch/ commands must be exempt from both probe and loop advisories"
+        );
+
+        let _ = std::fs::remove_dir_all(state.root());
+    }
+
+    #[tokio::test]
+    async fn identical_scratch_command_still_trips_loop_detector() {
+        let state = tmp_state();
+        let logger = logger_for(&state);
+        let recorder = std::sync::Arc::new(CallRecorder::default());
+        // The same .scratch/ command repeated 4 times: the LoopDetector
+        // (threshold 3) fires regardless of scratchpad exemption.
+        let scratch_cmd = r#"{"command":"python .scratch/repro.py"}"#;
+        let engine = RecordingEngine::new(
+            vec![
+                comp("", vec![tc("c1", "bash", scratch_cmd)]),
+                comp("", vec![tc("c2", "bash", scratch_cmd)]),
+                comp("", vec![tc("c3", "bash", scratch_cmd)]),
+                comp("", vec![tc("c4", "bash", scratch_cmd)]),
+            ],
+            recorder.clone(),
+        );
+        let executor = MockExecutor::new(vec![
+            "python output 1".into(),
+            "python output 2".into(),
+            "python output 3".into(),
+            "python output 4".into(),
+        ]);
+
+        let err = run_session(
+            &engine,
+            &executor,
+            &logger,
+            "sys",
+            "work",
+            &[tool_schema("bash")],
+            80,
+            None,
+        )
+        .await
+        .unwrap_err();
+
+        assert!(
+            matches!(err, RunnerError::LoopDetected { .. }),
+            "identical .scratch/ commands must still trip the exact-match LoopDetector: {err:?}"
+        );
+
+        // The loop advisory was injected before the hard stop.
+        let calls = recorder.calls.lock().await;
+        let loop_advisory_injected = calls
+            .iter()
+            .any(|c| c.messages.iter().any(|m| m.content.contains("[Loop Advisory]")));
+        assert!(
+            loop_advisory_injected,
+            "loop advisory must be present before the hard stop"
+        );
 
         let _ = std::fs::remove_dir_all(state.root());
     }

@@ -64,6 +64,9 @@ pub struct Config {
     /// Secret: never print the value.
     pub brave_api_key: Option<String>,
     pub boot_timeout_secs: u64,
+    /// Consecutive non-mutating bash probes before a probe-budget advisory
+    /// is injected (Issue #17 Part B).
+    pub probe_budget: usize,
     pub state_dir: PathBuf,
 }
 
@@ -92,6 +95,7 @@ pub struct Sources {
     pub searxng_url: Source,
     pub brave_api_key: Source,
     pub boot_timeout_secs: Source,
+    pub probe_budget: Source,
     pub state_dir: Source,
 }
 
@@ -135,6 +139,7 @@ struct FileConfig {
     searxng_url: Option<String>,
     brave_api_key: Option<String>,
     boot_timeout_secs: Option<u64>,
+    probe_budget: Option<usize>,
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -262,6 +267,15 @@ pub fn load_with(get_env: impl Fn(&str) -> Option<String>) -> Result<LoadedConfi
         180,
     );
 
+    // Probe budget: env > file > default (4).
+    let env_probe_budget: Option<usize> =
+        env_u32("CASTOR_PROBE_BUDGET")?.map(|v| v as usize);
+    let (probe_budget, src_probe_budget) = pick_usize(
+        env_probe_budget,
+        file.and_then(|f| f.probe_budget),
+        4,
+    );
+
     let (ports, (src_port_engine, src_port_status, src_port_proxy)) = {
         let (engine, src_port_engine) =
             pick_u16(env_port_engine, file_ports.and_then(|p| p.engine), 18020);
@@ -294,6 +308,7 @@ pub fn load_with(get_env: impl Fn(&str) -> Option<String>) -> Result<LoadedConfi
             searxng_url,
             brave_api_key,
             boot_timeout_secs,
+            probe_budget,
             state_dir,
         },
         sources: Sources {
@@ -312,6 +327,7 @@ pub fn load_with(get_env: impl Fn(&str) -> Option<String>) -> Result<LoadedConfi
             searxng_url: src_searxng_url,
             brave_api_key: src_brave_api_key,
             boot_timeout_secs: src_boot_timeout_secs,
+            probe_budget: src_probe_budget,
             state_dir: state_dir_src,
         },
     })
@@ -358,6 +374,12 @@ pub fn format_loaded(loaded: &LoadedConfig) -> String {
         "boot_timeout_secs",
         &c.boot_timeout_secs.to_string(),
         s.boot_timeout_secs,
+    );
+    row(
+        &mut out,
+        "probe_budget",
+        &c.probe_budget.to_string(),
+        s.probe_budget,
     );
     row(&mut out, "state_dir", &c.state_dir.display().to_string(), s.state_dir);
     out
@@ -431,6 +453,14 @@ fn pick_u32(env: Option<u32>, file: Option<u32>, default: u32) -> (u32, Source) 
 }
 
 fn pick_u16(env: Option<u16>, file: Option<u16>, default: u16) -> (u16, Source) {
+    match (env, file) {
+        (Some(_), _) => (env.unwrap(), Source::Env),
+        (None, Some(_)) => (file.unwrap(), Source::File),
+        (None, None) => (default, Source::Default),
+    }
+}
+
+fn pick_usize(env: Option<usize>, file: Option<usize>, default: usize) -> (usize, Source) {
     match (env, file) {
         (Some(_), _) => (env.unwrap(), Source::Env),
         (None, Some(_)) => (file.unwrap(), Source::File),
@@ -754,6 +784,25 @@ mod tests {
             }
             other => panic!("expected InvalidValue, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn precedence_probe_budget() {
+        let l = load_case(&[("CASTOR_PROBE_BUDGET", "8")], Some(r#"{"probe_budget":6}"#));
+        assert_eq!(
+            (l.config.probe_budget, l.sources.probe_budget),
+            (8, Source::Env)
+        );
+        let l = load_case(&[], Some(r#"{"probe_budget":6}"#));
+        assert_eq!(
+            (l.config.probe_budget, l.sources.probe_budget),
+            (6, Source::File)
+        );
+        let l = load_case(&[], None);
+        assert_eq!(
+            (l.config.probe_budget, l.sources.probe_budget),
+            (4, Source::Default)
+        );
     }
 
     #[test]
