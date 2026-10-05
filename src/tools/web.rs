@@ -21,7 +21,7 @@
 use thiserror::Error;
 
 /// Default base URLs (overridable in tests via [`WebClient::with_base_urls`]).
-const DEFAULT_SEARXNG: Option<&'static str> = None;
+pub const DEFAULT_SEARXNG: Option<&'static str> = Some("http://127.0.0.1:8888");
 const DEFAULT_BRAVE: &str = "https://api.search.brave.com/res/v1/web/search";
 const DEFAULT_DDG: &str = "https://html.duckduckgo.com/html/";
 
@@ -43,11 +43,11 @@ pub enum WebError {
     #[error("InvalidUrlError: only http/https URLs are supported (got '{0}')")]
     InvalidUrl(String),
     #[error(
-        "SearxngNotConfiguredError: no SearXNG instance is configured. Set `searxng_url` in your castor config (or the CASTOR_SEARXNG_URL env var) to a running SearXNG instance, e.g. http://127.0.0.1:8080, or provide a `brave_api_key` to use the Brave provider."
+        "SearxngNotConfiguredError: no SearXNG instance is configured. Set `searxng_url` in your castor config (or the CASTOR_SEARXNG_URL env var) to a running SearXNG instance, e.g. http://127.0.0.1:8888, or provide a `brave_api_key` to use the Brave provider."
     )]
     SearxngNotConfigured,
     #[error(
-        "SearxngUnreachableError: SearXNG at {url} is unreachable ({reason}). Verify the instance is running (e.g. `docker compose up -d searxng`) and that `searxng_url` points at it, or configure a `brave_api_key` to fall back to Brave."
+        "SearxngUnreachableError: SearXNG at {url} is unreachable ({reason}). Verify the instance is running (e.g. `docker start anser-searxng` or `docker compose up -d`) and that `searxng_url` points at it, or configure a `brave_api_key` to fall back to Brave."
     )]
     SearxngUnreachable { url: String, reason: String },
     #[error("BraveSearchError: {0}")]
@@ -127,9 +127,7 @@ impl WebClient {
         ddg: Option<String>,
     ) -> Self {
         let mut c = Self::new();
-        if let Some(s) = searxng {
-            c.searxng_base = Some(s);
-        }
+        c.searxng_base = searxng;
         if let Some(b) = brave {
             c.brave_base = b;
         }

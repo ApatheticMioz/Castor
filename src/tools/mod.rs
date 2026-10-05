@@ -51,7 +51,8 @@ impl CompositeExecutor {
             .map(|l| l.config.state_dir);
         let policy = sandbox::SandboxPolicy::for_workspace(&root, state_dir.as_deref());
         let fs = FsExecutor::with_policy(policy);
-        let web = WebClient::with_base_urls(searxng_url, None, None);
+        let searx_base = searxng_url.or_else(|| crate::tools::web::DEFAULT_SEARXNG.map(str::to_string));
+        let web = WebClient::with_base_urls(searx_base, None, None);
         Ok(Self {
             fs,
             workspace_root: root,
