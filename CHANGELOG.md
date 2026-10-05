@@ -12,20 +12,24 @@ The project adheres to **[Semantic Versioning](https://semver.org/)**:
 
 ### 🛡️ Landlock LSM Confinement & Security Hardening (Issue #6, #17)
 - **Landlock LSM Integration**: Kernel-enforced filesystem confinement on Linux/WSL using standard `landlock = "0.4"` crate in `src/tools/shell.rs`. Confines child bash processes to workspace root and `/tmp` (RW) while granting read-only access to system paths and `~/.castor`.
-- **Character Device & Toolchain Hardening**: Granted read-write access to `/dev` to ensure `/dev/null`, `/dev/zero`, and `/dev/urandom` work for writing (unblocking `git` and shell redirections). Granted read-only access to user toolchains (`~/.cargo`, `~/.rustup`, `~/.local`) and prepended `$HOME/.cargo/bin:$HOME/.local/bin` to `PATH`.
+- **Character Device & Toolchain Hardening**: Granted read-write access to `/dev` to ensure `/dev/null`, `/dev/zero`, and `/dev/urandom` support `O_RDWR` writes (unblocking `git` and shell redirections). Granted read-only access to user toolchains (`~/.cargo`, `~/.rustup`, `~/.local`) and prepended `$HOME/.cargo/bin:$HOME/.local/bin` to `PATH`.
 - **Symmetric Multi-Root Scoping**: Parity between shell confinement and filesystem tools via `SandboxPolicy::for_workspace`.
 - **28 Tree-Sitter Languages**: Expanded AST tooling in `src/tools/ast.rs` with all 28 language features in `ast-grep-language`.
+- **AST Pass-By-Reference**: Optimized AST tree-sitter recursive traversal to borrow `&Node` references, eliminating unnecessary node copies.
 
 ### ⚡ DGI 1-Forward Pass Logit Probe (Issue #16)
 - **System-1 Constrained Token Probe**: Replaced 711 LOC of brittle regexes and heuristics with a single-pass constrained logit probe using `guided_choice: ["ADMIT", "OVERLOADED"]`, `max_tokens: 1`, temperature 0.0, and prefilled thought suppression. Sub-30ms decode with zero autoregressive reasoning loops.
 - **Fail-Fast Gateway Rejection**: True monolithic dispatches trigger immediate `DecompositionGateRejected` at the MCP gateway.
 - **Loud Offline Fallback**: Degrades gracefully to advisory `Review` with explicit warning logs when serving engine is unreachable.
+- **Expanded Evaluation Benchmark**: Expanded test corpus to 401 cross-domain prompts with labeled ground truth.
 
 ### 🧠 Reasoning Effort Direct Passthrough (Issue #3)
 - **Direct chat_template_kwargs**: Direct wiring of `chat_template_kwargs: {"reasoning_effort": effort}` to vLLM, eliminating dual-payload abstractions.
+- **Reasoning Token Telemetry**: Extracted reasoning token consumption from OpenAI-compatible provider responses into the session event stream.
 
 ### ⏱️ Runner Probe Budget Governor (Issue #17)
 - **Proactive Loop Breaker**: Consecutive probe warnings trigger at 4 non-mutating bash commands, with an explicit bypass exemption for sanctioned `.scratch/` scripts.
+- **Tool Output Telemetry**: Recorded full tool execution outcomes in event stream for real-time observability.
 
 ### 🔎 Default Search Provider
 - **SearXNG on :8888**: Configured local SearXNG at `http://127.0.0.1:8888` as primary default web search provider, with seamless fallback to Brave and DuckDuckGo.
@@ -37,8 +41,12 @@ The project adheres to **[Semantic Versioning](https://semver.org/)**:
 - **Dual Snake/CamelCase Serde**: Robust aggregation support for both canonical `snake_case` and `camelCase` token metric fields.
 
 ### 🚀 Lean Build & Dependency Optimization
-- **Stripped Unused Dependencies**: Removed unreferenced `shlex = "1.3"` from `Cargo.toml`.
-- **Release Profile Tuning**: Configured `[profile.release]` with `opt-level = 3`, `lto = "thin"`, `codegen-units = 1`, `strip = true`, and `panic = "abort"` for minimal binary footprint.
+- **Stripped Unused Dependencies**: Removed unreferenced `shlex = "1.3"` from `Cargo.toml`. Verified 0 unused dependencies via `cargo-machete`.
+- **Release Profile Tuning**: Configured `[profile.release]` with `opt-level = 3`, `lto = "thin"`, `codegen-units = 1`, and `strip = true` for minimal binary footprint while retaining C-ABI unwinding compatibility with native tree-sitter grammars.
+- **Documentation Link Integrity**: Resolved all broken intra-doc link references (`\[DONE\]`, `Self::final_text`, `Self::web_search`, `Self::fetch_docs`) under `RUSTDOCFLAGS="-D warnings"`.
+- **Package Manifest Metadata**: Added canonical `repository` and `homepage` URLs to `Cargo.toml` package definition.
+- **Codebase-Wide Canonical Formatting**: Applied standard `rustfmt` repo-wide to ensure clean RFC formatting across all modules.
+- **Multi-Tool Verification Matrix**: Successfully passed 24 distinct Rust/Cargo verification suites (`cargo test`, `clippy -D warnings`, `cargo-audit`, `cargo-deny`, `cargo-bloat`, `cargo package`).
 
 ---
 
