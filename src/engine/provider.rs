@@ -112,6 +112,9 @@ pub struct Metrics {
     pub ttft_ms: Option<f64>,
     pub total_ms: f64,
     pub tokens_per_sec: Option<f64>,
+    /// Engine-reported prompt-token count for the turn (from the `usage`
+    /// object). `None` when the engine did not report it.
+    pub prompt_tokens: Option<u64>,
     pub completion_tokens: Option<u64>,
 }
 
@@ -151,11 +154,16 @@ impl EngineClient {
         })
     }
 
+    /// Send one chat-completion request, consuming the response.
+    ///
+    /// When `reasoning_effort` is provided, it is serialized directly as
+    /// `chat_template_kwargs: {"reasoning_effort": effort}` for local vLLM.
     pub async fn chat(
         &self,
         messages: &[Message],
         tools: &[ToolSchema],
         stream: bool,
+        reasoning_effort: Option<&str>,
     ) -> Result<Completion, EngineError> {
         let url = format!(
             "{}/chat/completions",
@@ -172,6 +180,9 @@ impl EngineClient {
         }
         if stream {
             body["stream_options"] = json!({ "include_usage": true });
+        }
+        if let Some(effort) = reasoning_effort {
+            body["chat_template_kwargs"] = json!({ "reasoning_effort": effort });
         }
         let mut req = self.http.post(&url).json(&body);
         if let Some(key) = &self.api_key {
@@ -204,6 +215,7 @@ impl EngineClient {
         let mut content = String::new();
         let mut finish_reason: Option<String> = None;
         let mut ttft: Option<std::time::Duration> = None;
+        let mut prompt_tokens: Option<u64> = None;
         let mut completion_tokens: Option<u64> = None;
         let mut tool_calls: BTreeMap<usize, ToolCall> = BTreeMap::new();
 
@@ -223,6 +235,7 @@ impl EngineClient {
                         tool_calls,
                         finish_reason,
                         ttft,
+                        prompt_tokens,
                         completion_tokens,
                         t0,
                     ));
@@ -232,12 +245,18 @@ impl EngineClient {
                 }
                 let frame: Value =
                     serde_json::from_str(payload).map_err(|e| EngineError::Sse(e.to_string()))?;
-                if let Some(usage) = frame
-                    .get("usage")
-                    .and_then(|u| u.get("completion_tokens"))
-                    .and_then(Value::as_u64)
-                {
-                    completion_tokens = Some(usage);
+                if let Some(usage) = frame.get("usage") {
+                    // Engine-reported usage chunk: completion tokens take
+                    // precedence over the local char estimate; prompt tokens
+                    // are carried through for the session ledger.
+                    if let Some(c) =
+                        usage.get("completion_tokens").and_then(Value::as_u64)
+                    {
+                        completion_tokens = Some(c);
+                    }
+                    if let Some(p) = usage.get("prompt_tokens").and_then(Value::as_u64) {
+                        prompt_tokens = Some(p);
+                    }
                 }
                 for choice in frame
                     .get("choices")
@@ -294,6 +313,7 @@ impl EngineClient {
             tool_calls,
             finish_reason,
             ttft,
+            prompt_tokens,
             completion_tokens,
             t0,
         ))
@@ -340,8 +360,11 @@ impl EngineClient {
                 tool_calls.insert(i, slot);
             }
         }
-        let completion_tokens = body
-            .get("usage")
+        let usage = body.get("usage");
+        let prompt_tokens = usage
+            .and_then(|u| u.get("prompt_tokens"))
+            .and_then(Value::as_u64);
+        let completion_tokens = usage
             .and_then(|u| u.get("completion_tokens"))
             .and_then(Value::as_u64);
         let ttft = if content.is_empty() && tool_calls.is_empty() {
@@ -354,6 +377,7 @@ impl EngineClient {
             tool_calls,
             finish_reason,
             ttft,
+            prompt_tokens,
             completion_tokens,
             t0,
         ))
@@ -365,6 +389,7 @@ fn assemble(
     tool_calls: BTreeMap<usize, ToolCall>,
     finish_reason: Option<String>,
     ttft: Option<std::time::Duration>,
+    prompt_tokens: Option<u64>,
     completion_tokens: Option<u64>,
     t0: Instant,
 ) -> Completion {
@@ -385,6 +410,7 @@ fn assemble(
             ttft_ms: ttft.map(|d| d.as_secs_f64() * 1000.0),
             total_ms: total.as_secs_f64() * 1000.0,
             tokens_per_sec,
+            prompt_tokens,
             completion_tokens,
         },
     }
@@ -418,6 +444,7 @@ mod tests {
             searxng_url: None,
             brave_api_key: None,
             boot_timeout_secs: 180,
+            probe_budget: 4,
             state_dir: PathBuf::from("/tmp/castor-test"),
         }
     }
@@ -517,7 +544,7 @@ mod tests {
         let app = Router::new().route("/chat/completions", post(stream_handler));
         let base = start(app).await;
         let client = EngineClient::from_config(&test_config(&base)).unwrap();
-        let out = client.chat(&[msg()], &[], true).await.unwrap();
+        let out = client.chat(&[msg()], &[], true, None).await.unwrap();
         assert_eq!(out.content, "Hello world");
         assert_eq!(out.finish_reason.as_deref(), Some("stop"));
         assert!(out.tool_calls.is_empty());
@@ -528,7 +555,7 @@ mod tests {
         let app = Router::new().route("/chat/completions", post(tools_handler));
         let base = start(app).await;
         let client = EngineClient::from_config(&test_config(&base)).unwrap();
-        let out = client.chat(&[msg()], &[], true).await.unwrap();
+        let out = client.chat(&[msg()], &[], true, None).await.unwrap();
         assert_eq!(out.tool_calls.len(), 1);
         assert_eq!(out.tool_calls[0].id, "call_1");
         assert_eq!(out.tool_calls[0].name, "get_weather");
@@ -541,7 +568,7 @@ mod tests {
         let app = Router::new().route("/chat/completions", post(metrics_handler));
         let base = start(app).await;
         let client = EngineClient::from_config(&test_config(&base)).unwrap();
-        let out = client.chat(&[msg()], &[], true).await.unwrap();
+        let out = client.chat(&[msg()], &[], true, None).await.unwrap();
         assert!(out.metrics.ttft_ms.is_some());
         assert!(out.metrics.tokens_per_sec.is_some());
         assert!(out.metrics.total_ms > 0.0);
@@ -553,7 +580,7 @@ mod tests {
         let app = Router::new().route("/chat/completions", post(err400_handler));
         let base = start(app).await;
         let client = EngineClient::from_config(&test_config(&base)).unwrap();
-        let err = client.chat(&[msg()], &[], true).await.unwrap_err();
+        let err = client.chat(&[msg()], &[], true, None).await.unwrap_err();
         match err {
             EngineError::Http { status, body } => {
                 assert_eq!(status, 400);
@@ -565,7 +592,7 @@ mod tests {
         let app = Router::new().route("/chat/completions", post(err500_handler));
         let base = start(app).await;
         let client = EngineClient::from_config(&test_config(&base)).unwrap();
-        let err = client.chat(&[msg()], &[], true).await.unwrap_err();
+        let err = client.chat(&[msg()], &[], true, None).await.unwrap_err();
         match err {
             EngineError::Http { status, body } => {
                 assert_eq!(status, 500);
@@ -580,7 +607,7 @@ mod tests {
         let app = Router::new().route("/chat/completions", post(split_handler));
         let base = start(app).await;
         let client = EngineClient::from_config(&test_config(&base)).unwrap();
-        let out = client.chat(&[msg()], &[], true).await.unwrap();
+        let out = client.chat(&[msg()], &[], true, None).await.unwrap();
         assert_eq!(out.content, "Hello");
         assert_eq!(out.finish_reason.as_deref(), Some("stop"));
     }
@@ -592,7 +619,7 @@ mod tests {
         drop(listener);
         let client =
             EngineClient::from_config(&test_config(&format!("http://{addr}"))).unwrap();
-        let err = client.chat(&[msg()], &[], true).await.unwrap_err();
+        let err = client.chat(&[msg()], &[], true, None).await.unwrap_err();
         assert!(matches!(err, EngineError::Connect { .. }), "{err:?}");
     }
 
@@ -601,7 +628,7 @@ mod tests {
         let app = Router::new().route("/chat/completions", post(non_stream_handler));
         let base = start(app).await;
         let client = EngineClient::from_config(&test_config(&base)).unwrap();
-        let out = client.chat(&[msg()], &[], false).await.unwrap();
+        let out = client.chat(&[msg()], &[], false, None).await.unwrap();
         assert_eq!(out.content, "pong");
         assert_eq!(out.finish_reason.as_deref(), Some("stop"));
         assert_eq!(out.metrics.completion_tokens, Some(7));
@@ -622,5 +649,73 @@ mod tests {
             EngineClient::from_config(&cfg),
             Err(EngineError::MissingConfig { field: "model" })
         ));
+    }
+
+    // ------------------------------------------------------------------
+    // Issue #3: reasoning_effort payload shape, per the config knob.
+    // A capturing handler records the received request body in a shared
+    // slot; the test then asserts on exactly what was serialized.
+    // ------------------------------------------------------------------
+
+    fn assert_effort_fields(body: &Value, effort: Option<&str>) {
+        let ct = body.get("chat_template_kwargs");
+        let tl = body.get("reasoning_effort");
+        match effort {
+            Some(e) => {
+                assert_eq!(
+                    ct,
+                    Some(&json!({ "reasoning_effort": e })),
+                    "chat_template_kwargs must contain reasoning_effort: {body}"
+                );
+                assert!(tl.is_none(), "top-level reasoning_effort should not be sent: {body}");
+            }
+            None => {
+                assert!(
+                    ct.is_none() && tl.is_none(),
+                    "absent effort must serialize no reasoning fields: {body}"
+                );
+            }
+        }
+    }
+
+    /// Echo the serialized request body back inside the completion's
+    /// `content` field, so a test can recover exactly what the client sent
+    /// (the client parses `content` as a string, which we then re-parse).
+    async fn echo_request_body(Json(body): Json<Value>) -> Json<Value> {
+        Json(json!({
+            "choices": [{
+                "message": { "content": serde_json::to_string(&body).unwrap() },
+                "finish_reason": "stop"
+            }]
+        }))
+    }
+
+    /// Start an echo server; return its base URL.
+    async fn start_echo_server() -> String {
+        let app = Router::new().route("/chat/completions", post(echo_request_body));
+        start(app).await
+    }
+
+    /// Recover the request body the client sent (re-parsed from the echo).
+    fn sent_body(out: &Completion) -> Value {
+        serde_json::from_str(&out.content).expect("echoed request body must be valid JSON")
+    }
+
+    #[tokio::test]
+    async fn effort_serialized_as_chat_template_kwargs() {
+        let base = start_echo_server().await;
+        let client = EngineClient::from_config(&test_config(&base)).unwrap();
+        let out = client.chat(&[msg()], &[], false, Some("xhigh")).await.unwrap();
+        let sent = sent_body(&out);
+        assert_effort_fields(&sent, Some("xhigh"));
+    }
+
+    #[tokio::test]
+    async fn absent_effort_serializes_no_effort_fields() {
+        let base = start_echo_server().await;
+        let client = EngineClient::from_config(&test_config(&base)).unwrap();
+        let out = client.chat(&[msg()], &[], false, None).await.unwrap();
+        let sent = sent_body(&out);
+        assert_effort_fields(&sent, None);
     }
 }

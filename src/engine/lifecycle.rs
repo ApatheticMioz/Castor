@@ -344,6 +344,7 @@ mod tests {
             searxng_url: None,
             brave_api_key: None,
             boot_timeout_secs: 180,
+            probe_budget: 4,
             state_dir: state.root().to_path_buf(),
         }
     }
