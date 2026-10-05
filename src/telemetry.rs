@@ -37,6 +37,7 @@ pub struct Stats {
     pub total_completion_tokens: u64,
     pub total_reasoning_tokens: u64,
     pub total_prompt_tokens: u64,
+    pub total_cached_tokens: u64,
     pub total_turns: u64,
     pub total_sessions: u64,
     pub total_tasks_completed: u64,
@@ -44,6 +45,8 @@ pub struct Stats {
     pub total_tasks_cancelled: u64,
     /// Mean session duration in ms (over sessions that reported one).
     pub avg_duration_ms: Option<f64>,
+    /// Total duration sum in ms over sessions that reported one.
+    pub total_duration_ms: u64,
     pub total_tool_calls: u64,
     pub total_tool_errors: u64,
     /// Per-tool call counts (name → count).
@@ -54,6 +57,16 @@ pub struct Stats {
     /// API cost that the derived token volume would have cost at the
     /// benchmark model's frontier rates (the "cost saved" figure).
     pub estimated_cost_saved_usd: f64,
+    /// Estimated local electricity cost in USD.
+    pub estimated_electricity_cost_usd: f64,
+    /// Estimated energy consumption in kWh.
+    pub estimated_energy_kwh: f64,
+    /// Net operational savings in USD (virtual cloud cost - electricity cost).
+    pub net_savings_usd: f64,
+    /// Deliberation ratio: reasoning tokens / completion tokens.
+    pub reasoning_ratio: Option<f64>,
+    /// Surgical precision ratio: edit_file calls / write_file calls.
+    pub edit_write_ratio: Option<f64>,
     /// ISO-8601 UTC of the earliest recorded session event, if any.
     pub first_recorded_session: Option<String>,
     /// ISO-8601 UTC of the latest recorded session event, if any.
@@ -87,18 +100,25 @@ impl Default for Stats {
             total_completion_tokens: 0,
             total_reasoning_tokens: 0,
             total_prompt_tokens: 0,
+            total_cached_tokens: 0,
             total_turns: 0,
             total_sessions: 0,
             total_tasks_completed: 0,
             total_tasks_failed: 0,
             total_tasks_cancelled: 0,
             avg_duration_ms: None,
+            total_duration_ms: 0,
             total_tool_calls: 0,
             total_tool_errors: 0,
             tool_calls: BTreeMap::new(),
             tool_errors: BTreeMap::new(),
             benchmark_model: BENCHMARK_MODEL.to_string(),
             estimated_cost_saved_usd: 0.0,
+            estimated_electricity_cost_usd: 0.0,
+            estimated_energy_kwh: 0.0,
+            net_savings_usd: 0.0,
+            reasoning_ratio: None,
+            edit_write_ratio: None,
             first_recorded_session: None,
             last_recorded_session: None,
             last_updated: String::new(),
@@ -194,6 +214,7 @@ impl<'writer> tracing_subscriber::fmt::MakeWriter<'writer> for FileSink {
 pub struct DayBucket {
     pub turns: u64,
     pub prompt_tokens: u64,
+    pub cached_tokens: u64,
     pub completion_tokens: u64,
     pub reasoning_tokens: u64,
     pub tool_calls: u64,
@@ -230,6 +251,7 @@ struct SessionRollup {
     total_sessions: u64,
     total_turns: u64,
     total_prompt_tokens: u64,
+    total_cached_tokens: u64,
     total_completion_tokens: u64,
     total_reasoning_tokens: u64,
     total_tool_calls: u64,
@@ -248,6 +270,7 @@ impl SessionRollup {
         self.total_sessions += other.total_sessions;
         self.total_turns += other.total_turns;
         self.total_prompt_tokens += other.total_prompt_tokens;
+        self.total_cached_tokens += other.total_cached_tokens;
         self.total_completion_tokens += other.total_completion_tokens;
         self.total_reasoning_tokens += other.total_reasoning_tokens;
         self.total_tool_calls += other.total_tool_calls;
@@ -307,6 +330,7 @@ fn process_session_dirs(paths: &[PathBuf], opts: &StatsOptions) -> SessionRollup
         rollup.total_sessions += 1;
         rollup.total_turns += session.turns;
         rollup.total_prompt_tokens += session.prompt_tokens;
+        rollup.total_cached_tokens += session.cached_tokens;
         rollup.total_completion_tokens += session.completion_tokens;
         rollup.total_reasoning_tokens += session.reasoning_tokens;
         rollup.total_tool_calls += session.tool_calls;
@@ -329,6 +353,7 @@ fn process_session_dirs(paths: &[PathBuf], opts: &StatsOptions) -> SessionRollup
                 let b = rollup.daily.entry(day).or_default();
                 b.turns += ev.turns;
                 b.prompt_tokens += ev.prompt_tokens;
+                b.cached_tokens += ev.cached_tokens;
                 b.completion_tokens += ev.completion_tokens;
                 b.reasoning_tokens += ev.reasoning_tokens;
                 b.tool_calls += ev.tool_calls;
@@ -488,6 +513,7 @@ pub fn derive_stats(state_dir: &Path, opts: &StatsOptions) -> Stats {
         total_tasks_failed: task_metrics.failed,
         total_tasks_cancelled: task_metrics.cancelled,
         total_prompt_tokens: session_rollup.total_prompt_tokens,
+        total_cached_tokens: session_rollup.total_cached_tokens,
         total_completion_tokens: session_rollup.total_completion_tokens,
         total_reasoning_tokens: session_rollup.total_reasoning_tokens,
         total_tool_calls: session_rollup.total_tool_calls,
@@ -498,6 +524,7 @@ pub fn derive_stats(state_dir: &Path, opts: &StatsOptions) -> Stats {
         last_ms: session_rollup.last_ms,
         duration_sum: session_rollup.duration_sum,
         duration_count: session_rollup.duration_count,
+        total_duration_ms: session_rollup.duration_sum,
         daily: if opts.by_day {
             Some(session_rollup.daily)
         } else {
@@ -513,6 +540,26 @@ pub fn derive_stats(state_dir: &Path, opts: &StatsOptions) -> Stats {
         * PROMPT_COST_PER_MILLION
         + (stats.total_completion_tokens as f64 / 1_000_000.0) * COMPLETION_COST_PER_MILLION;
     stats.estimated_cost_saved_usd = (stats.estimated_cost_saved_usd * 100.0).round() / 100.0;
+
+    let hours = stats.total_duration_ms as f64 / 3_600_000.0;
+    let kwh = (hours * 0.30 * 100.0).round() / 100.0;
+    stats.estimated_energy_kwh = kwh;
+    stats.estimated_electricity_cost_usd = ((kwh * 0.16) * 100.0).round() / 100.0;
+    stats.net_savings_usd = ((stats.estimated_cost_saved_usd - stats.estimated_electricity_cost_usd).max(0.0) * 100.0).round() / 100.0;
+
+    stats.reasoning_ratio = if stats.total_completion_tokens > 0 {
+        Some(((stats.total_reasoning_tokens as f64 / stats.total_completion_tokens as f64) * 100.0).round() / 100.0)
+    } else {
+        None
+    };
+    let edits = stats.tool_calls.get("edit_file").copied().unwrap_or(0);
+    let writes = stats.tool_calls.get("write_file").copied().unwrap_or(0);
+    stats.edit_write_ratio = if writes > 0 {
+        Some(((edits as f64 / writes as f64) * 100.0).round() / 100.0)
+    } else {
+        None
+    };
+
     stats.last_updated = now_iso();
 
     // Render the epoch-millisecond horizon accumulators to ISO-8601 UTC.
@@ -538,8 +585,6 @@ pub fn write_stats_json(state_dir: &Path, stats: &Stats) -> std::io::Result<Path
 struct Palette {
     bold: &'static str,
     dim: &'static str,
-    cyan: &'static str,
-    green: &'static str,
     bright_green: &'static str,
     yellow: &'static str,
     red: &'static str,
@@ -552,8 +597,6 @@ impl Palette {
             Self {
                 bold: "\x1b[1m",
                 dim: "\x1b[2m",
-                cyan: "\x1b[36m",
-                green: "\x1b[32m",
                 bright_green: "\x1b[92m",
                 yellow: "\x1b[33m",
                 red: "\x1b[31m",
@@ -563,8 +606,6 @@ impl Palette {
             Self {
                 bold: "",
                 dim: "",
-                cyan: "",
-                green: "",
                 bright_green: "",
                 yellow: "",
                 red: "",
@@ -595,21 +636,6 @@ fn fmt_scaled(n: u64) -> String {
         format!("{:.2}M", n as f64 / 1_000_000.0)
     } else if n >= 10_000 {
         format!("{:.1}k", n as f64 / 1_000.0)
-    } else {
-        fmt_grouped(n)
-    }
-}
-
-fn fmt_tokens_line(n: u64, p: &Palette) -> String {
-    if n >= 1_000_000 {
-        format!(
-            "{}{}{}{} ({})",
-            p.bold,
-            p.cyan,
-            fmt_scaled(n),
-            p.reset,
-            fmt_grouped(n)
-        )
     } else {
         fmt_grouped(n)
     }
@@ -666,164 +692,223 @@ fn bar_chart(count: u64, max: u64, width: usize) -> String {
     format!("{}{}{}", "█".repeat(full), frac, " ".repeat(empty))
 }
 
+/// Format an ISO-8601 UTC timestamp to a compact readable string (`YYYY-MM-DD HH:MM UTC`).
+fn fmt_iso_compact(iso: &str) -> String {
+    if let Some((date, time)) = iso.split_once('T') {
+        let clean_time = time.split('.').next().unwrap_or(time).trim_end_matches('Z');
+        let short_time = if clean_time.len() >= 5 {
+            &clean_time[..5]
+        } else {
+            clean_time
+        };
+        format!("{date} {short_time} UTC")
+    } else {
+        iso.to_string()
+    }
+}
+
 /// Format a high-level visual card of operational telemetry and financial savings.
 pub fn format_stats_card(stats: &Stats) -> String {
     format_stats_card_styled(stats, false)
 }
 
-/// Format a high-level visual card with optional ANSI color and modern terminal aesthetics.
+/// Format a high-level visual card with optional ANSI color and high-density terminal layout.
 pub fn format_stats_card_styled(stats: &Stats, color: bool) -> String {
     let p = Palette::new(color);
     let mut out = String::new();
 
     out.push_str(&format!(
-        "{}╭────────────────────────────────────────────────────────────────────────╮{}\n",
-        p.cyan, p.reset
+        "{}{}{}\n",
+        p.bold, "CASTOR OPERATIONAL TELEMETRY", p.reset
     ));
-    out.push_str(&format!(
-        "{}│{}                      {}CASTOR OPERATIONAL TELEMETRY{}                      {}│{}\n",
-        p.cyan, p.reset, p.bold, p.reset, p.cyan, p.reset
-    ));
-    out.push_str(&format!(
-        "{}│{}                {}Universal Cloud-to-Local Agent Microkernel{}              {}│{}\n",
-        p.cyan, p.reset, p.dim, p.reset, p.cyan, p.reset
-    ));
-    out.push_str(&format!(
-        "{}╰────────────────────────────────────────────────────────────────────────╯{}\n\n",
-        p.cyan, p.reset
-    ));
+    if let (Some(first), Some(last)) = (&stats.first_recorded_session, &stats.last_recorded_session)
+    {
+        out.push_str(&format!(
+            "{}Horizon: {} -> {}{}\n",
+            p.dim,
+            fmt_iso_compact(first),
+            fmt_iso_compact(last),
+            p.reset
+        ));
+    }
+    out.push('\n');
 
-    out.push_str(&format!("{}📊 ACTIVITY & RUNTIME{}\n", p.bold, p.reset));
+    out.push_str(&format!("{}ACTIVITY & RUNTIME{}\n", p.bold, p.reset));
     out.push_str(&format!(
-        "  • Turns:                   {}{}{}\n",
-        p.bold,
-        fmt_grouped(stats.total_turns),
-        p.reset
+        "  Turns                  {:>10}\n",
+        fmt_grouped(stats.total_turns)
     ));
     out.push_str(&format!(
-        "  • Sessions:                {}{}{}\n",
-        p.bold,
-        fmt_grouped(stats.total_sessions),
-        p.reset
+        "  Sessions               {:>10}\n",
+        fmt_grouped(stats.total_sessions)
     ));
 
     let total_tasks =
         stats.total_tasks_completed + stats.total_tasks_failed + stats.total_tasks_cancelled;
-    let task_line = if total_tasks > 0 {
+    if total_tasks > 0 {
         let ok_rate = (stats.total_tasks_completed as f64 / total_tasks as f64) * 100.0;
         let fail_part = if stats.total_tasks_failed > 0 {
             format!(
-                "{}{} failed{}",
+                ", {}{} failed{}",
                 p.red,
                 fmt_grouped(stats.total_tasks_failed),
                 p.reset
             )
         } else {
-            "0 failed".to_string()
+            String::new()
         };
         let canc_part = if stats.total_tasks_cancelled > 0 {
             format!(
-                "{}{} cancelled{}",
+                ", {}{} cancelled{}",
                 p.yellow,
                 fmt_grouped(stats.total_tasks_cancelled),
                 p.reset
             )
         } else {
-            "0 cancelled".to_string()
+            String::new()
         };
-        format!(
-            "{}{} completed{} ({:.1}% ok) · {} · {}",
-            p.green,
-            fmt_grouped(stats.total_tasks_completed),
-            p.reset,
+        out.push_str(&format!(
+            "  Tasks                  {:>10}  {}{:.1}% ok: {} completed{}{}{}\n",
+            fmt_grouped(total_tasks),
+            p.dim,
             ok_rate,
+            fmt_grouped(stats.total_tasks_completed),
             fail_part,
-            canc_part
-        )
+            canc_part,
+            p.reset
+        ));
     } else {
-        "0 completed · 0 failed · 0 cancelled".to_string()
-    };
-    out.push_str(&format!("  • Tasks:                   {}\n", task_line));
+        out.push_str("  Tasks                           0\n");
+    }
 
-    let tool_call_line = if stats.total_tool_calls > 0 {
+    if stats.total_duration_ms > 0 {
+        let hours = stats.total_duration_ms as f64 / 3_600_000.0;
+        let avg_str = stats
+            .avg_duration_ms
+            .map(|ms| format!("  {} avg", fmt_duration_compact(ms.round() as u64)))
+            .unwrap_or_default();
+        out.push_str(&format!(
+            "  Active Compute         {:>9.2}h  {}{}{}\n",
+            hours,
+            p.dim,
+            avg_str.trim_start(),
+            p.reset
+        ));
+    }
+
+    if stats.total_tool_calls > 0 {
         let ok_calls = stats
             .total_tool_calls
             .saturating_sub(stats.total_tool_errors);
         let ok_rate = (ok_calls as f64 / stats.total_tool_calls as f64) * 100.0;
         let err_part = if stats.total_tool_errors > 0 {
             format!(
-                " · {}{} errors{}",
+                ", {}{} errors{}",
                 p.red,
                 fmt_grouped(stats.total_tool_errors),
                 p.reset
             )
         } else {
-            " · 0 errors".to_string()
+            String::new()
         };
-        format!(
-            "{}{} calls{} ({:.1}% ok{})",
-            p.bold,
-            fmt_grouped(stats.total_tool_calls),
-            p.reset,
-            ok_rate,
-            err_part
-        )
-    } else {
-        "0 calls (0 errors)".to_string()
-    };
-    out.push_str(&format!(
-        "  • Total Tool Calls:        {}\n",
-        tool_call_line
-    ));
-
-    if let Some(avg_ms) = stats.avg_duration_ms {
-        let compact = fmt_duration_compact(avg_ms.round() as u64);
         out.push_str(&format!(
-            "  • Avg Session Duration:    {} ({:.2}s)\n",
-            compact,
-            avg_ms / 1000.0
+            "  Tool Calls             {:>10}  {}{:.1}% ok{}{}\n",
+            fmt_grouped(stats.total_tool_calls),
+            p.dim,
+            ok_rate,
+            err_part,
+            p.reset
+        ));
+    } else {
+        out.push_str("  Tool Calls                      0\n");
+    }
+    out.push('\n');
+
+    out.push_str(&format!("{}TOKEN EFFICIENCY & DYNAMICS{}\n", p.bold, p.reset));
+    let total_tokens = stats.total_prompt_tokens + stats.total_completion_tokens;
+    out.push_str(&format!(
+        "  Total Processed        {:>10}\n",
+        fmt_scaled(total_tokens)
+    ));
+    out.push_str(&format!(
+        "  Prompt Tokens          {:>10}\n",
+        fmt_scaled(stats.total_prompt_tokens)
+    ));
+    if stats.total_cached_tokens > 0 {
+        let hit_rate = (stats.total_cached_tokens as f64 / stats.total_prompt_tokens.max(1) as f64) * 100.0;
+        out.push_str(&format!(
+            "  Cached Tokens          {:>10}  {}{:.1}% cache hit{}\n",
+            fmt_scaled(stats.total_cached_tokens),
+            p.dim,
+            hit_rate,
+            p.reset
+        ));
+    }
+    out.push_str(&format!(
+        "  Output Tokens          {:>10}\n",
+        fmt_scaled(stats.total_completion_tokens)
+    ));
+    if stats.total_reasoning_tokens > 0 {
+        let r_pct = (stats.total_reasoning_tokens as f64 / (stats.total_completion_tokens + stats.total_reasoning_tokens).max(1) as f64) * 100.0;
+        out.push_str(&format!(
+            "  Reasoning Tokens       {:>10}  {}{:.1}% of generation{}\n",
+            fmt_scaled(stats.total_reasoning_tokens),
+            p.dim,
+            r_pct,
+            p.reset
+        ));
+    }
+    if let Some(r) = stats.reasoning_ratio {
+        out.push_str(&format!(
+            "  Reasoning Ratio        {:>9.2}x  {}deliberation / output{}\n",
+            r,
+            p.dim,
+            p.reset
+        ));
+    }
+    if let Some(r) = stats.edit_write_ratio {
+        out.push_str(&format!(
+            "  Surgical Edit Ratio    {:>9.2}x  {}edits / writes{}\n",
+            r,
+            p.dim,
+            p.reset
         ));
     }
     out.push('\n');
 
-    out.push_str(&format!("{}🧠 TOKEN EFFICIENCY{}\n", p.bold, p.reset));
     out.push_str(&format!(
-        "  • Ingested Prompt Tokens:  {}\n",
-        fmt_tokens_line(stats.total_prompt_tokens, &p)
-    ));
-    out.push_str(&format!(
-        "  • Generated Output Tokens: {}\n",
-        fmt_tokens_line(stats.total_completion_tokens, &p)
-    ));
-    out.push_str(&format!(
-        "  • Reasoning Tokens:        {}\n",
-        fmt_tokens_line(stats.total_reasoning_tokens, &p)
-    ));
-    out.push('\n');
-
-    out.push_str(&format!(
-        "{}💰 CLOUD ARBITRAGE ({} Rates){}\n",
+        "{}CLOUD ARBITRAGE & ENERGY ({} Rates){}\n",
         p.bold, stats.benchmark_model, p.reset
     ));
     out.push_str(&format!(
-        "  • Virtual Cloud Cost:      {}\n",
+        "  Virtual Cloud Cost     {:>10}\n",
         fmt_usd_grouped(stats.estimated_cost_saved_usd)
     ));
     out.push_str(&format!(
-        "  • Actual Local Cost:       {}$0.00{}\n",
-        p.green, p.reset
+        "  Local Power Cost (Est) {:>10}  {}{:.1} kWh @ $0.16/kWh, 300W{}\n",
+        fmt_usd_grouped(stats.estimated_electricity_cost_usd),
+        p.dim,
+        stats.estimated_energy_kwh,
+        p.reset
     ));
+    let net_pct = if stats.estimated_cost_saved_usd > 0.0 {
+        (stats.net_savings_usd / stats.estimated_cost_saved_usd) * 100.0
+    } else {
+        100.0
+    };
     out.push_str(&format!(
-        "  • NET SAVINGS:             {}{}+{} (100% saved){}\n",
-        p.bold,
+        "  Net Savings            {}{:>10}{}  {}{:.2}% net{}\n",
         p.bright_green,
-        fmt_usd_grouped(stats.estimated_cost_saved_usd),
+        format!("+{}", fmt_usd_grouped(stats.net_savings_usd)),
+        p.reset,
+        p.dim,
+        net_pct,
         p.reset
     ));
     out.push('\n');
 
     if let Some(daily) = &stats.daily {
-        out.push_str(&format!("{}📅 DAILY BREAKDOWN (UTC){}\n", p.bold, p.reset));
+        out.push_str(&format!("{}DAILY BREAKDOWN (UTC){}\n", p.bold, p.reset));
         if daily.is_empty() {
             out.push_str(&format!(
                 "  {}(no activity in the selected window){}\n",
@@ -832,7 +917,7 @@ pub fn format_stats_card_styled(stats: &Stats, color: bool) -> String {
         } else {
             out.push_str(&format!(
                 "  {}{:<12} {:>8} {:>10} {:>10} {:>10} {:>8}{}\n",
-                p.dim, "DATE", "TURNS", "PROMPT", "COMPLETION", "REASONING", "TOOLS", p.reset
+                p.dim, "DATE", "TURNS", "PROMPT", "OUTPUT", "REASONING", "TOOLS", p.reset
             ));
             for (day, b) in daily {
                 out.push_str(&format!(
@@ -850,50 +935,77 @@ pub fn format_stats_card_styled(stats: &Stats, color: bool) -> String {
     }
 
     if !stats.tool_calls.is_empty() {
-        out.push_str(&format!("{}🔧 TOOL USAGE BREAKDOWN{}\n", p.bold, p.reset));
+        out.push_str(&format!("{}TOOL RELIABILITY & DISTRIBUTION{}\n", p.bold, p.reset));
+        out.push_str(&format!(
+            "  {}{:<22} {:>8} {:>7}  {:<16} {:>8} {:>9}{}\n",
+            p.dim, "TOOL", "CALLS", "SHARE", "DISTRIBUTION", "ERRORS", "ERR RATE", p.reset
+        ));
         let mut sorted_tools: Vec<(&String, &u64)> = stats.tool_calls.iter().collect();
         sorted_tools.sort_by(|a, b| b.1.cmp(a.1).then_with(|| a.0.cmp(b.0)));
         let max_calls = sorted_tools.first().map(|(_, c)| **c).unwrap_or(1);
-        let max_name_len = sorted_tools
-            .iter()
-            .map(|(n, _)| n.len())
-            .max()
-            .unwrap_or(15)
-            .clamp(15, 38);
 
-        for (name, &count) in sorted_tools {
+        let threshold = if sorted_tools.len() > 8 { 8 } else { sorted_tools.len() };
+        let (head, tail) = sorted_tools.split_at(threshold);
+
+        for &(ref name, &count) in head {
             let bar = bar_chart(count, max_calls, 14);
             let pct = (count as f64 / stats.total_tool_calls.max(1) as f64) * 100.0;
-            let errs = stats.tool_errors.get(name).copied().unwrap_or(0);
-            let ok_part = if count > 0 {
-                let ok_rate = (count.saturating_sub(errs) as f64 / count as f64) * 100.0;
-                if errs > 0 {
-                    format!(" [{:.1}% ok · {}{} err{}]", ok_rate, p.red, errs, p.reset)
-                } else {
-                    format!(" [{}{:.0}% ok{}]", p.dim, ok_rate, p.reset)
-                }
+            let errs = stats.tool_errors.get(name.as_str()).copied().unwrap_or(0);
+            let err_str = if errs > 0 {
+                format!("{}{:>8}{}", p.red, fmt_grouped(errs), p.reset)
             } else {
-                String::new()
+                format!("{}-{: >7}", p.dim, p.reset)
+            };
+            let err_rate = (errs as f64 / count.max(1) as f64) * 100.0;
+            let err_rate_str = if errs > 0 {
+                format!("{}{:>8.1}%{}", p.red, err_rate, p.reset)
+            } else {
+                format!("{}-{: >7}", p.dim, p.reset)
             };
             out.push_str(&format!(
-                "  • {:<width$} {}{}{} {:>7} ({:>4.1}%){}\n",
+                "  {:<22} {:>8} {:>6.1}%  {:<16} {} {}\n",
                 name,
-                p.cyan,
-                bar,
-                p.reset,
                 fmt_grouped(count),
                 pct,
-                ok_part,
-                width = max_name_len
+                bar,
+                err_str,
+                err_rate_str
+            ));
+        }
+
+        if !tail.is_empty() {
+            let tail_count: u64 = tail.iter().map(|&(_, &c)| c).sum();
+            let tail_errs: u64 = tail
+                .iter()
+                .map(|(n, _)| stats.tool_errors.get(n.as_str()).copied().unwrap_or(0))
+                .sum();
+            let tail_pct = (tail_count as f64 / stats.total_tool_calls.max(1) as f64) * 100.0;
+            let bar = bar_chart(tail_count, max_calls, 14);
+            let err_str = if tail_errs > 0 {
+                format!("{}{:>8}{}", p.red, fmt_grouped(tail_errs), p.reset)
+            } else {
+                format!("{}-{: >7}", p.dim, p.reset)
+            };
+            let err_rate = (tail_errs as f64 / tail_count.max(1) as f64) * 100.0;
+            let err_rate_str = if tail_errs > 0 {
+                format!("{}{:>8.1}%{}", p.red, err_rate, p.reset)
+            } else {
+                format!("{}-{: >7}", p.dim, p.reset)
+            };
+            let label = format!("other ({} tools)", tail.len());
+            out.push_str(&format!(
+                "  {:<22} {:>8} {:>6.1}%  {:<16} {} {}\n",
+                label,
+                fmt_grouped(tail_count),
+                tail_pct,
+                bar,
+                err_str,
+                err_rate_str
             ));
         }
         out.push('\n');
     }
 
-    if let (Some(first), Some(last)) = (&stats.first_recorded_session, &stats.last_recorded_session)
-    {
-        out.push_str(&format!("🕒 Active Horizon: {} → {}\n", first, last));
-    }
     out
 }
 
@@ -903,6 +1015,7 @@ pub fn format_stats_card_styled(stats: &Stats, color: bool) -> String {
 struct DayEvents {
     turns: u64,
     prompt_tokens: u64,
+    cached_tokens: u64,
     completion_tokens: u64,
     reasoning_tokens: u64,
     tool_calls: u64,
@@ -913,6 +1026,7 @@ struct DayEvents {
 struct SessionAgg {
     turns: u64,
     prompt_tokens: u64,
+    cached_tokens: u64,
     completion_tokens: u64,
     reasoning_tokens: u64,
     tool_calls: u64,
@@ -972,6 +1086,7 @@ fn parse_session_events(raw: &str, since: Option<i128>) -> Option<SessionAgg> {
     let mut agg = SessionAgg {
         turns: 0,
         prompt_tokens: 0,
+        cached_tokens: 0,
         completion_tokens: 0,
         reasoning_tokens: 0,
         tool_calls: 0,
@@ -1033,14 +1148,16 @@ fn parse_session_events(raw: &str, since: Option<i128>) -> Option<SessionAgg> {
             // usage under `metrics`.
             Some("dispatch") => {
                 agg.turns += 1;
-                let (prompt, completion, reasoning) = read_turn_tokens(&v);
+                let (prompt, cached, completion, reasoning) = read_turn_tokens(&v);
                 agg.prompt_tokens += prompt.unwrap_or(0);
+                agg.cached_tokens += cached.unwrap_or(0);
                 agg.completion_tokens += completion.unwrap_or(0);
                 agg.reasoning_tokens += reasoning.unwrap_or(0);
                 if let Some(day) = day {
                     let ev = agg.events_by_day.entry(day).or_default();
                     ev.turns += 1;
                     ev.prompt_tokens += prompt.unwrap_or(0);
+                    ev.cached_tokens += cached.unwrap_or(0);
                     ev.completion_tokens += completion.unwrap_or(0);
                     ev.reasoning_tokens += reasoning.unwrap_or(0);
                 }
@@ -1083,14 +1200,23 @@ fn parse_session_events(raw: &str, since: Option<i128>) -> Option<SessionAgg> {
 /// Read a turn's token usage from a ledger event's `metrics` sub-object.
 ///
 /// The canonical schema places per-turn usage under `metrics` with the keys
-/// `prompt_tokens` / `completion_tokens` / `reasoning_tokens`. Any absent
-/// field is `None` (never a silent zero).
-fn read_turn_tokens(v: &Value) -> (Option<u64>, Option<u64>, Option<u64>) {
+/// `prompt_tokens` / `cached_tokens` / `completion_tokens` / `reasoning_tokens`.
+/// Any absent field is `None` (never a silent zero).
+fn read_turn_tokens(v: &Value) -> (Option<u64>, Option<u64>, Option<u64>, Option<u64>) {
     let src = v.get("metrics").unwrap_or(v);
     let prompt = src.get("prompt_tokens").and_then(Value::as_u64);
+    let cached = src
+        .get("cached_tokens")
+        .and_then(Value::as_u64)
+        .or_else(|| src.get("cache_read_input_tokens").and_then(Value::as_u64))
+        .or_else(|| {
+            src.get("prompt_tokens_details")
+                .and_then(|d| d.get("cached_tokens"))
+                .and_then(Value::as_u64)
+        });
     let completion = src.get("completion_tokens").and_then(Value::as_u64);
     let reasoning = src.get("reasoning_tokens").and_then(Value::as_u64);
-    (prompt, completion, reasoning)
+    (prompt, cached, completion, reasoning)
 }
 
 /// Normalize a ledger `timestamp` into integer epoch milliseconds (UTC).
@@ -1325,7 +1451,7 @@ mod tests {
     /// on tool results, a `final` terminal carrying `duration_ms`, and
     /// RFC-3339 timestamps throughout.
     const CANONICAL_LEDGER: &str = concat!(
-        "{\"type\":\"dispatch\",\"turn\":1,\"timestamp\":\"2026-10-01T12:00:00.000Z\",\"metrics\":{\"prompt_tokens\":1000,\"completion_tokens\":200,\"reasoning_tokens\":50}}\n",
+        "{\"type\":\"dispatch\",\"turn\":1,\"timestamp\":\"2026-10-01T12:00:00.000Z\",\"metrics\":{\"prompt_tokens\":1000,\"cached_tokens\":400,\"completion_tokens\":200,\"reasoning_tokens\":50}}\n",
         "{\"type\":\"tool_result\",\"turn\":1,\"name\":\"bash\",\"is_error\":true,\"timestamp\":\"2026-10-01T12:00:01.000Z\"}\n",
         "{\"type\":\"final\",\"status\":\"completed\",\"duration_ms\":1000,\"timestamp\":\"2026-10-01T12:00:02.000Z\"}\n",
     );
@@ -1335,6 +1461,7 @@ mod tests {
         let agg = parse_session_events(CANONICAL_LEDGER, None).expect("canonical ledger parses");
         assert_eq!(agg.turns, 1);
         assert_eq!(agg.prompt_tokens, 1000);
+        assert_eq!(agg.cached_tokens, 400);
         assert_eq!(agg.completion_tokens, 200);
         assert_eq!(agg.reasoning_tokens, 50);
         assert_eq!(agg.tool_calls, 1);
@@ -1680,6 +1807,7 @@ mod tests {
             total_tool_calls: 500,
             total_tool_errors: 5,
             estimated_cost_saved_usd: 42.50,
+            net_savings_usd: 42.50,
             ..Default::default()
         };
         stats.tool_calls.insert("bash".to_string(), 400);
@@ -1692,7 +1820,7 @@ mod tests {
             "plain card must not contain ANSI escape codes"
         );
         assert!(plain.contains("CASTOR OPERATIONAL TELEMETRY"));
-        assert!(plain.contains("1.50M (1,500,000)"));
+        assert!(plain.contains("1.50M"));
         assert!(plain.contains("bash"));
         assert!(plain.contains("read_file"));
         assert!(plain.contains("+$42.50"));

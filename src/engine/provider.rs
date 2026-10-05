@@ -112,7 +112,7 @@ impl ToolSchema {
     }
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Default)]
 pub struct Metrics {
     pub ttft_ms: Option<f64>,
     pub total_ms: f64,
@@ -120,6 +120,7 @@ pub struct Metrics {
     /// Engine-reported prompt-token count for the turn (from the `usage`
     /// object). `None` when the engine did not report it.
     pub prompt_tokens: Option<u64>,
+    pub cached_tokens: Option<u64>,
     pub completion_tokens: Option<u64>,
     pub reasoning_tokens: Option<u64>,
 }
@@ -222,6 +223,7 @@ impl EngineClient {
         let mut finish_reason: Option<String> = None;
         let mut ttft: Option<std::time::Duration> = None;
         let mut prompt_tokens: Option<u64> = None;
+        let mut cached_tokens: Option<u64> = None;
         let mut completion_tokens: Option<u64> = None;
         let mut reasoning_tokens: Option<u64> = None;
         let mut tool_calls: BTreeMap<usize, ToolCall> = BTreeMap::new();
@@ -243,6 +245,7 @@ impl EngineClient {
                         finish_reason,
                         ttft,
                         prompt_tokens,
+                        cached_tokens,
                         completion_tokens,
                         reasoning_tokens,
                         t0,
@@ -269,6 +272,14 @@ impl EngineClient {
                         .and_then(Value::as_u64)
                     {
                         reasoning_tokens = Some(r);
+                    }
+                    if let Some(k) = usage
+                        .get("prompt_tokens_details")
+                        .and_then(|d| d.get("cached_tokens"))
+                        .and_then(Value::as_u64)
+                        .or_else(|| usage.get("cache_read_input_tokens").and_then(Value::as_u64))
+                    {
+                        cached_tokens = Some(k);
                     }
                 }
                 for choice in frame
@@ -323,6 +334,7 @@ impl EngineClient {
             finish_reason,
             ttft,
             prompt_tokens,
+            cached_tokens,
             completion_tokens,
             reasoning_tokens,
             t0,
@@ -377,6 +389,12 @@ impl EngineClient {
         let prompt_tokens = usage
             .and_then(|u| u.get("prompt_tokens"))
             .and_then(Value::as_u64);
+        let cached_tokens = usage.and_then(|u| {
+            u.get("prompt_tokens_details")
+                .and_then(|d| d.get("cached_tokens"))
+                .and_then(Value::as_u64)
+                .or_else(|| u.get("cache_read_input_tokens").and_then(Value::as_u64))
+        });
         let completion_tokens = usage
             .and_then(|u| u.get("completion_tokens"))
             .and_then(Value::as_u64);
@@ -395,6 +413,7 @@ impl EngineClient {
             finish_reason,
             ttft,
             prompt_tokens,
+            cached_tokens,
             completion_tokens,
             reasoning_tokens,
             t0,
@@ -409,6 +428,7 @@ fn assemble(
     finish_reason: Option<String>,
     ttft: Option<std::time::Duration>,
     prompt_tokens: Option<u64>,
+    cached_tokens: Option<u64>,
     completion_tokens: Option<u64>,
     reasoning_tokens: Option<u64>,
     t0: Instant,
@@ -431,6 +451,7 @@ fn assemble(
             total_ms: total.as_secs_f64() * 1000.0,
             tokens_per_sec,
             prompt_tokens,
+            cached_tokens,
             completion_tokens,
             reasoning_tokens,
         },

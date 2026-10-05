@@ -171,6 +171,9 @@ fn metrics_json(m: &Metrics) -> serde_json::Value {
     if let Some(p) = m.prompt_tokens {
         o.insert("prompt_tokens".into(), serde_json::json!(p));
     }
+    if let Some(k) = m.cached_tokens {
+        o.insert("cached_tokens".into(), serde_json::json!(k));
+    }
     if let Some(c) = m.completion_tokens {
         o.insert("completion_tokens".into(), serde_json::json!(c));
     }
@@ -803,6 +806,7 @@ mod tests {
                 total_ms: 1.0,
                 tokens_per_sec: None,
                 prompt_tokens: None,
+                cached_tokens: None,
                 completion_tokens: None,
                 reasoning_tokens: None,
             },
@@ -1179,6 +1183,7 @@ mod tests {
                 total_ms: 1.0,
                 tokens_per_sec: None,
                 prompt_tokens: None,
+                cached_tokens: None,
                 completion_tokens: None,
                 reasoning_tokens: None,
             },

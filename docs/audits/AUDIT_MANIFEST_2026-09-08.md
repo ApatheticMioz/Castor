@@ -14,17 +14,17 @@ The session's core security properties **hold** and were verified empirically:
 
 | Property | Verdict | Proof |
 |---|---|---|
-| `apply_patch` atomicity (no partial apply on conflict) | ✅ HOLDS | Multi-file patch with 1 conflicting file → exit 1, **zero** files modified. |
-| `apply_patch` refuses to write **through symlinks** to outside files | ✅ HOLDS | Symlink `sneaky → ../outside.txt` with matching context → `patch does not apply`, outside file byte-identical. |
-| `apply_patch` rejects `../` path traversal | ✅ HOLDS | `a/../outside.txt`, `a/../../deep`, `a/sub/../../esc` → `invalid path`, nothing written. |
-| `apply_patch` treats absolute paths as cwd-relative (stays in sandbox) | ✅ HOLDS | `a/tmp/.../abs_target` wrote to `<cwd>/tmp/...`, never to the absolute location. |
-| `searchCode` primary path excludes **gitignored** files (`.env`) | ✅ HOLDS | `git grep --untracked` respects `.gitignore`; `SECRET_TOKEN` in gitignored `.env` → 0 matches. |
-| `--untracked` is a real, behavior-changing flag (not a no-op) | ✅ CONFIRMED | Untracked file found only with the flag; tracked control identical. |
-| `edit_file` preserves uniform CRLF / LF files | ✅ HOLDS | CRLF file + LF target → CRLF preserved; LF file + CRLF target → LF preserved. |
+| `apply_patch` atomicity (no partial apply on conflict) | HOLDS | Multi-file patch with 1 conflicting file → exit 1, **zero** files modified. |
+| `apply_patch` refuses to write **through symlinks** to outside files | HOLDS | Symlink `sneaky → ../outside.txt` with matching context → `patch does not apply`, outside file byte-identical. |
+| `apply_patch` rejects `../` path traversal | HOLDS | `a/../outside.txt`, `a/../../deep`, `a/sub/../../esc` → `invalid path`, nothing written. |
+| `apply_patch` treats absolute paths as cwd-relative (stays in sandbox) | HOLDS | `a/tmp/.../abs_target` wrote to `<cwd>/tmp/...`, never to the absolute location. |
+| `searchCode` primary path excludes **gitignored** files (`.env`) | HOLDS | `git grep --untracked` respects `.gitignore`; `SECRET_TOKEN` in gitignored `.env` → 0 matches. |
+| `--untracked` is a real, behavior-changing flag (not a no-op) | CONFIRMED | Untracked file found only with the flag; tracked control identical. |
+| `edit_file` preserves uniform CRLF / LF files | HOLDS | CRLF file + LF target → CRLF preserved; LF file + CRLF target → LF preserved. |
 
 **However**, 15 defects/observations were confirmed, of which **3 are HIGH** (a search contract violation, a conditional secret-leak path, and a live protocol contradiction from uncommitted external edits), **7 are MEDIUM**, **3 are LOW**, and **2 are NOTE**. No `BLOCKER`.
 
-> **⚠️ Live governance alert (F-15):** During this audit, `GEMINI.md` and `CLAUDE.md` were modified in the **working tree by an external actor** (the tree was clean at session start; this audit did not touch them). Those uncommitted edits **contradict the committed `a7c75dd` protocol and the active audit instruction** over who authors `AUDIT_MANIFEST.md`, and reference a non-existent `implementation_plan.md`. They must be reconciled before any commit.
+> **[Governance Alert] (F-15):** During this audit, `GEMINI.md` and `CLAUDE.md` were modified in the **working tree by an external actor** (the tree was clean at session start; this audit did not touch them). Those uncommitted edits **contradict the committed `a7c75dd` protocol and the active audit instruction** over who authors `AUDIT_MANIFEST.md`, and reference a non-existent `implementation_plan.md`. They must be reconciled before any commit.
 
 ---
 

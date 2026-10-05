@@ -199,7 +199,7 @@ Releases are automatically triggered whenever a git tag matching `v*` is pushed 
 2. Creates the GitHub Release draft with auto-generated release notes.
 3. Publishes `mcp-castor` to npm using **OIDC Trusted Publishing** (`--provenance`) with cryptographic Sigstore attestation.
 
-### ⚠️ Version Invariant & Fail-Fast Guard
+### Version Invariant & Fail-Fast Guard
 - npm package releases are **immutable**. Once published, a version can never be republished or overwritten.
 - `npm publish` parses the version strictly from `package.json`. If `package.json` does not match the git tag, the publish step fails with `403 Forbidden`.
 - **`Cargo.toml` (`version`), `package.json` (`version`), and the git tag (`vX.Y.Z`) MUST remain byte-synchronized.**

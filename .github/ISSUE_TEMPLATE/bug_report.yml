@@ -1,7 +1,7 @@
 # ============================================================================
 # Bug Report — Castor (The Universal 245K Agent Microkernel for Local LLMs)
 # ============================================================================
-name: "🐛 Bug Report"
+name: "Bug Report"
 description: "Report a reproducible defect in the Castor microkernel, MCP server, or tooling."
 title: "[Bug] "
 labels: ["bug", "triage"]

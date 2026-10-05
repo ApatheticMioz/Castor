@@ -134,37 +134,40 @@ Complementing `castor --help`:
 Castor records granular telemetry locally in `~/.castor/sessions/*/events.jsonl` and `~/.castor/tasks/*.json`. The `castor stats` command parallelizes ledger ingestion across CPU cores via `std::thread::scope` (<250ms latency) and formats a modern, high-density terminal dashboard tracking token efficiency, task success rates, and actual financial savings:
 
 ```text
-╭────────────────────────────────────────────────────────────────────────╮
-│                      CASTOR OPERATIONAL TELEMETRY                      │
-│                Universal Cloud-to-Local Agent Microkernel              │
-╰────────────────────────────────────────────────────────────────────────╯
+CASTOR OPERATIONAL TELEMETRY
+Horizon: 2026-09-04 22:58 UTC -> 2026-10-05 16:54 UTC
 
-📊 ACTIVITY & RUNTIME
-  • Turns:                   23,544
-  • Sessions:                457
-  • Tasks:                   336 completed (87.3% ok) · 39 failed · 10 cancelled
-  • Total Tool Calls:        32,117 calls (96.5% ok · 1,131 errors)
-  • Avg Session Duration:    4m 04s (244.95s)
+ACTIVITY & RUNTIME
+  Turns                      23,582
+  Sessions                      460
+  Tasks                         388  86.9% ok: 337 completed, 41 failed, 10 cancelled
+  Active Compute             28.51h  4m 04s avg
+  Tool Calls                 32,165  96.5% ok, 1,131 errors
 
-🧠 TOKEN EFFICIENCY
-  • Ingested Prompt Tokens:  1.53B (1,526,923,211)
-  • Generated Output Tokens: 31.65M (31,653,674)
-  • Reasoning Tokens:        32.01M (32,013,499)
+TOKEN EFFICIENCY & DYNAMICS
+  Total Processed             1.56B
+  Prompt Tokens               1.53B
+  Output Tokens              31.67M
+  Reasoning Tokens           32.02M  50.3% of generation
+  Reasoning Ratio             1.01x  deliberation / output
+  Surgical Edit Ratio         2.66x  edits / writes
 
-💰 CLOUD ARBITRAGE (Claude Sonnet 5 Rates)
-  • Virtual Cloud Cost:      $3,370.38
-  • Actual Local Cost:       $0.00
-  • NET SAVINGS:             +$3,370.38 (100% saved)
+CLOUD ARBITRAGE & ENERGY (Claude Sonnet 5 Rates)
+  Virtual Cloud Cost      $3,371.30
+  Local Power Cost (Est)      $1.37  8.6 kWh @ $0.16/kWh, 300W
+  Net Savings            +$3,369.93  99.96% net
 
-🔧 TOOL USAGE BREAKDOWN
-  • bash                                ██████████████  14,003 (43.6%) [99.9% ok · 19 err]
-  • read_file                           ███████▊         7,943 (24.7%) [92.0% ok · 633 err]
-  • edit_file                           ███▊             3,985 (12.4%) [95.4% ok · 182 err]
-  • search_code                         ██               2,082 ( 6.5%) [98.7% ok · 27 err]
-  • write_file                          █▌               1,501 ( 4.7%) [96.7% ok · 49 err]
-  • list_dir                            █                1,047 ( 3.3%) [98.3% ok · 18 err]
-  • web_fetch                           ▌                  545 ( 1.7%) [87.2% ok · 70 err]
-  • web_search                          ▎                  497 ( 1.5%) [77.5% ok · 112 err]
+TOOL RELIABILITY & DISTRIBUTION
+  TOOL                      CALLS   SHARE  DISTRIBUTION       ERRORS  ERR RATE
+  bash                     14,031   43.6%  ██████████████         19      0.1%
+  read_file                 7,947   24.7%  ███████▊              633      8.0%
+  edit_file                 3,990   12.4%  ███▊                  182      4.6%
+  search_code               2,089    6.5%  ██                     27      1.3%
+  write_file                1,501    4.7%  █▎                     49      3.3%
+  list_dir                  1,048    3.3%  █                      18      1.7%
+  web_fetch                   548    1.7%  ▌                      70     12.8%
+  web_search                  497    1.5%  ▎                     112     22.5%
+  other (14 tools)            514    1.6%  ▌                      21      4.1%
 ```
 
 ### Quick Usage Examples

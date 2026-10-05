@@ -83,9 +83,9 @@ The session-level evidence behind each rule:
 6. Doc drift reconciliation (`2449b84`) + constant-prefix prompt ordering.
 7. Concurrency raise: engine `MAX_SEQS` 1 → 2 with the harness semaphore kept 1:1, boot deadline 180 s → 480 s for the 2-seat CUDA-graph boot, single-slot test suites pinned, launcher records the full 8 → 1 → 2 trajectory with deadlock watch-fors (`b352f8b`).
 
-> ⚠️ True 2-job parallelism requires an MCP server restart: long-lived servers serve boot-time code (the running servers still enqueue at 1 seat). The engine side is live; the harness side activates on next server start.
+> [Warning] True 2-job parallelism requires an MCP server restart: long-lived servers serve boot-time code (the running servers still enqueue at 1 seat). The engine side is live; the harness side activates on next server start.
 
-> ⚠️ Live-dispatch verification of (1) requires an MCP server restart (long-lived servers serve boot-time code). Unit tests cover the plumbing; restart before trusting `medium`-effort dispatches in production.
+> [Warning] Live-dispatch verification of (1) requires an MCP server restart (long-lived servers serve boot-time code). Unit tests cover the plumbing; restart before trusting `medium`-effort dispatches in production.
 
 **Scorecard:** `mcp-qwen/scripts/dispatch-scorecard.mjs` — reads `~/.qwen/sessions/*/events.jsonl` + `tasks/*.json`, emits per-orchestrator: prompt-size distribution, turns/task, cancels, babysit events (status/cancel <120 s post-dispatch), continuation/retry counts, decay flags. Run it after any heavy orchestration day to check balance compliance.
 

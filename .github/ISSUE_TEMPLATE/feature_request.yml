@@ -1,7 +1,7 @@
 # ============================================================================
 # Feature Request — Castor (The Universal 245K Agent Microkernel for Local LLMs)
 # ============================================================================
-name: "✨ Feature Request"
+name: "Feature Request"
 description: "Propose a new capability, improvement, or change to the Castor microkernel."
 title: "[Feature] "
 labels: ["enhancement", "triage"]

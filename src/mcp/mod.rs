@@ -209,7 +209,7 @@ impl CastorMcpServer {
                 Err(err) => {
                     tracing::warn!(
                         error = %err,
-                        "⚠️ LOUD DGI ADVISORY: 1-forward pass model probe failed ({err}). \
+                        "[dgi] warning: 1-forward pass model probe failed ({err}). \
                          Engine offline, unreachable, or endpoint does not support guided_choice. \
                          Falling back to soft heuristic."
                     );
@@ -223,14 +223,14 @@ impl CastorMcpServer {
             }
         } else {
             tracing::warn!(
-                "⚠️ LOUD DGI ADVISORY: DGI running without configured engine/model; 1-forward pass probe inactive."
+                "[dgi] warning: DGI running without configured engine/model; 1-forward pass probe inactive."
             );
             dgi::DgiVerdict::Review(0)
         };
 
         let dgi_note = match &dgi {
             dgi::DgiVerdict::Review(0) => Some(
-                "- **⚠️ DGI LOUD ADVISORY**: 1-forward pass model probe was bypassed (engine offline, unreachable, or backend unsupported). Proceeding without model-verified CIVP gate."
+                "- **[DGI ADVISORY]**: 1-forward pass model probe was bypassed (engine offline, unreachable, or backend unsupported). Proceeding without model-verified CIVP gate."
                     .to_string(),
             ),
             dgi::DgiVerdict::Review(s) => Some(format!(

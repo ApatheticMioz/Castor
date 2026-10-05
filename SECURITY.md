@@ -9,9 +9,9 @@ responsibly, what we consider in-scope, and how we handle reports.
 
 | Version | Supported |
 | ------- | --------- |
-| Latest `main` / latest release | ✅ Yes |
+| Latest `main` / latest release | Yes |
 | Previous release | Case-by-case (we will advise) |
-| Anything older | ❌ No |
+| Anything older | No |
 
 Please report vulnerabilities against the **latest release** or `main`. If you
 believe an older version is affected, note it in your report and we will
@@ -41,8 +41,8 @@ the flaw before a fix ships.
 
 ### What to include (and what to redact)
 
-- ✅ Include: repro steps, error output, affected code paths, version.
-- ❌ **Redact**: API keys, tokens, private keys, personal home-directory
+- **Include**: repro steps, error output, affected code paths, version.
+- **Redact**: API keys, tokens, private keys, personal home-directory
   paths, and any other credentials. Castor is a *local-first* tool — your
   machine paths and keys are yours, not ours.
 

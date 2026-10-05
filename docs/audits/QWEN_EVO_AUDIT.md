@@ -312,15 +312,15 @@ I inspected the actual diff of `b84a9d8` (not just the commit message) and confi
 
 | ID | Remediation | Verified in diff? | Notes |
 |---|---|---|---|
-| S1 | `resolvePath()` boundary containment | ✅ | `path.relative` + `startsWith("..")`/`isAbsolute` guard → `PathEscapeError`. Root itself resolves to `""` (allowed); all escapes rejected. Correct. |
-| S3 | Empty `target_content` guard | ✅ | Rejects empty/non-string before any read. |
-| L1 | Atomic + non-destructive lineage | ✅ | `writeFileSync(tmp)` → `renameSync` (atomic, same volume); tmp cleaned on failure. Corrupt JSON quarantined to `lineage.json.corrupt-<ts>` **before** the baseline reset — no silent data loss. |
-| R1 | Remove duplicate `tool_result` log | ✅ | The `tool:after_execute` hook is deleted; the runner's explicit append is now the single source of truth. |
-| A1 | Deterministic rollback for file creation | ✅ | `manifest.json` records `existed` per file; on revert, non-existent-at-propose files are `unlinkSync`'d. |
-| A3 | Validate node before file mutation | ✅ | `revertCandidate` now throws on unknown id **and** on already-`accepted` candidates before touching the filesystem. (Also closes A4.) |
-| K4 | No unhandled promise rejections | ✅ | `emit` pushes `{ error, isError }` instead of a live `Promise.reject`. |
-| H3 | Bounded stdout/stderr | ✅ | 4 MB cap with `...[truncated at 4MB]` marker. |
-| H4 | Signal-kill exit mapping | ✅ | `close(code, signal)` → `code ?? (signal ? 137 : 1)` + signal annotation in stderr. |
+| S1 | `resolvePath()` boundary containment | PASS | `path.relative` + `startsWith("..")`/`isAbsolute` guard → `PathEscapeError`. Root itself resolves to `""` (allowed); all escapes rejected. Correct. |
+| S3 | Empty `target_content` guard | PASS | Rejects empty/non-string before any read. |
+| L1 | Atomic + non-destructive lineage | PASS | `writeFileSync(tmp)` → `renameSync` (atomic, same volume); tmp cleaned on failure. Corrupt JSON quarantined to `lineage.json.corrupt-<ts>` **before** the baseline reset — no silent data loss. |
+| R1 | Remove duplicate `tool_result` log | PASS | The `tool:after_execute` hook is deleted; the runner's explicit append is now the single source of truth. |
+| A1 | Deterministic rollback for file creation | PASS | `manifest.json` records `existed` per file; on revert, non-existent-at-propose files are `unlinkSync`'d. |
+| A3 | Validate node before file mutation | PASS | `revertCandidate` now throws on unknown id **and** on already-`accepted` candidates before touching the filesystem. (Also closes A4.) |
+| K4 | No unhandled promise rejections | PASS | `emit` pushes `{ error, isError }` instead of a live `Promise.reject`. |
+| H3 | Bounded stdout/stderr | PASS | 4 MB cap with `...[truncated at 4MB]` marker. |
+| H4 | Signal-kill exit mapping | PASS | `close(code, signal)` → `code ?? (signal ? 137 : 1)` + signal annotation in stderr. |
 
 **Residual (non-blocking) observations on the remediation itself:**
 - **H4 minor:** the signal path hard-codes `137` (SIGKILL) for *any* signal rather than `128 + signum`. Functionally fine (non-zero, correctly fails the AVO gate); a `128+signum` mapping would be more precise. Cosmetic.
