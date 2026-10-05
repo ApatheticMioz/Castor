@@ -8,6 +8,34 @@ The project adheres to **[Semantic Versioning](https://semver.org/)**:
 
 ---
 
+## [1.1.1] — 2026-10-05
+
+### 📊 Pure Canonical Snake_Case Telemetry & Ledger Migration
+- **Zero-Fallback Canonical Metrics**: Purged dual-cased fallback serialization across the codebase, enforcing pure canonical `snake_case` telemetry (`prompt_tokens`, `completion_tokens`, `reasoning_tokens`, `tokens_per_sec`, `ttft_ms`, `total_ms`).
+- **Disk Ledger Migration Utility**: Added deterministic forward-migration script (`scripts/migrate_ledgers.py`) and migrated 100% of historical session directories on disk (462 files, 13,993 lines migrated from legacy camelCase to pure `snake_case`).
+
+### 🛑 Runaway Probe Loop Interruption (`ProbeState::Impasse`)
+- **Tri-State Probe Tracker**: Upgraded `ProbeTracker` from a one-shot advisory boolean to a tri-state lifecycle governor (`ProbeState::Ok`, `ProbeState::Advisory`, `ProbeState::Impasse`).
+- **Impasse Ceiling Breaker**: Implemented a hard impasse ceiling (`budget * 3`, default 12 consecutive probes). When a model ignores advisory guidance and loops in unproductive non-mutating shell probes, the session halts immediately with `RunnerError::ProbeImpasse`, eliminating runaway GPU deliberation and multi-hour token loops.
+
+### 🐧 Cross-Device Atomic Rename Hardening (`EXDEV` on DrvFS)
+- **Workspace Scratchpad TMPDIR Scoping**: Automatically scopes child shell process `TMPDIR` to `<cwd>/.scratch/tmp` on Linux and WSL.
+- **Atomic Rename Parity**: Prevents `EXDEV (os error 18, Invalid cross-device link)` failures caused by compilers (such as `rustc`) writing temporary artifacts to `/tmp` (ext4) and atomically renaming them into target directories on mounted filesystems (`drvfs` / 9p). Keeps temporary writes within the workspace Landlock confinement boundary.
+
+### 🧹 Codebase De-Bloat & Cognitive Complexity Trimming
+- **Handler Decomposition**: Decomposed monolithic handlers (`handle_coworker` split into `parse_coworker_args` and `dispatch_coworker_task`), reducing cognitive complexity from 40 down below 20.
+- **Pattern Match Simplification**: Streamlined pattern matches, removed redundant clones, eliminated unnecessary `Result` wrapping (`open_beneath`), and converted match expressions to idiomatic `matches!` macro.
+- **20+ Rust Ecosystem Tooling Matrix**: Validated with `cargo machete` (0 unused dependencies), `cargo clippy --all-targets -- -D warnings` (0 warnings), `cargo deny`, `cargo audit`, and `cargo bloat`.
+
+### 📖 Present-State Truth & Comment Lore Diet
+- **Historical Narrative Excision**: Excised all ticket tags (`Issue #3`, `Issue #16`, `Issue #17`, `Issue #18`, `Issue #6`), milestone tags, dates, and changelog storytelling repo-wide per `AGENTS.md` §3.5.
+- **Declarative Docstrings**: Restored all comments and docstrings to strict present-state descriptions of architecture, behavior, and invariants.
+
+### 🧪 Test Suite Expansion
+- **307 Tests Green**: Expanded test suite to 307 passing tests covering probe impasse ceilings, Landlock character devices, and canonical telemetry.
+
+---
+
 ## [1.0.2] — 2026-10-05
 
 ### 🛡️ Landlock LSM Confinement & Security Hardening (Issue #6, #17)

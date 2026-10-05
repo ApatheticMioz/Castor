@@ -5,7 +5,7 @@
 [![CI](https://img.shields.io/badge/CI-Passing-success?logo=githubactions&logoColor=white)](#testing--verification)
 [![Rust](https://img.shields.io/badge/Rust-2024%20Edition-DEA584?logo=rust&logoColor=white)](https://www.rust-lang.org/)
 [![License: AGPL-3.0](https://img.shields.io/badge/License-AGPL--3.0-blue.svg)](LICENSE)
-[![Test Gate: 270/270](https://img.shields.io/badge/Test%20Gate-270%2F270%20Tests%20Green-success.svg)](#testing--verification)
+[![Test Gate: 307/307](https://img.shields.io/badge/Test%20Gate-307%2F307%20Tests%20Green-success.svg)](#testing--verification)
 [![Backend: Universal](https://img.shields.io/badge/Backend-Ollama%20%7C%20vLLM%20%7C%20LM%20Studio-blue.svg)](#backend--model-configuration)
 [![Flagship Preset](https://img.shields.io/badge/Flagship%20Rig-Qwen3.8--27B%20%2B%20245K-purple.svg)](#flagship-reference-profile-qwen38-27b--245k-context)
 [![Security](https://img.shields.io/badge/Security-137%20Containment%20Vectors-success.svg)](#zero-trust-sandboxed-file-operations)
@@ -94,7 +94,7 @@ cd Castor
 # Build the Rust binary
 cargo build --release
 
-# Run unit and integration tests (270 tests, ~7s)
+# Run unit and integration tests (307 tests, ~5s)
 cargo test
 
 # Register with Claude Code and Antigravity IDE
