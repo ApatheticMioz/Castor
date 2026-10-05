@@ -104,7 +104,6 @@ fn tokenize(cmd: &str) -> Vec<String> {
     for ch in cmd.chars() {
         match quote {
             Some(q) if ch == q => quote = None,
-            Some(_) => cur.push(ch),
             None if ch == '"' || ch == '\'' => quote = Some(ch),
             None if ch == ' ' || ch == '\t' => {
                 if !cur.is_empty() {
@@ -611,24 +610,21 @@ async fn capture_capped<R: tokio::io::AsyncRead + Unpin>(mut r: R, cap: usize) -
     let mut truncated = false;
     let mut buf = [0u8; 8192];
     loop {
-        match r.read(&mut buf).await {
+        let n = match r.read(&mut buf).await {
             Ok(0) => break,
-            Ok(n) => {
-                if out.len() < cap {
-                    let room = cap - out.len();
-                    if n > room {
-                        out.extend_from_slice(&buf[..room]);
-                        truncated = true;
-                    } else {
-                        out.extend_from_slice(&buf[..n]);
-                    }
-                } else {
-                    // Buffer already at the cap: discard (drain the pipe) and
-                    // mark the stream truncated.
-                    truncated = true;
-                }
-            }
+            Ok(n) => n,
             Err(_) => break,
+        };
+        if out.len() >= cap {
+            // Buffer already at the cap: discard (drain the pipe) and
+            // mark the stream truncated.
+            truncated = true;
+        } else {
+            let room = cap - out.len();
+            out.extend_from_slice(&buf[..n.min(room)]);
+            if n > room {
+                truncated = true;
+            }
         }
     }
     (out, truncated)

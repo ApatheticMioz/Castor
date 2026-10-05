@@ -310,10 +310,8 @@ impl TaskSemaphore {
             // Fast path: no alien tenant, try to claim a free slot.
             if !self.alien_tenant_active() {
                 for i in 0..self.inner.max_slots {
-                    match self.try_claim(i, task_id) {
-                        ClaimOutcome::Claimed(lease) => return lease,
-                        ClaimOutcome::Occupied => {}
-                        ClaimOutcome::Reclaimed => {}
+                    if let ClaimOutcome::Claimed(lease) = self.try_claim(i, task_id) {
+                        return lease;
                     }
                 }
             }
@@ -354,8 +352,9 @@ impl TaskSemaphore {
 
         let should_unlink = match &cur {
             None => true,
-            Some(l) if l.tenant == me => true,
-            Some(l) if !pid_alive(l.tenant) => true,
+            // Ours, or the owner is dead (including unreadable): free it.
+            Some(l) if l.tenant == me || !pid_alive(l.tenant) => true,
+            // Another live tenant owns the lease; it was not deleted.
             Some(_) => false,
         };
 

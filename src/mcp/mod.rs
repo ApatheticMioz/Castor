@@ -173,54 +173,36 @@ impl CastorMcpServer {
         ]
     }
 
-    async fn handle_coworker(&self, args: Option<Value>) -> CallToolResult {
-        let params: CoworkerParams = match args {
-            Some(v) => match serde_json::from_value(v) {
-                Ok(p) => p,
-                Err(e) => {
-                    return CallToolResult::error(vec![ContentBlock::text(format!(
-                        "Invalid coworker arguments: {e}"
-                    ))]);
-                }
-            },
-            None => {
-                return CallToolResult::error(vec![ContentBlock::text(
-                    "Missing arguments for coworker tool",
-                )]);
-            }
+    /// Parse and validate the `coworker` tool's JSON arguments.
+    fn parse_coworker_args(args: Option<Value>) -> Result<CoworkerParams, String> {
+        let Some(v) = args else {
+            return Err("Missing arguments for coworker tool".into());
         };
-
+        let params: CoworkerParams =
+            serde_json::from_value(v).map_err(|e| format!("Invalid coworker arguments: {e}"))?;
         if params.prompt.trim().is_empty() {
-            return CallToolResult::error(vec![ContentBlock::text(
-                "Error: Prompt cannot be empty.",
-            )]);
+            return Err("Error: Prompt cannot be empty.".into());
         }
-
         // Fail fast on a bad reasoning tier: the served template would 400
         // the whole session later, so reject at dispatch instead.
-        if let Err(e) = validate_reasoning_effort(params.reasoning_effort.as_deref()) {
-            return CallToolResult::error(vec![ContentBlock::text(format!("Error: {e}"))]);
-        }
+        validate_reasoning_effort(params.reasoning_effort.as_deref())
+            .map_err(|e| format!("Error: {e}"))?;
+        Ok(params)
+    }
 
-        let loaded = match crate::config::load() {
-            Ok(c) => c,
-            Err(e) => {
-                return CallToolResult::error(vec![ContentBlock::text(format!(
-                    "Config error: {e}"
-                ))]);
-            }
-        };
-
-        // DGI Gatekeeper: model-driven 1-forward pass logit probe via guided_choice.
-        // Replaces brittle regexes with the loaded model's own decomposition reasoning.
-        let dgi = if let (Some(base_url), Some(model)) =
-            (&loaded.config.base_url, &loaded.config.model)
-        {
+    /// Run the DGI Gatekeeper: 1-forward pass model probe (or soft heuristic
+    /// fallback) and return the verdict together with an optional advisory
+    /// note to append to the dispatch message.
+    async fn evaluate_dgi(
+        loaded: &crate::config::LoadedConfig,
+        prompt: &str,
+    ) -> (dgi::DgiVerdict, Option<String>) {
+        let dgi = if let (Some(base_url), Some(model)) = (&loaded.config.base_url, &loaded.config.model) {
             let http = reqwest::Client::builder()
                 .timeout(std::time::Duration::from_millis(10000))
                 .build()
                 .unwrap_or_default();
-            match dgi::evaluate_model_probe(base_url, model, &params.prompt, &http).await {
+            match dgi::evaluate_model_probe(base_url, model, prompt, &http).await {
                 Ok(v) => v,
                 Err(err) => {
                     tracing::warn!(
@@ -229,7 +211,7 @@ impl CastorMcpServer {
                          Engine offline, unreachable, or endpoint does not support guided_choice. \
                          Falling back to soft heuristic."
                     );
-                    let fallback = dgi::evaluate(&params.prompt);
+                    let fallback = dgi::evaluate(prompt);
                     if matches!(fallback, dgi::DgiVerdict::Admit) {
                         dgi::DgiVerdict::Review(0) // Special loud warning sentinel
                     } else {
@@ -244,6 +226,61 @@ impl CastorMcpServer {
             dgi::DgiVerdict::Review(0)
         };
 
+        let dgi_note = match &dgi {
+            dgi::DgiVerdict::Review(0) => Some(
+                "- **⚠️ DGI LOUD ADVISORY**: 1-forward pass model probe was bypassed (engine offline, unreachable, or backend unsupported). Proceeding without model-verified CIVP gate."
+                    .to_string(),
+            ),
+            dgi::DgiVerdict::Review(s) => Some(format!(
+                "- **DGI**: advisory score {s} — flag for decomposition; dispatch proceeding."
+            )),
+            _ => None,
+        };
+
+        (dgi, dgi_note)
+    }
+
+    /// Resolve the path to the castor worker binary, handling test-binary
+    /// suffixes and debug/release fallbacks.
+    fn resolve_worker_bin() -> std::path::PathBuf {
+        let mut bin =
+            std::env::current_exe().unwrap_or_else(|_| std::path::PathBuf::from("castor"));
+        let bin_str = bin.to_string_lossy();
+        if let Some(clean) = bin_str.strip_suffix(" (deleted)") {
+            bin = std::path::PathBuf::from(clean);
+        }
+        if !bin.exists()
+            && let Ok(cwd) = std::env::current_dir()
+        {
+            let debug_bin = cwd.join("target/debug/castor");
+            let release_bin = cwd.join("target/release/castor");
+            if debug_bin.exists() {
+                bin = debug_bin;
+            } else if release_bin.exists() {
+                bin = release_bin;
+            }
+        }
+        bin
+    }
+
+    async fn handle_coworker(&self, args: Option<Value>) -> CallToolResult {
+        let params = match Self::parse_coworker_args(args) {
+            Ok(p) => p,
+            Err(e) => return CallToolResult::error(vec![ContentBlock::text(e)]),
+        };
+
+        let loaded = match crate::config::load() {
+            Ok(c) => c,
+            Err(e) => {
+                return CallToolResult::error(vec![ContentBlock::text(format!(
+                    "Config error: {e}"
+                ))]);
+            }
+        };
+
+        // DGI Gatekeeper: model-driven 1-forward pass logit probe via guided_choice.
+        let (dgi, dgi_note) = Self::evaluate_dgi(&loaded, &params.prompt).await;
+
         if let dgi::DgiVerdict::Reject(sigs) = &dgi {
             let body = sigs
                 .iter()
@@ -255,16 +292,7 @@ impl CastorMcpServer {
                  Decompose into a single-concern slice (one subsystem, one verification gate) and re-dispatch.",
             ))]);
         }
-        let dgi_note = match &dgi {
-            dgi::DgiVerdict::Review(0) => Some(
-                "- **⚠️ DGI LOUD ADVISORY**: 1-forward pass model probe was bypassed (engine offline, unreachable, or backend unsupported). Proceeding without model-verified CIVP gate."
-                    .to_string(),
-            ),
-            dgi::DgiVerdict::Review(s) => Some(format!(
-                "- **DGI**: advisory score {s} — flag for decomposition; dispatch proceeding."
-            )),
-            _ => None,
-        };
+
         let state = crate::state::StateDir::from_config(&loaded.config);
         if let Err(e) = state.ensure() {
             return CallToolResult::error(vec![ContentBlock::text(format!(
@@ -272,7 +300,7 @@ impl CastorMcpServer {
             ))]);
         }
 
-        let cwd = params.cwd.clone().unwrap_or_else(|| {
+        let cwd = params.cwd.unwrap_or_else(|| {
             std::env::current_dir()
                 .map(|p| p.to_string_lossy().into_owned())
                 .unwrap_or_else(|_| ".".to_string())
@@ -280,7 +308,6 @@ impl CastorMcpServer {
 
         let session_id = params
             .session_id
-            .clone()
             .unwrap_or_else(|| format!("castor_session_{}", now_epoch_ms()));
 
         let registry = crate::task::registry::TaskRegistry::new(&state);
@@ -315,23 +342,7 @@ impl CastorMcpServer {
         }
 
         // Spawn detached worker process.
-        let mut bin =
-            std::env::current_exe().unwrap_or_else(|_| std::path::PathBuf::from("castor"));
-        let bin_str = bin.to_string_lossy();
-        if let Some(clean) = bin_str.strip_suffix(" (deleted)") {
-            bin = std::path::PathBuf::from(clean);
-        }
-        if !bin.exists()
-            && let Ok(cwd) = std::env::current_dir()
-        {
-            let debug_bin = cwd.join("target/debug/castor");
-            let release_bin = cwd.join("target/release/castor");
-            if debug_bin.exists() {
-                bin = debug_bin;
-            } else if release_bin.exists() {
-                bin = release_bin;
-            }
-        }
+        let bin = Self::resolve_worker_bin();
         let mut cmd = tokio::process::Command::new(&bin);
         cmd.arg("__worker").arg(&spec_path);
         cmd.stdin(std::process::Stdio::null());

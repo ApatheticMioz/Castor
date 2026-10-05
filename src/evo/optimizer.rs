@@ -314,7 +314,7 @@ mod tests {
         let second = commit_artifact(&mut lin, "b".into(), &report, 2_000).unwrap();
 
         let n2 = &lin.nodes()[1];
-        assert_eq!(n2.parents, vec![first.clone()]);
+        assert_eq!(n2.parents, vec![first]);
         assert_eq!(lin.head().unwrap().id, second);
     }
 

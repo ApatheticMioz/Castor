@@ -528,7 +528,7 @@ impl SandboxPolicy {
 
         // Read roots first (broader), then write roots (narrower, more access).
         for root in self.read_roots() {
-            let Some(rule) = open_beneath(root, ro)? else {
+            let Some(rule) = open_beneath(root, ro) else {
                 return Ok(None); // unsupportable / missing path → degrade
             };
             ruleset = ruleset
@@ -536,7 +536,7 @@ impl SandboxPolicy {
                 .map_err(|e| SandboxError::InvalidPath(format!("landlock add_rule: {e}")))?;
         }
         for root in self.write_roots() {
-            let Some(rule) = open_beneath(root, rw)? else {
+            let Some(rule) = open_beneath(root, rw) else {
                 return Ok(None);
             };
             ruleset = ruleset
@@ -552,13 +552,13 @@ impl SandboxPolicy {
 fn open_beneath(
     root: &Path,
     access: landlock::BitFlags<landlock::AccessFs>,
-) -> Result<Option<landlock::PathBeneath<landlock::PathFd>>, SandboxError> {
+) -> Option<landlock::PathBeneath<landlock::PathFd>> {
     use landlock::{PathBeneath, PathFd};
     match PathFd::new(root) {
-        Ok(fd) => Ok(Some(PathBeneath::new(fd, access))),
+        Ok(fd) => Some(PathBeneath::new(fd, access)),
         // A path that cannot be opened (missing, or a filesystem that rejects
         // O_PATH) is a degrade signal: no rule, caller falls back.
-        Err(_) => Ok(None),
+        Err(_) => None,
     }
 }
 
@@ -1091,29 +1091,33 @@ mod tests {
                     "Runnable vector '{}' should be blocked but was allowed",
                     v.input
                 );
-                let err = res.unwrap_err();
-                match &err {
-                    ShellPolicyError::ProhibitedPattern(_)
-                    | ShellPolicyError::ProtectedRoot(_, _)
-                    | ShellPolicyError::UnexpandedReference(_)
-                    | ShellPolicyError::DeadManFuse => {}
-                    other => panic!(
-                        "runnable ShellPolicy vector '{}' expected a typed refusal, got {other:?}",
-                        v.input
+                assert!(
+                    matches!(
+                        res,
+                        Err(
+                            ShellPolicyError::ProhibitedPattern(_)
+                                | ShellPolicyError::ProtectedRoot(_, _)
+                                | ShellPolicyError::UnexpandedReference(_)
+                                | ShellPolicyError::DeadManFuse
+                        )
                     ),
-                }
+                    "runnable ShellPolicy vector '{}' expected a typed refusal, got {res:?}",
+                    v.input
+                );
                 continue;
             }
             let err = normalize_traversal(&root, v.input).unwrap_err();
-            match (v.layer, &err) {
-                ("PathEscape", SandboxError::PathEscape(_)) => {}
-                ("NullByte", SandboxError::NullByte(_)) => {}
-                ("DeviceName", SandboxError::DeviceName(_)) => {}
-                (layer, err) => panic!(
-                    "runnable vector '{}' expected layer {layer}, got {err:?}",
-                    v.input
-                ),
-            }
+            let ok = matches!(
+                (v.layer, &err),
+                ("PathEscape", SandboxError::PathEscape(_))
+                    | ("NullByte", SandboxError::NullByte(_))
+                    | ("DeviceName", SandboxError::DeviceName(_))
+            );
+            assert!(
+                ok,
+                "runnable vector '{}' expected layer {}, got {err:?}",
+                v.input, v.layer
+            );
         }
     }
 
