@@ -8,7 +8,23 @@ The project adheres to **[Semantic Versioning](https://semver.org/)**:
 
 ---
 
-## [1.0.2] — 2026-10-04
+## [Unreleased]
+
+### 🛡️ Landlock LSM Confinement & Security Hardening (Issue #6, #17)
+- **Landlock LSM Integration**: Kernel-enforced filesystem confinement on Linux/WSL using standard `landlock = "0.4"` crate in `src/tools/shell.rs`. Confines child bash processes to workspace root and `/tmp` (RW) while granting read-only access to system paths and `~/.castor`.
+- **Symmetric Multi-Root Scoping**: Parity between shell confinement and filesystem tools via `SandboxPolicy::for_workspace`.
+- **28 Tree-Sitter Languages**: Expanded AST tooling in `src/tools/ast.rs` with all 28 language features in `ast-grep-language`.
+
+### ⚡ DGI 1-Forward Pass Logit Probe (Issue #16)
+- **System-1 Constrained Token Probe**: Replaced 711 LOC of brittle regexes and heuristics with a single-pass constrained logit probe using `guided_choice: ["ADMIT", "OVERLOADED"]`, `max_tokens: 1`, temperature 0.0, and prefilled thought suppression. Sub-30ms decode with zero autoregressive reasoning loops.
+- **Fail-Fast Gateway Rejection**: True monolithic dispatches trigger immediate `DecompositionGateRejected` at the MCP gateway.
+- **Loud Offline Fallback**: Degrades gracefully to advisory `Review` with explicit warning logs when serving engine is unreachable.
+
+### 🧠 Reasoning Effort Direct Passthrough (Issue #3)
+- **Direct chat_template_kwargs**: Direct wiring of `chat_template_kwargs: {"reasoning_effort": effort}` to vLLM, eliminating dual-payload abstractions.
+
+### ⏱️ Runner Probe Budget Governor (Issue #17)
+- **Proactive Loop Breaker**: Consecutive probe warnings trigger at 4 non-mutating bash commands, with an explicit bypass exemption for sanctioned `.scratch/` scripts.
 
 ### 📈 Telemetry Windowed Queries (Issue #18)
 - **`--since <duration>`**: Time-bound `castor stats` to a rolling window ending at now (e.g. `--since 24h`, `--since 7d`, `--since 30m`). Duration parsing uses the standard ecosystem crate `humantime` (2.1); invalid strings produce a clean, actionable error (`stats: invalid --since duration '…' (expected a duration like 24h, 7d, 30m)`) with a non-zero exit code.
