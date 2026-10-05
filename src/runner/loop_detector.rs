@@ -98,6 +98,24 @@ pub const PROBE_ADVISORY: &str = "[Probe Advisory] You have executed consecutive
 /// Mutating tools (`write_file`, `edit_file`, `ast_replace`, `apply_patch`)
 /// reset the counter.  Commands that reference a `.scratch/` path component
 /// are exempt — they are empirical diagnostics, not idle ping-pong.
+/// Outcome of recording an exploratory probe.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ProbeState {
+    /// Probe count is within normal bounds.
+    Ok,
+    /// Probe budget reached: inject advisory to guide model toward mutations.
+    Advisory,
+    /// Probe streak exceeded impasse ceiling: halt exploratory loop and yield findings.
+    Impasse,
+}
+
+/// Tracks consecutive non-mutating exploratory probes (`bash` commands that
+/// do not target `.scratch/`) and signals when the probe budget is reached
+/// or when an impasse is encountered.
+///
+/// Mutating tools (`write_file`, `edit_file`, `ast_replace`, `apply_patch`)
+/// reset the counter. Commands that reference a `.scratch/` path component
+/// are exempt — they are empirical diagnostics, not idle ping-pong.
 #[derive(Debug)]
 pub struct ProbeTracker {
     budget: usize,
@@ -114,34 +132,36 @@ impl ProbeTracker {
         }
     }
 
-    /// Record a tool execution.
-    ///
-    /// Returns `true` when the probe budget is exhausted and a probe
-    /// advisory should be injected (only once per tracker lifetime).
-    pub fn record(&mut self, name: &str, args: &str) -> bool {
+    /// Record a tool execution and evaluate probe state.
+    pub fn record(&mut self, name: &str, args: &str) -> ProbeState {
         // Mutating tools reset the probe streak.
         if is_mutating_tool(name) {
             self.consecutive_probes = 0;
-            return false;
+            return ProbeState::Ok;
         }
         // Only `bash` commands are tracked as probes.
         if name != "bash" {
-            return false;
+            return ProbeState::Ok;
         }
         // Scratchpad commands are exempt (empirical diagnostics).
-        // The `.scratch` path appears in the raw args JSON the same way it
-        // appears in the extracted command, so we search the raw string.
         if targets_scratchpad(args) {
-            return false;
+            return ProbeState::Ok;
         }
         // Non-scratchpad bash command: count it.
         self.consecutive_probes += 1;
-        if self.consecutive_probes >= self.budget && !self.advisory_injected {
+        if self.consecutive_probes >= self.budget * 3 {
+            ProbeState::Impasse
+        } else if self.consecutive_probes >= self.budget && !self.advisory_injected {
             self.advisory_injected = true;
-            true
+            ProbeState::Advisory
         } else {
-            false
+            ProbeState::Ok
         }
+    }
+
+    /// Number of consecutive exploratory probes currently recorded.
+    pub fn consecutive_probes(&self) -> usize {
+        self.consecutive_probes
     }
 }
 
@@ -211,24 +231,36 @@ mod tests {
     fn probe_budget_trips_at_threshold() {
         let mut t = ProbeTracker::new(3);
         // First two probes: below the budget.
-        assert!(!t.record("bash", "{\"command\":\"ls\"}"));
-        assert!(!t.record("bash", "{\"command\":\"pwd\"}"));
+        assert_eq!(t.record("bash", "{\"command\":\"ls\"}"), ProbeState::Ok);
+        assert_eq!(t.record("bash", "{\"command\":\"pwd\"}"), ProbeState::Ok);
         // Third probe: at the budget → advisory fires.
-        assert!(t.record("bash", "{\"command\":\"cat file.txt\"}"));
-        // The advisory latches; subsequent probes do not re-fire.
-        assert!(!t.record("bash", "{\"command\":\"head -1 file.txt\"}"));
+        assert_eq!(t.record("bash", "{\"command\":\"cat file.txt\"}"), ProbeState::Advisory);
+        // The advisory latches; subsequent probes return Ok until impasse.
+        assert_eq!(t.record("bash", "{\"command\":\"head -1 file.txt\"}"), ProbeState::Ok);
+    }
+
+    #[test]
+    fn probe_budget_trips_impasse_at_ceiling() {
+        let mut t = ProbeTracker::new(2);
+        assert_eq!(t.record("bash", "{\"command\":\"ls\"}"), ProbeState::Ok);
+        assert_eq!(t.record("bash", "{\"command\":\"pwd\"}"), ProbeState::Advisory);
+        assert_eq!(t.record("bash", "{\"command\":\"p3\"}"), ProbeState::Ok);
+        assert_eq!(t.record("bash", "{\"command\":\"p4\"}"), ProbeState::Ok);
+        assert_eq!(t.record("bash", "{\"command\":\"p5\"}"), ProbeState::Ok);
+        // At budget * 3 (6 probes):
+        assert_eq!(t.record("bash", "{\"command\":\"p6\"}"), ProbeState::Impasse);
     }
 
     #[test]
     fn mutating_tools_reset_probe_count() {
         let mut t = ProbeTracker::new(2);
-        assert!(!t.record("bash", "{\"command\":\"ls\"}"));
+        assert_eq!(t.record("bash", "{\"command\":\"ls\"}"), ProbeState::Ok);
         // A write_file resets the streak.
-        assert!(!t.record("write_file", "{\"path\":\"a.rs\"}"));
+        assert_eq!(t.record("write_file", "{\"path\":\"a.rs\"}"), ProbeState::Ok);
         // After the reset, one more probe is still below budget.
-        assert!(!t.record("bash", "{\"command\":\"pwd\"}"));
+        assert_eq!(t.record("bash", "{\"command\":\"pwd\"}"), ProbeState::Ok);
         // Second probe after reset → advisory.
-        assert!(t.record("bash", "{\"command\":\"cat b\"}"));
+        assert_eq!(t.record("bash", "{\"command\":\"cat b\"}"), ProbeState::Advisory);
     }
 
     #[test]
@@ -236,25 +268,25 @@ mod tests {
         let mut t = ProbeTracker::new(1);
         // Budget of 1 would trip on the very first non-scratch probe,
         // but scratchpad commands never count.
-        assert!(!t.record("bash", "{\"command\":\"python .scratch/repro.py\"}"));
-        assert!(!t.record("bash", "{\"command\":\"bash .scratch/run.sh\"}"));
-        assert!(!t.record("bash", "{\"command\":\"cat /abs/path/.scratch/dump.txt\"}"));
-        assert!(!t.record("bash", "{\"command\":\"ls .scratch/\"}"));
+        assert_eq!(t.record("bash", "{\"command\":\"python .scratch/repro.py\"}"), ProbeState::Ok);
+        assert_eq!(t.record("bash", "{\"command\":\"bash .scratch/run.sh\"}"), ProbeState::Ok);
+        assert_eq!(t.record("bash", "{\"command\":\"cat /abs/path/.scratch/dump.txt\"}"), ProbeState::Ok);
+        assert_eq!(t.record("bash", "{\"command\":\"ls .scratch/\"}"), ProbeState::Ok);
     }
 
     #[test]
     fn non_scratch_bash_is_counted() {
         let mut t = ProbeTracker::new(1);
         // A regular bash command (no .scratch/) trips immediately.
-        assert!(t.record("bash", "{\"command\":\"ls -la\"}"));
+        assert_eq!(t.record("bash", "{\"command\":\"ls -la\"}"), ProbeState::Advisory);
     }
 
     #[test]
     fn non_bash_tools_do_not_count_as_probes() {
         let mut t = ProbeTracker::new(1);
         // read_file, search_code, etc. are non-mutating but not probes.
-        assert!(!t.record("read_file", "{\"path\":\"a.rs\"}"));
-        assert!(!t.record("search_code", "{\"query\":\"foo\"}"));
+        assert_eq!(t.record("read_file", "{\"path\":\"a.rs\"}"), ProbeState::Ok);
+        assert_eq!(t.record("search_code", "{\"query\":\"foo\"}"), ProbeState::Ok);
     }
 
     #[test]

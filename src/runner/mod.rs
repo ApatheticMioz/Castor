@@ -23,7 +23,7 @@ use crate::engine::{EngineClient, EngineError, Message, Metrics, ToolSchema};
 use crate::state::StateDir;
 
 use events::EventLogger;
-use loop_detector::{LoopDetector, LoopState, PROBE_ADVISORY, ProbeTracker};
+use loop_detector::{LoopDetector, LoopState, PROBE_ADVISORY, ProbeState, ProbeTracker};
 
 /// Default turn budget (from the task record; extendable up to `MAX_ELASTIC_TURNS`).
 pub const DEFAULT_TURNS_BUDGET: u32 = 80;
@@ -144,6 +144,8 @@ pub enum RunnerError {
     Engine(#[from] EngineError),
     #[error("loop detected: repeated identical action '{name}'")]
     LoopDetected { name: String },
+    #[error("verification impasse: {probes} consecutive exploratory probes without code mutations")]
+    ProbeImpasse { probes: usize },
     #[error("io error: {0}")]
     Io(#[from] std::io::Error),
 }
@@ -624,11 +626,18 @@ impasse, state your findings and ask for alignment rather than continuing to re-
 
             // Probe budget tracking: consecutive non-mutating bash probes
             // that do not target `.scratch/` are counted; at the budget
-            // threshold a one-shot advisory is injected to nudge the model
-            // toward code mutations. Mutating tools reset the counter;
-            // `.scratch/` commands are exempt.
-            if probe_tracker.record(&tc.name, &tc.arguments) {
-                messages.push(msg("user", PROBE_ADVISORY));
+            // threshold a one-shot advisory is injected. If the streak reaches
+            // the impasse ceiling (budget * 3), the session halts with an impasse.
+            match probe_tracker.record(&tc.name, &tc.arguments) {
+                ProbeState::Ok => {}
+                ProbeState::Advisory => {
+                    messages.push(msg("user", PROBE_ADVISORY));
+                }
+                ProbeState::Impasse => {
+                    return Err(RunnerError::ProbeImpasse {
+                        probes: probe_tracker.consecutive_probes(),
+                    });
+                }
             }
         }
     }
@@ -1586,6 +1595,52 @@ mod tests {
             "probe advisory must be present after 4 consecutive non-scratch bash probes"
         );
 
+        let _ = std::fs::remove_dir_all(state.root());
+    }
+
+    #[tokio::test]
+    async fn probe_streak_triggers_impasse_error() {
+        let state = tmp_state();
+        let logger = logger_for(&state);
+        let recorder = std::sync::Arc::new(CallRecorder::default());
+        // Probe budget of 2: advisory at 2, impasse at 2 * 3 = 6 probes.
+        let engine = RecordingEngine::new(
+            vec![
+                comp("", vec![tc("c1", "bash", r#"{"command":"ls"}"#)]),
+                comp("", vec![tc("c2", "bash", r#"{"command":"pwd"}"#)]),
+                comp("", vec![tc("c3", "bash", r#"{"command":"cat f1"}"#)]),
+                comp("", vec![tc("c4", "bash", r#"{"command":"cat f2"}"#)]),
+                comp("", vec![tc("c5", "bash", r#"{"command":"cat f3"}"#)]),
+                comp("", vec![tc("c6", "bash", r#"{"command":"cat f4"}"#)]),
+                comp("Done.", Vec::new()),
+            ],
+            recorder.clone(),
+        );
+        let executor = MockExecutor::new(vec![
+            "out1".into(),
+            "out2".into(),
+            "out3".into(),
+            "out4".into(),
+            "out5".into(),
+            "out6".into(),
+        ]);
+
+        let mut opts = SessionOptions::with_state(state.clone());
+        opts.probe_budget = 2;
+
+        let res = run_session(
+            &engine,
+            &executor,
+            &logger,
+            "sys",
+            "work",
+            &[tool_schema("bash")],
+            80,
+            Some(&opts),
+        )
+        .await;
+
+        assert!(matches!(res, Err(RunnerError::ProbeImpasse { probes: 6 })));
         let _ = std::fs::remove_dir_all(state.root());
     }
 

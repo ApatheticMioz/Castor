@@ -713,6 +713,16 @@ async fn execute(cmd: &str, cwd: &Path, timeout: Duration) -> Result<ShellOutput
 
     #[cfg(target_os = "linux")]
     {
+        // When executing under Linux or WSL mounts (such as drvfs 9p mounts), compilers
+        // writing temporary files to /tmp (ext4) and atomically renaming to target dirs
+        // fail with EXDEV (os error 18, Invalid cross-device link). Scoping TMPDIR to
+        // the workspace scratchpad ensures all temporary writes and atomic renames
+        // remain on the same filesystem and within the workspace Landlock confinement rule.
+        let scratch_tmp = cwd.join(".scratch").join("tmp");
+        if std::fs::create_dir_all(&scratch_tmp).is_ok() {
+            cmd_builder.env("TMPDIR", &scratch_tmp);
+        }
+
         if let Ok(ruleset) = build_landlock_ruleset(cwd) {
             let mut ruleset_opt = Some(ruleset);
             unsafe {
