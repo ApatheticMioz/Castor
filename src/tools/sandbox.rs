@@ -1094,12 +1094,10 @@ mod tests {
                 assert!(
                     matches!(
                         res,
-                        Err(
-                            ShellPolicyError::ProhibitedPattern(_)
-                                | ShellPolicyError::ProtectedRoot(_, _)
-                                | ShellPolicyError::UnexpandedReference(_)
-                                | ShellPolicyError::DeadManFuse
-                        )
+                        Err(ShellPolicyError::ProhibitedPattern(_)
+                            | ShellPolicyError::ProtectedRoot(_, _)
+                            | ShellPolicyError::UnexpandedReference(_)
+                            | ShellPolicyError::DeadManFuse)
                     ),
                     "runnable ShellPolicy vector '{}' expected a typed refusal, got {res:?}",
                     v.input

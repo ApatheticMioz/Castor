@@ -197,7 +197,9 @@ impl CastorMcpServer {
         loaded: &crate::config::LoadedConfig,
         prompt: &str,
     ) -> (dgi::DgiVerdict, Option<String>) {
-        let dgi = if let (Some(base_url), Some(model)) = (&loaded.config.base_url, &loaded.config.model) {
+        let dgi = if let (Some(base_url), Some(model)) =
+            (&loaded.config.base_url, &loaded.config.model)
+        {
             let http = reqwest::Client::builder()
                 .timeout(std::time::Duration::from_millis(10000))
                 .build()

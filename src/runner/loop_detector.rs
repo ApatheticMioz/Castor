@@ -234,21 +234,33 @@ mod tests {
         assert_eq!(t.record("bash", "{\"command\":\"ls\"}"), ProbeState::Ok);
         assert_eq!(t.record("bash", "{\"command\":\"pwd\"}"), ProbeState::Ok);
         // Third probe: at the budget → advisory fires.
-        assert_eq!(t.record("bash", "{\"command\":\"cat file.txt\"}"), ProbeState::Advisory);
+        assert_eq!(
+            t.record("bash", "{\"command\":\"cat file.txt\"}"),
+            ProbeState::Advisory
+        );
         // The advisory latches; subsequent probes return Ok until impasse.
-        assert_eq!(t.record("bash", "{\"command\":\"head -1 file.txt\"}"), ProbeState::Ok);
+        assert_eq!(
+            t.record("bash", "{\"command\":\"head -1 file.txt\"}"),
+            ProbeState::Ok
+        );
     }
 
     #[test]
     fn probe_budget_trips_impasse_at_ceiling() {
         let mut t = ProbeTracker::new(2);
         assert_eq!(t.record("bash", "{\"command\":\"ls\"}"), ProbeState::Ok);
-        assert_eq!(t.record("bash", "{\"command\":\"pwd\"}"), ProbeState::Advisory);
+        assert_eq!(
+            t.record("bash", "{\"command\":\"pwd\"}"),
+            ProbeState::Advisory
+        );
         assert_eq!(t.record("bash", "{\"command\":\"p3\"}"), ProbeState::Ok);
         assert_eq!(t.record("bash", "{\"command\":\"p4\"}"), ProbeState::Ok);
         assert_eq!(t.record("bash", "{\"command\":\"p5\"}"), ProbeState::Ok);
         // At budget * 3 (6 probes):
-        assert_eq!(t.record("bash", "{\"command\":\"p6\"}"), ProbeState::Impasse);
+        assert_eq!(
+            t.record("bash", "{\"command\":\"p6\"}"),
+            ProbeState::Impasse
+        );
     }
 
     #[test]
@@ -256,11 +268,17 @@ mod tests {
         let mut t = ProbeTracker::new(2);
         assert_eq!(t.record("bash", "{\"command\":\"ls\"}"), ProbeState::Ok);
         // A write_file resets the streak.
-        assert_eq!(t.record("write_file", "{\"path\":\"a.rs\"}"), ProbeState::Ok);
+        assert_eq!(
+            t.record("write_file", "{\"path\":\"a.rs\"}"),
+            ProbeState::Ok
+        );
         // After the reset, one more probe is still below budget.
         assert_eq!(t.record("bash", "{\"command\":\"pwd\"}"), ProbeState::Ok);
         // Second probe after reset → advisory.
-        assert_eq!(t.record("bash", "{\"command\":\"cat b\"}"), ProbeState::Advisory);
+        assert_eq!(
+            t.record("bash", "{\"command\":\"cat b\"}"),
+            ProbeState::Advisory
+        );
     }
 
     #[test]
@@ -268,17 +286,32 @@ mod tests {
         let mut t = ProbeTracker::new(1);
         // Budget of 1 would trip on the very first non-scratch probe,
         // but scratchpad commands never count.
-        assert_eq!(t.record("bash", "{\"command\":\"python .scratch/repro.py\"}"), ProbeState::Ok);
-        assert_eq!(t.record("bash", "{\"command\":\"bash .scratch/run.sh\"}"), ProbeState::Ok);
-        assert_eq!(t.record("bash", "{\"command\":\"cat /abs/path/.scratch/dump.txt\"}"), ProbeState::Ok);
-        assert_eq!(t.record("bash", "{\"command\":\"ls .scratch/\"}"), ProbeState::Ok);
+        assert_eq!(
+            t.record("bash", "{\"command\":\"python .scratch/repro.py\"}"),
+            ProbeState::Ok
+        );
+        assert_eq!(
+            t.record("bash", "{\"command\":\"bash .scratch/run.sh\"}"),
+            ProbeState::Ok
+        );
+        assert_eq!(
+            t.record("bash", "{\"command\":\"cat /abs/path/.scratch/dump.txt\"}"),
+            ProbeState::Ok
+        );
+        assert_eq!(
+            t.record("bash", "{\"command\":\"ls .scratch/\"}"),
+            ProbeState::Ok
+        );
     }
 
     #[test]
     fn non_scratch_bash_is_counted() {
         let mut t = ProbeTracker::new(1);
         // A regular bash command (no .scratch/) trips immediately.
-        assert_eq!(t.record("bash", "{\"command\":\"ls -la\"}"), ProbeState::Advisory);
+        assert_eq!(
+            t.record("bash", "{\"command\":\"ls -la\"}"),
+            ProbeState::Advisory
+        );
     }
 
     #[test]
@@ -286,7 +319,10 @@ mod tests {
         let mut t = ProbeTracker::new(1);
         // read_file, search_code, etc. are non-mutating but not probes.
         assert_eq!(t.record("read_file", "{\"path\":\"a.rs\"}"), ProbeState::Ok);
-        assert_eq!(t.record("search_code", "{\"query\":\"foo\"}"), ProbeState::Ok);
+        assert_eq!(
+            t.record("search_code", "{\"query\":\"foo\"}"),
+            ProbeState::Ok
+        );
     }
 
     #[test]
