@@ -92,6 +92,13 @@ enum Command {
         /// Print machine-readable JSON
         #[arg(long)]
         json: bool,
+        /// Restrict stats to events within a duration of now
+        /// (e.g. `24h`, `7d`, `120m`)
+        #[arg(long, value_name = "DURATION")]
+        since: Option<String>,
+        /// Break down the stats by UTC day (`YYYY-MM-DD`)
+        #[arg(long)]
+        by_day: bool,
     },
     /// Evo engine
     Evo {
@@ -572,10 +579,28 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 }
             }
         }
-        Command::Stats { json } => {
+        Command::Stats {
+            json,
+            since,
+            by_day,
+        } => {
             let loaded = config::load().map_err(|e| format!("config: {e}"))?;
             let state = state::StateDir::from_config(&loaded.config);
-            let stats = telemetry::derive_stats(state.root());
+            let mut opts = telemetry::StatsOptions {
+                by_day,
+                ..Default::default()
+            };
+            if let Some(s) = &since {
+                let duration = humantime::parse_duration(s).map_err(|e| {
+                    format!(
+                        "stats: invalid --since duration '{s}': {e} \
+                         (expected a duration like 24h, 7d, 30m)"
+                    )
+                })?;
+                let since_ms = now_epoch_ms() as i128 - duration.as_secs_f64() as i128 * 1000;
+                opts.since_ms = Some(since_ms);
+            }
+            let stats = telemetry::derive_stats(state.root(), &opts);
             if json {
                 println!(
                     "{}",
@@ -932,6 +957,7 @@ mod tests {
             searxng_url: None,
             brave_api_key: None,
             boot_timeout_secs: 180,
+            probe_budget: 4,
             state_dir: state.root().to_path_buf(),
         }
     }

@@ -69,13 +69,15 @@ impl EventLogger {
     }
 }
 
+/// Current time as a standards-compliant ISO-8601 / RFC-3339 UTC string
+/// (`YYYY-MM-DDTHH:MM:SS.mmmZ`), reusing the crate's single civil-date
+/// formatter (see [`crate::telemetry::iso_from_ms`]).
 fn now_iso() -> String {
     let now = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map(|d| d.as_millis() as u64)
         .unwrap_or(0);
-    // Milliseconds since epoch, as an ISO-ish string (no tz math needed for a ledger).
-    format!("{now}ms")
+    crate::telemetry::iso_from_ms(now)
 }
 
 #[cfg(test)]
