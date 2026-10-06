@@ -41,14 +41,16 @@ impl CompositeExecutor {
         workspace_root: impl Into<PathBuf>,
         extensions: Option<ExtensionBridge>,
     ) -> Result<Self, fs::FsError> {
-        Self::with_config(workspace_root, None, None, extensions)
+        Self::with_config(workspace_root, None, None, None, None, extensions)
     }
 
-    /// Create a new executor with explicit search configuration.
+    /// Create a new executor with explicit search and academic paper configuration.
     pub fn with_config(
         workspace_root: impl Into<PathBuf>,
         searxng_url: Option<String>,
         brave_api_key: Option<String>,
+        openalex_email: Option<String>,
+        openalex_api_key: Option<String>,
         extensions: Option<ExtensionBridge>,
     ) -> Result<Self, fs::FsError> {
         let root = crate::platform::to_host_path(workspace_root.into());
@@ -58,11 +60,12 @@ impl CompositeExecutor {
         let searx_base =
             searxng_url.or_else(|| crate::tools::web::DEFAULT_SEARXNG.map(str::to_string));
         let web = WebClient::with_base_urls(searx_base, None, None);
+        let paper = PaperClient::with_credentials(openalex_email, openalex_api_key);
         Ok(Self {
             fs,
             workspace_root: root,
             web,
-            paper: PaperClient::new(),
+            paper,
             brave_api_key,
             extensions,
         })

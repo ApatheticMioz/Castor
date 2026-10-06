@@ -111,6 +111,10 @@ node bin/castor.js install --client all
 | `CASTOR_BASE_TURN_BUDGET` | `80` | Base turn budget before requiring supervisor lease extension or landing. |
 | `CASTOR_MAX_ELASTIC_TURNS` | `200` | Maximum allowed turn ceiling via supervisor lease extension. |
 | `CASTOR_BOOT_TIMEOUT_SECS` | `180` | Serving engine boot timeout in seconds before abort (default 3 minutes). |
+| `CASTOR_SEARXNG_URL` | `http://127.0.0.1:8888/` | Local SearXNG meta-search instance endpoint. |
+| `CASTOR_BRAVE_API_KEY` | *(unset)* | Optional Brave Search API subscription key for fallback. |
+| `CASTOR_OPENALEX_EMAIL` | *(unset)* | Polite-pool contact email for zero-hallucination paper lookups. |
+| `CASTOR_OPENALEX_API_KEY` | *(unset)* | Optional OpenAlex Premium API key for high-throughput institutional tiers. |
 
 ---
 

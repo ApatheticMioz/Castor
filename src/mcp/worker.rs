@@ -150,6 +150,8 @@ notes or deleted legacy references are reference ledgers.\n\
         &host_cwd,
         config.searxng_url.clone(),
         config.brave_api_key.clone(),
+        config.openalex_email.clone(),
+        config.openalex_api_key.clone(),
         ext_bridge,
     ) {
         Ok(exec) => exec,

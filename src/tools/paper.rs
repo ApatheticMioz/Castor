@@ -108,19 +108,48 @@ pub struct PaperClient {
 
 impl PaperClient {
     pub fn new() -> Self {
-        Self::with_base_url("https://api.openalex.org")
+        Self::with_options(None, None, None)
+    }
+
+    pub fn with_credentials(email: Option<String>, api_key: Option<String>) -> Self {
+        Self::with_options(None, email, api_key)
     }
 
     pub fn with_base_url(base_url: &str) -> Self {
+        Self::with_options(Some(base_url), None, None)
+    }
+
+    pub fn with_options(
+        base_url: Option<&str>,
+        email: Option<String>,
+        api_key: Option<String>,
+    ) -> Self {
+        let user_agent = match email.as_deref().map(str::trim).filter(|s| !s.is_empty()) {
+            Some(e) => format!("Castor/1.1 (mailto:{e})"),
+            None => DEFAULT_USER_AGENT.to_string(),
+        };
+
+        let mut headers = reqwest::header::HeaderMap::new();
+        if let Some(val) = api_key
+            .as_deref()
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .and_then(|k| reqwest::header::HeaderValue::from_str(k).ok())
+        {
+            headers.insert("api_key", val);
+        }
+
         let client = reqwest::Client::builder()
             .timeout(Duration::from_secs(DEFAULT_TIMEOUT_SECS))
-            .user_agent(DEFAULT_USER_AGENT)
+            .user_agent(user_agent)
+            .default_headers(headers)
             .build()
             .unwrap_or_else(|_| reqwest::Client::new());
 
+        let effective_base = base_url.unwrap_or("https://api.openalex.org");
         Self {
             client,
-            base_url: base_url.trim_end_matches('/').to_string(),
+            base_url: effective_base.trim_end_matches('/').to_string(),
         }
     }
 
@@ -475,5 +504,17 @@ mod tests {
         let c = PaperClient::new();
         let err = c.lookup("   ", 1).await.unwrap_err();
         assert!(matches!(err, PaperError::InvalidQuery));
+    }
+
+    #[tokio::test]
+    async fn paper_lookup_custom_credentials() {
+        let base = start(router()).await;
+        let c = PaperClient::with_options(
+            Some(&base),
+            Some("apatheticmioz@gmail.com".to_string()),
+            Some("test_secret_api_key".to_string()),
+        );
+        let papers = c.lookup("RCACopilot", 1).await.unwrap();
+        assert_eq!(papers.len(), 1);
     }
 }

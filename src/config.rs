@@ -63,6 +63,9 @@ pub struct Config {
     pub searxng_url: Option<String>,
     /// Secret: never print the value.
     pub brave_api_key: Option<String>,
+    pub openalex_email: Option<String>,
+    /// Secret: never print the value.
+    pub openalex_api_key: Option<String>,
     pub boot_timeout_secs: u64,
     /// Consecutive non-mutating bash probes before a probe-budget advisory
     /// is injected.
@@ -94,6 +97,8 @@ pub struct Sources {
     pub tool_prefix: Source,
     pub searxng_url: Source,
     pub brave_api_key: Source,
+    pub openalex_email: Source,
+    pub openalex_api_key: Source,
     pub boot_timeout_secs: Source,
     pub probe_budget: Source,
     pub state_dir: Source,
@@ -138,6 +143,8 @@ struct FileConfig {
     tool_prefix: Option<String>,
     searxng_url: Option<String>,
     brave_api_key: Option<String>,
+    openalex_email: Option<String>,
+    openalex_api_key: Option<String>,
     boot_timeout_secs: Option<u64>,
     probe_budget: Option<usize>,
 }
@@ -261,6 +268,14 @@ pub fn load_with(get_env: impl Fn(&str) -> Option<String>) -> Result<LoadedConfi
         env_str("CASTOR_BRAVE_API_KEY"),
         file.and_then(|f| f.brave_api_key.clone()),
     );
+    let (openalex_email, src_openalex_email) = pick_str(
+        env_str("CASTOR_OPENALEX_EMAIL"),
+        file.and_then(|f| f.openalex_email.clone()),
+    );
+    let (openalex_api_key, src_openalex_api_key) = pick_str(
+        env_str("CASTOR_OPENALEX_API_KEY"),
+        file.and_then(|f| f.openalex_api_key.clone()),
+    );
 
     let (max_context, src_max_context) =
         pick_opt_u32(env_max_context, file.and_then(|f| f.max_context));
@@ -316,6 +331,8 @@ pub fn load_with(get_env: impl Fn(&str) -> Option<String>) -> Result<LoadedConfi
             tool_prefix,
             searxng_url,
             brave_api_key,
+            openalex_email,
+            openalex_api_key,
             boot_timeout_secs,
             probe_budget,
             state_dir,
@@ -335,6 +352,8 @@ pub fn load_with(get_env: impl Fn(&str) -> Option<String>) -> Result<LoadedConfi
             tool_prefix: src_tool_prefix,
             searxng_url: src_searxng_url,
             brave_api_key: src_brave_api_key,
+            openalex_email: src_openalex_email,
+            openalex_api_key: src_openalex_api_key,
             boot_timeout_secs: src_boot_timeout_secs,
             probe_budget: src_probe_budget,
             state_dir: state_dir_src,
@@ -422,6 +441,18 @@ pub fn format_loaded(loaded: &LoadedConfig) -> String {
         "brave_api_key",
         &display_secret(c.brave_api_key.as_deref()),
         s.brave_api_key,
+    );
+    row(
+        &mut out,
+        "openalex_email",
+        &display(c.openalex_email.as_deref()),
+        s.openalex_email,
+    );
+    row(
+        &mut out,
+        "openalex_api_key",
+        &display_secret(c.openalex_api_key.as_deref()),
+        s.openalex_api_key,
     );
     row(
         &mut out,
@@ -634,6 +665,8 @@ mod tests {
             "tool_prefix": "cast",
             "searxng_url": "https://searxng.example",
             "brave_api_key": "bkey",
+            "openalex_email": "user@example.com",
+            "openalex_api_key": "oakey",
             "boot_timeout_secs": 240
         }"#;
         let l = load_case(&[], Some(json));
@@ -662,6 +695,8 @@ mod tests {
             Some("https://searxng.example")
         );
         assert_eq!(l.config.brave_api_key.as_deref(), Some("bkey"));
+        assert_eq!(l.config.openalex_email.as_deref(), Some("user@example.com"));
+        assert_eq!(l.config.openalex_api_key.as_deref(), Some("oakey"));
         assert_eq!(l.config.boot_timeout_secs, 240);
         // every file-provided field is annotated as File
         assert_eq!(l.sources.model, Source::File);
@@ -678,6 +713,8 @@ mod tests {
         assert_eq!(l.sources.tool_prefix, Source::File);
         assert_eq!(l.sources.searxng_url, Source::File);
         assert_eq!(l.sources.brave_api_key, Source::File);
+        assert_eq!(l.sources.openalex_email, Source::File);
+        assert_eq!(l.sources.openalex_api_key, Source::File);
         assert_eq!(l.sources.boot_timeout_secs, Source::File);
         // state dir comes from the env pin in load_case
         assert_eq!(l.sources.state_dir, Source::Env);
@@ -728,6 +765,25 @@ mod tests {
             "env-bk",
             "file-bk",
             |l| (l.config.brave_api_key.clone(), l.sources.brave_api_key),
+        );
+        check_str_field(
+            "CASTOR_OPENALEX_EMAIL",
+            "openalex_email",
+            "env-oe",
+            "file-oe",
+            |l| (l.config.openalex_email.clone(), l.sources.openalex_email),
+        );
+        check_str_field(
+            "CASTOR_OPENALEX_API_KEY",
+            "openalex_api_key",
+            "env-oa",
+            "file-oa",
+            |l| {
+                (
+                    l.config.openalex_api_key.clone(),
+                    l.sources.openalex_api_key,
+                )
+            },
         );
     }
 
