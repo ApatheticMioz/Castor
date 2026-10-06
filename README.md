@@ -50,7 +50,7 @@ Castor exposes three stdio-pure MCP tools to any client:
 - **In-Process Microkernel & AST Surgery**: File operations and structural AST replacements (native `ast-grep`) execute in-process (<0.1 ms dispatch) without subprocess overhead.
 - **In-Memory Syntax Gates**: Pre-validates modifications in-memory (TypeScript, JavaScript, Python, JSON) before committing to disk, preventing corrupted files.
 - **Dual Multimodal Vision Authority**: Cloud orchestrators (Gemini 3.8 Flash) and local Qwen both support image inputs. Vision-tower CPU offload retains the complete 268K+ KV cache in GPU VRAM.
-- **Multi-Provider Web Research**: Native `web_search` and `web_fetch` routing across SearXNG, Brave Search, and DuckDuckGo with HTML-to-markdown extraction.
+- **Multi-Provider Web & Academic Research**: Native `web_search` (with SearXNG category routing across general, science, IT), `web_fetch` (with HTML markdown and native in-memory PDF extraction with pagination), and verified OpenAlex `paper_lookup` for zero-hallucination bibliographic grounding.
 - **Automated State Pruning (`castor clean`)**: Automatic retention policy over `~/.castor/` (14-day max age, 200-session count, 50MB ceiling, `.tmp_*` cleanup) with active session immunity and 24-hour startup throttling.
 - **Cooperative Landing**: Dispatches reaching their turn budget conclude gracefully with mandatory deliverable synthesis under `completed_budget_exhausted` instead of arbitrary process kills.
 

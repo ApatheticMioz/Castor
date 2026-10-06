@@ -39,6 +39,9 @@ humantime = "2.1"
 scraper = "0.24"
 path-clean = "1.0"
 infer = "0.16"
+# Pure-Rust PDF parsing (no C bindings). 0.42+ carries the RUSTSEC-2026-0187
+# recursion-depth fix. Default features disabled to keep the dep lightweight.
+lopdf = { version = "0.42", default-features = false }
 
 [target.'cfg(target_os = "linux")'.dependencies]
 # Kernel-level filesystem confinement for the sandboxed shell child (Issue #6).

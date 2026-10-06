@@ -7,6 +7,7 @@
 pub mod ast;
 pub mod extensions;
 pub mod fs;
+pub mod paper;
 pub mod sandbox;
 pub mod shell;
 pub mod web;
@@ -19,6 +20,7 @@ use serde_json::{Value, json};
 
 use self::extensions::ExtensionBridge;
 use self::fs::FsExecutor;
+use self::paper::PaperClient;
 use self::web::WebClient;
 use crate::engine::ToolSchema;
 use crate::runner::{ToolError, ToolExecutor, ToolOutcome};
@@ -28,6 +30,7 @@ pub struct CompositeExecutor {
     workspace_root: PathBuf,
     fs: FsExecutor,
     web: WebClient,
+    paper: PaperClient,
     brave_api_key: Option<String>,
     extensions: Option<ExtensionBridge>,
 }
@@ -59,6 +62,7 @@ impl CompositeExecutor {
             fs,
             workspace_root: root,
             web,
+            paper: PaperClient::new(),
             brave_api_key,
             extensions,
         })
@@ -67,6 +71,12 @@ impl CompositeExecutor {
     /// Set an explicit WebClient (useful for testing with mock base URLs).
     pub fn with_web_client(mut self, web: WebClient) -> Self {
         self.web = web;
+        self
+    }
+
+    /// Set an explicit PaperClient (useful for testing with mock base URLs).
+    pub fn with_paper_client(mut self, paper: PaperClient) -> Self {
+        self.paper = paper;
         self
     }
 
@@ -188,25 +198,39 @@ pub fn builtin_tool_schemas() -> Vec<ToolSchema> {
         },
         ToolSchema {
             name: "web_search".to_string(),
-            description: "Search the web using SearXNG with Brave and DuckDuckGo fallbacks.".to_string(),
+            description: "Search the web using SearXNG with Brave and DuckDuckGo fallbacks. Supports category routing (e.g. 'general', 'science', 'it').".to_string(),
             parameters: json!({
                 "type": "object",
                 "properties": {
                     "query": { "type": "string", "description": "Search query" },
-                    "num_results": { "type": "integer", "description": "Number of results to return (default: 10)" }
+                    "num_results": { "type": "integer", "description": "Number of results to return (default: 10)" },
+                    "category": { "type": "string", "description": "Optional search category: 'general', 'science', 'it' (routes to specialized engines like arXiv/Crossref/DBLP in SearXNG)" }
                 },
                 "required": ["query"]
             }),
         },
         ToolSchema {
             name: "web_fetch".to_string(),
-            description: "Fetch a web page or document and extract clean readable markdown.".to_string(),
+            description: "Fetch a web page or document (HTML, Markdown, plain text, or PDF) and extract clean readable text. For PDFs, extracts text with pagination support.".to_string(),
             parameters: json!({
                 "type": "object",
                 "properties": {
-                    "url": { "type": "string", "description": "URL to fetch" }
+                    "url": { "type": "string", "description": "URL of the page or PDF to fetch" },
+                    "pages": { "type": "string", "description": "Optional page range for PDF documents (e.g. '1-3', 'all', '5'). Defaults to first 3 pages." }
                 },
                 "required": ["url"]
+            }),
+        },
+        ToolSchema {
+            name: "paper_lookup".to_string(),
+            description: "Search and retrieve verified academic paper metadata (canonical title, year, venue, DOI, author institutional affiliations, abstract, and direct open-access PDF URLs) from OpenAlex.".to_string(),
+            parameters: json!({
+                "type": "object",
+                "properties": {
+                    "query": { "type": "string", "description": "Paper title, keyword, DOI (e.g. '10.1109/...'), or OpenAlex work ID" },
+                    "num_results": { "type": "integer", "description": "Number of results to return (default: 3, max: 10)" }
+                },
+                "required": ["query"]
             }),
         },
     ]
@@ -328,9 +352,10 @@ impl ToolExecutor for CompositeExecutor {
                     .get("num_results")
                     .and_then(|v| v.as_u64())
                     .unwrap_or(10) as usize;
+                let category = args.get("category").and_then(|v| v.as_str());
                 match self
                     .web
-                    .web_search(query, self.brave_api_key.as_deref())
+                    .web_search(query, self.brave_api_key.as_deref(), category)
                     .await
                 {
                     Ok(outcome) => {
@@ -362,8 +387,40 @@ impl ToolExecutor for CompositeExecutor {
 
             "web_fetch" => {
                 let url = args.get("url").and_then(|v| v.as_str()).unwrap_or("");
-                match self.web.fetch_docs(url).await {
+                let page_range = args
+                    .get("pages")
+                    .or_else(|| args.get("page_range"))
+                    .and_then(|v| v.as_str());
+                match self.web.fetch_docs(url, page_range).await {
                     Ok(res) => Ok(ToolOutcome { text: res.markdown }),
+                    Err(e) => Ok(ToolOutcome {
+                        text: format!("Error: {e}"),
+                    }),
+                }
+            }
+
+            "paper_lookup" => {
+                let query = args.get("query").and_then(|v| v.as_str()).unwrap_or("");
+                let limit = args
+                    .get("num_results")
+                    .and_then(|v| v.as_u64())
+                    .unwrap_or(3) as usize;
+                match self.paper.lookup(query, limit).await {
+                    Ok(papers) => {
+                        if papers.is_empty() {
+                            Ok(ToolOutcome {
+                                text: "No academic papers found matching query.".to_string(),
+                            })
+                        } else {
+                            let formatted = papers
+                                .iter()
+                                .enumerate()
+                                .map(|(i, p)| format!("{}. {}", i + 1, p.format_display()))
+                                .collect::<Vec<_>>()
+                                .join("\n\n---\n\n");
+                            Ok(ToolOutcome { text: formatted })
+                        }
+                    }
                     Err(e) => Ok(ToolOutcome {
                         text: format!("Error: {e}"),
                     }),
@@ -415,12 +472,13 @@ mod tests {
 
         // Check schemas list
         let schemas = executor.tool_schemas();
-        assert_eq!(schemas.len(), 10);
+        assert_eq!(schemas.len(), 11);
         let names: Vec<&str> = schemas.iter().map(|s| s.name.as_str()).collect();
         assert!(names.contains(&"read_file"));
         assert!(names.contains(&"bash"));
         assert!(names.contains(&"ast_search"));
         assert!(names.contains(&"web_search"));
+        assert!(names.contains(&"paper_lookup"));
 
         // Write a file
         let write_res = executor

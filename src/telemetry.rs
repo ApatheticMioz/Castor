@@ -545,10 +545,17 @@ pub fn derive_stats(state_dir: &Path, opts: &StatsOptions) -> Stats {
     let kwh = (hours * 0.30 * 100.0).round() / 100.0;
     stats.estimated_energy_kwh = kwh;
     stats.estimated_electricity_cost_usd = ((kwh * 0.16) * 100.0).round() / 100.0;
-    stats.net_savings_usd = ((stats.estimated_cost_saved_usd - stats.estimated_electricity_cost_usd).max(0.0) * 100.0).round() / 100.0;
+    stats.net_savings_usd =
+        ((stats.estimated_cost_saved_usd - stats.estimated_electricity_cost_usd).max(0.0) * 100.0)
+            .round()
+            / 100.0;
 
     stats.reasoning_ratio = if stats.total_completion_tokens > 0 {
-        Some(((stats.total_reasoning_tokens as f64 / stats.total_completion_tokens as f64) * 100.0).round() / 100.0)
+        Some(
+            ((stats.total_reasoning_tokens as f64 / stats.total_completion_tokens as f64) * 100.0)
+                .round()
+                / 100.0,
+        )
     } else {
         None
     };
@@ -824,7 +831,10 @@ pub fn format_stats_card_styled(stats: &Stats, color: bool) -> String {
     }
     out.push('\n');
 
-    out.push_str(&format!("{}TOKEN EFFICIENCY & DYNAMICS{}\n", p.bold, p.reset));
+    out.push_str(&format!(
+        "{}TOKEN EFFICIENCY & DYNAMICS{}\n",
+        p.bold, p.reset
+    ));
     let total_tokens = stats.total_prompt_tokens + stats.total_completion_tokens;
     out.push_str(&format!(
         "  Total Processed        {:>10}\n",
@@ -835,7 +845,8 @@ pub fn format_stats_card_styled(stats: &Stats, color: bool) -> String {
         fmt_scaled(stats.total_prompt_tokens)
     ));
     if stats.total_cached_tokens > 0 {
-        let hit_rate = (stats.total_cached_tokens as f64 / stats.total_prompt_tokens.max(1) as f64) * 100.0;
+        let hit_rate =
+            (stats.total_cached_tokens as f64 / stats.total_prompt_tokens.max(1) as f64) * 100.0;
         out.push_str(&format!(
             "  Cached Tokens          {:>10}  {}{:.1}% cache hit{}\n",
             fmt_scaled(stats.total_cached_tokens),
@@ -849,7 +860,9 @@ pub fn format_stats_card_styled(stats: &Stats, color: bool) -> String {
         fmt_scaled(stats.total_completion_tokens)
     ));
     if stats.total_reasoning_tokens > 0 {
-        let r_pct = (stats.total_reasoning_tokens as f64 / (stats.total_completion_tokens + stats.total_reasoning_tokens).max(1) as f64) * 100.0;
+        let r_pct = (stats.total_reasoning_tokens as f64
+            / (stats.total_completion_tokens + stats.total_reasoning_tokens).max(1) as f64)
+            * 100.0;
         out.push_str(&format!(
             "  Reasoning Tokens       {:>10}  {}{:.1}% of generation{}\n",
             fmt_scaled(stats.total_reasoning_tokens),
@@ -861,17 +874,13 @@ pub fn format_stats_card_styled(stats: &Stats, color: bool) -> String {
     if let Some(r) = stats.reasoning_ratio {
         out.push_str(&format!(
             "  Reasoning Ratio        {:>9.2}x  {}deliberation / output{}\n",
-            r,
-            p.dim,
-            p.reset
+            r, p.dim, p.reset
         ));
     }
     if let Some(r) = stats.edit_write_ratio {
         out.push_str(&format!(
             "  Surgical Edit Ratio    {:>9.2}x  {}edits / writes{}\n",
-            r,
-            p.dim,
-            p.reset
+            r, p.dim, p.reset
         ));
     }
     out.push('\n');
@@ -935,7 +944,10 @@ pub fn format_stats_card_styled(stats: &Stats, color: bool) -> String {
     }
 
     if !stats.tool_calls.is_empty() {
-        out.push_str(&format!("{}TOOL RELIABILITY & DISTRIBUTION{}\n", p.bold, p.reset));
+        out.push_str(&format!(
+            "{}TOOL RELIABILITY & DISTRIBUTION{}\n",
+            p.bold, p.reset
+        ));
         out.push_str(&format!(
             "  {}{:<22} {:>8} {:>7}  {:<16} {:>8} {:>9}{}\n",
             p.dim, "TOOL", "CALLS", "SHARE", "DISTRIBUTION", "ERRORS", "ERR RATE", p.reset
@@ -944,7 +956,11 @@ pub fn format_stats_card_styled(stats: &Stats, color: bool) -> String {
         sorted_tools.sort_by(|a, b| b.1.cmp(a.1).then_with(|| a.0.cmp(b.0)));
         let max_calls = sorted_tools.first().map(|(_, c)| **c).unwrap_or(1);
 
-        let threshold = if sorted_tools.len() > 8 { 8 } else { sorted_tools.len() };
+        let threshold = if sorted_tools.len() > 8 {
+            8
+        } else {
+            sorted_tools.len()
+        };
         let (head, tail) = sorted_tools.split_at(threshold);
 
         for &(ref name, &count) in head {

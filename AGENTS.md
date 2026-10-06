@@ -172,6 +172,7 @@ src/
     shell.rs             # Safe bash executor and command AST validator
     ast.rs               # Structural AST search and replace via native ast-grep
     web.rs               # Web search (SearXNG -> Brave -> DDG) and fetch (markdown conversion)
+    paper.rs             # Academic paper lookup via OpenAlex (metadata, affiliations, OA PDFs)
     extensions.rs        # MCP extension bridges (rmcp child processes)
   evo/
     mod.rs               # Offline evolutionary optimizer subsystem

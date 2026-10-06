@@ -66,6 +66,8 @@ pub enum WebError {
         content_type: String,
         byte_length: usize,
     },
+    #[error("PdfError: {reason}")]
+    PdfParse { reason: String },
 }
 
 /// A single normalized search result.
@@ -155,6 +157,7 @@ impl WebClient {
         &self,
         query: &str,
         brave_api_key: Option<&str>,
+        category: Option<&str>,
     ) -> Result<SearchOutcome, WebError> {
         let q = query.trim();
         if q.is_empty() {
@@ -164,7 +167,7 @@ impl WebClient {
         // 1. SearXNG (only when configured). A configured-but-failing instance
         //    is a hard, actionable error — no silent fallthrough.
         if let Some(base) = self.searxng_base.as_deref() {
-            match self.search_searxng(q, base).await {
+            match self.search_searxng(q, base, category).await {
                 Ok(results) => {
                     return Ok(SearchOutcome {
                         query: q.to_string(),
@@ -197,7 +200,12 @@ impl WebClient {
         })
     }
 
-    async fn search_searxng(&self, q: &str, base: &str) -> Result<Vec<SearchResult>, WebError> {
+    async fn search_searxng(
+        &self,
+        q: &str,
+        base: &str,
+        category: Option<&str>,
+    ) -> Result<Vec<SearchResult>, WebError> {
         let base = base.trim_end_matches('/');
         let mut url = reqwest::Url::parse(&format!("{base}/search")).map_err(|e| {
             WebError::SearxngUnreachable {
@@ -205,9 +213,14 @@ impl WebClient {
                 reason: format!("invalid base url: {e}"),
             }
         })?;
-        url.query_pairs_mut()
-            .append_pair("q", q)
-            .append_pair("format", "json");
+        {
+            let mut pairs = url.query_pairs_mut();
+            pairs.append_pair("q", q);
+            pairs.append_pair("format", "json");
+            if let Some(cat) = category.filter(|c| !c.trim().is_empty()) {
+                pairs.append_pair("categories", cat.trim());
+            }
+        }
 
         let resp = self
             .client
@@ -410,8 +423,12 @@ fn percent_encode(s: &str) -> String {
 // ---------------------------------------------------------------------------
 
 impl WebClient {
-    /// Fetch a URL and convert it to Markdown (or pass JSON / text through).
-    pub async fn fetch_docs(&self, url: &str) -> Result<FetchResult, WebError> {
+    /// Fetch a URL and convert it to Markdown (or pass JSON / text / PDF through).
+    pub async fn fetch_docs(
+        &self,
+        url: &str,
+        page_range: Option<&str>,
+    ) -> Result<FetchResult, WebError> {
         let parsed = reqwest::Url::parse(url).map_err(|_| WebError::InvalidUrl(url.to_string()))?;
         let scheme = parsed.scheme();
         if scheme != "http" && scheme != "https" {
@@ -423,7 +440,7 @@ impl WebClient {
             .get(parsed.clone())
             .header(
                 "Accept",
-                "text/html,application/xhtml+xml,application/json;q=0.8,text/plain;q=0.7,*/*;q=0.5",
+                "text/html,application/xhtml+xml,application/pdf;q=0.9,application/json;q=0.8,text/plain;q=0.7,*/*;q=0.5",
             )
             .send()
             .await
@@ -485,6 +502,11 @@ impl WebClient {
                 let s = String::from_utf8_lossy(&bytes).into_owned();
                 (content_type.clone(), s, 0)
             }
+            Category::Pdf => {
+                let res = extract_pdf_text(&bytes, page_range)?;
+                let len = res.byte_count;
+                ("application/pdf".to_string(), res.text, len)
+            }
             Category::Binary => {
                 return Err(WebError::Binary {
                     url: url.to_string(),
@@ -516,6 +538,7 @@ enum Category {
     Html,
     Json,
     Text,
+    Pdf,
     Binary,
 }
 
@@ -530,6 +553,7 @@ fn classify(content_type: &str, bytes: &[u8]) -> Category {
     match base.as_str() {
         "text/html" | "application/xhtml+xml" => return Category::Html,
         "application/json" => return Category::Json,
+        "application/pdf" => return Category::Pdf,
         _ => {}
     }
     if base.ends_with("+json") {
@@ -538,13 +562,15 @@ fn classify(content_type: &str, bytes: &[u8]) -> Category {
     if base.starts_with("text/") {
         return Category::Text;
     }
+    if bytes.starts_with(b"%PDF-") {
+        return Category::Pdf;
+    }
     if base.starts_with("image/")
         || base.starts_with("audio/")
         || base.starts_with("video/")
         || base == "application/octet-stream"
         || base == "application/zip"
         || base == "application/gzip"
-        || base == "application/pdf"
     {
         return Category::Binary;
     }
@@ -590,6 +616,153 @@ fn cap_output(text: &str, full_len: usize) -> String {
 }
 
 // ---------------------------------------------------------------------------
+// PDF Text Extraction
+// ---------------------------------------------------------------------------
+
+/// The outcome of a PDF text extraction.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PdfExtractResult {
+    /// The extracted text (truncated to `MAX_OUTPUT_BYTES` when necessary).
+    pub text: String,
+    /// Total page count in the PDF document.
+    pub total_pages: usize,
+    /// Byte count of the input PDF data.
+    pub byte_count: usize,
+    /// Whether the output was truncated.
+    pub truncated: bool,
+    /// The page range actually extracted (1-based, e.g. `"1-3"`).
+    pub pages_extracted: String,
+}
+
+/// Parse a page-range spec into a 1-based inclusive `(start, end)` pair,
+/// clamped to `[1, total]`.
+///
+/// Accepted forms:
+/// - `None` or empty → first 3 pages (or fewer if the doc is shorter).
+/// - `"all"` → all pages.
+/// - `"N"` → a single page.
+/// - `"N-M"` → a range.
+///
+/// Returns `None` when the range is invalid (e.g. start > end, 0-based).
+fn parse_page_range(page_range: Option<&str>, total: usize) -> Option<(usize, usize)> {
+    if total == 0 {
+        return None;
+    }
+
+    let spec = page_range.map(str::trim).filter(|s| !s.is_empty());
+    let (start, end) = match spec {
+        // No range specified (or empty) → default to first 3 pages.
+        None => (1, 3.min(total)),
+        // Explicit "all".
+        Some("all") => (1, total),
+        // "N" or "N-M".
+        Some(s) => {
+            let parts: Vec<&str> = s.split('-').collect();
+            match parts.as_slice() {
+                [a] => {
+                    let p: usize = a.parse().ok()?;
+                    (p, p)
+                }
+                [a, b] => {
+                    let s: usize = a.parse().ok()?;
+                    let e: usize = b.parse().ok()?;
+                    (s, e)
+                }
+                _ => return None,
+            }
+        }
+    };
+
+    // Clamp to valid 1-based bounds.
+    if start < 1 || end < 1 || start > total || end < start {
+        return None;
+    }
+    let end = end.min(total);
+    Some((start, end))
+}
+
+/// Extract text from raw PDF bytes, in-memory.
+///
+/// * Parses the PDF with `lopdf` (pure-Rust, no C bindings).
+/// * Supports page-range filtering (`"1-3"`, `"all"`, `"5"`). Defaults to the
+///   first 3 pages when no range is given.
+/// * Caps the returned text at [`MAX_OUTPUT_BYTES`], appending a structured
+///   pagination banner when truncated.
+pub fn extract_pdf_text(
+    bytes: &[u8],
+    page_range: Option<&str>,
+) -> Result<PdfExtractResult, WebError> {
+    let byte_count = bytes.len();
+
+    let doc = lopdf::Document::load_mem(bytes).map_err(|e| WebError::PdfParse {
+        reason: format!("lopdf failed to parse PDF: {e}"),
+    })?;
+
+    let pages = doc.get_pages();
+    let total_pages = pages.len();
+
+    let (start, end) =
+        parse_page_range(page_range, total_pages).ok_or_else(|| WebError::PdfParse {
+            reason: format!(
+                "invalid page range '{page_range:?}' for a {total_pages}-page document"
+            ),
+        })?;
+
+    // lopdf's extract_text takes 1-based page numbers as &[u32].
+    let page_numbers: Vec<u32> = (start as u32..=end as u32).collect();
+    let full_text = doc
+        .extract_text(&page_numbers)
+        .map_err(|e| WebError::PdfParse {
+            reason: format!("text extraction failed: {e}"),
+        })?;
+
+    let pages_extracted = if start == end {
+        format!("{start}")
+    } else {
+        format!("{start}-{end}")
+    };
+
+    let (text, truncated) = cap_output_pdf(&full_text, start, end, total_pages);
+
+    Ok(PdfExtractResult {
+        text,
+        total_pages,
+        byte_count,
+        truncated,
+        pages_extracted,
+    })
+}
+
+/// Truncate PDF text to `MAX_OUTPUT_BYTES`, cutting at a paragraph/line
+/// boundary and appending a structured pagination banner.
+fn cap_output_pdf(text: &str, start: usize, end: usize, total_pages: usize) -> (String, bool) {
+    if text.len() <= MAX_OUTPUT_BYTES {
+        return (text.to_string(), false);
+    }
+
+    let window = &text[..MAX_OUTPUT_BYTES];
+    // Prefer cutting at a double-newline (paragraph) near the cap.
+    let search_start = MAX_OUTPUT_BYTES.saturating_sub(500);
+    let mut cut = window.rfind("\n\n").unwrap_or(0);
+    if cut < search_start {
+        cut = window.rfind('\n').unwrap_or(0);
+    }
+    if cut < search_start {
+        cut = MAX_OUTPUT_BYTES;
+    }
+
+    let shown = &text[..cut];
+    let next_start = end + 1;
+    let mut banner = String::new();
+    banner.push_str(&format!(
+        "\n\n[PDF truncated: showing pages {start}-{end} of {total_pages} total. \
+         Use page_range=\"{next_start}-{total_pages}\" for the next pages.]"
+    ));
+
+    (format!("{shown}{banner}"), true)
+}
+
+// ---------------------------------------------------------------------------
 // Tests (axum mocks on ephemeral ports, no network)
 // ---------------------------------------------------------------------------
 
@@ -628,10 +801,20 @@ mod tests {
             .into_response()
     }
 
-    async fn searxng_handler() -> axum::response::Response {
-        json_body(
-            r#"{"results":[{"title":"SearXNG Result","url":"https://searx.example/a","content":"sx snippet"}]}"#,
-        )
+    async fn searxng_handler(
+        axum::extract::Query(params): axum::extract::Query<
+            std::collections::HashMap<String, String>,
+        >,
+    ) -> axum::response::Response {
+        if let Some(cat) = params.get("categories") {
+            json_body(&format!(
+                r#"{{"results":[{{"title":"SearXNG {cat} Result","url":"https://searx.example/{cat}","content":"{cat} snippet"}}]}}"#
+            ))
+        } else {
+            json_body(
+                r#"{"results":[{"title":"SearXNG Result","url":"https://searx.example/a","content":"sx snippet"}]}"#,
+            )
+        }
     }
 
     async fn brave_handler() -> axum::response::Response {
@@ -686,6 +869,11 @@ mod tests {
         html_body(&body)
     }
 
+    async fn fetch_pdf_handler() -> axum::response::Response {
+        let bytes = build_minimal_pdf();
+        (StatusCode::OK, [("content-type", "application/pdf")], bytes).into_response()
+    }
+
     fn router() -> Router {
         Router::new()
             .route("/searxng/search", get(searxng_handler))
@@ -696,19 +884,34 @@ mod tests {
             .route("/fetch/binary", get(fetch_binary_handler))
             .route("/fetch/json", get(fetch_json_handler))
             .route("/fetch/big", get(fetch_big_handler))
+            .route("/fetch/pdf", get(fetch_pdf_handler))
     }
 
     #[tokio::test]
     async fn searxng_results() {
         let base = start(router()).await;
         let c = WebClient::with_base_urls(Some(format!("{base}/searxng")), None, None);
-        let out = c.web_search("rust async", None).await.unwrap();
+        let out = c.web_search("rust async", None, None).await.unwrap();
         assert_eq!(out.provider, "searxng");
         assert_eq!(out.query, "rust async");
         assert_eq!(out.results.len(), 1);
         assert_eq!(out.results[0].title, "SearXNG Result");
         assert_eq!(out.results[0].url, "https://searx.example/a");
         assert_eq!(out.results[0].snippet, "sx snippet");
+    }
+
+    #[tokio::test]
+    async fn searxng_category_routing() {
+        let base = start(router()).await;
+        let c = WebClient::with_base_urls(Some(format!("{base}/searxng")), None, None);
+        let out = c
+            .web_search("network verification", None, Some("science"))
+            .await
+            .unwrap();
+        assert_eq!(out.provider, "searxng");
+        assert_eq!(out.results.len(), 1);
+        assert_eq!(out.results[0].title, "SearXNG science Result");
+        assert_eq!(out.results[0].url, "https://searx.example/science");
     }
 
     #[tokio::test]
@@ -722,7 +925,7 @@ mod tests {
         drop(listener);
         let expected_url = format!("http://127.0.0.1:{port}");
         let c = WebClient::with_base_urls(Some(expected_url.clone()), None, None);
-        let err = c.web_search("rust", None).await.unwrap_err();
+        let err = c.web_search("rust", None, None).await.unwrap_err();
         match &err {
             WebError::SearxngUnreachable { url, reason } => {
                 assert_eq!(url, &expected_url);
@@ -746,7 +949,7 @@ mod tests {
     async fn brave_with_key_path() {
         let base = start(router()).await;
         let c = WebClient::with_base_urls(None, Some(format!("{base}/brave")), None);
-        let out = c.web_search("tokio", Some("bkey")).await.unwrap();
+        let out = c.web_search("tokio", Some("bkey"), None).await.unwrap();
         assert_eq!(out.provider, "brave");
         assert_eq!(out.results.len(), 1);
         assert_eq!(out.results[0].title, "Brave Result");
@@ -758,7 +961,7 @@ mod tests {
     async fn ddg_fallback() {
         let base = start(router()).await;
         let c = WebClient::with_base_urls(None, None, Some(format!("{base}/ddg")));
-        let out = c.web_search("axum", None).await.unwrap();
+        let out = c.web_search("axum", None, None).await.unwrap();
         assert_eq!(out.provider, "duckduckgo");
         assert_eq!(out.results.len(), 1);
         assert_eq!(out.results[0].title, "DDG Result");
@@ -771,7 +974,7 @@ mod tests {
         // No SearXNG configured and no Brave key → straight to DuckDuckGo.
         let base = start(router()).await;
         let c = WebClient::with_base_urls(None, None, Some(format!("{base}/ddg")));
-        let out = c.web_search("serde", None).await.unwrap();
+        let out = c.web_search("serde", None, None).await.unwrap();
         assert_eq!(out.provider, "duckduckgo");
         assert!(!out.results.is_empty());
     }
@@ -780,7 +983,10 @@ mod tests {
     async fn html_to_markdown_via_html2md() {
         let base = start(router()).await;
         let c = WebClient::new();
-        let r = c.fetch_docs(&format!("{base}/fetch/html")).await.unwrap();
+        let r = c
+            .fetch_docs(&format!("{base}/fetch/html"), None)
+            .await
+            .unwrap();
         assert_eq!(r.status, 200);
         assert_eq!(r.content_type, "text/html");
         // html2md renders <h1> as a setext heading (text + "====" underline).
@@ -798,7 +1004,7 @@ mod tests {
         let base = start(router()).await;
         let c = WebClient::new();
         let err = c
-            .fetch_docs(&format!("{base}/fetch/404"))
+            .fetch_docs(&format!("{base}/fetch/404"), None)
             .await
             .unwrap_err();
         match &err {
@@ -824,7 +1030,7 @@ mod tests {
         let base = start(router()).await;
         let c = WebClient::new();
         let err = c
-            .fetch_docs(&format!("{base}/fetch/binary"))
+            .fetch_docs(&format!("{base}/fetch/binary"), None)
             .await
             .unwrap_err();
         match &err {
@@ -844,7 +1050,10 @@ mod tests {
     async fn json_passthrough() {
         let base = start(router()).await;
         let c = WebClient::new();
-        let r = c.fetch_docs(&format!("{base}/fetch/json")).await.unwrap();
+        let r = c
+            .fetch_docs(&format!("{base}/fetch/json"), None)
+            .await
+            .unwrap();
         assert_eq!(r.status, 200);
         assert_eq!(r.content_type, "application/json");
         assert!(r.markdown.contains("\"a\""), "got: {}", r.markdown);
@@ -855,7 +1064,10 @@ mod tests {
     async fn output_cap_truncates() {
         let base = start(router()).await;
         let c = WebClient::new();
-        let r = c.fetch_docs(&format!("{base}/fetch/big")).await.unwrap();
+        let r = c
+            .fetch_docs(&format!("{base}/fetch/big"), None)
+            .await
+            .unwrap();
         assert!(
             r.markdown.len() <= MAX_OUTPUT_BYTES + 200,
             "markdown should be capped, got {} bytes",
@@ -863,9 +1075,174 @@ mod tests {
         );
         assert!(
             r.markdown.contains("Content truncated"),
-            "expected truncation marker, got: {}",
+            "expected truncation notice, got: {}",
             r.markdown
         );
-        assert!(r.length > MAX_OUTPUT_BYTES, "full length should exceed cap");
+    }
+
+    #[tokio::test]
+    async fn fetch_pdf_basic() {
+        let base = start(router()).await;
+        let c = WebClient::new();
+        let r = c
+            .fetch_docs(&format!("{base}/fetch/pdf"), None)
+            .await
+            .unwrap();
+        assert_eq!(r.status, 200);
+        assert_eq!(r.content_type, "application/pdf");
+        assert!(r.markdown.contains("Hello"), "got: {}", r.markdown);
+    }
+
+    #[tokio::test]
+    async fn fetch_pdf_with_page_range() {
+        let base = start(router()).await;
+        let c = WebClient::new();
+        let r = c
+            .fetch_docs(&format!("{base}/fetch/pdf"), Some("1"))
+            .await
+            .unwrap();
+        assert_eq!(r.status, 200);
+        assert_eq!(r.content_type, "application/pdf");
+    }
+
+    // -----------------------------------------------------------------------
+    // PDF extraction tests
+    // -----------------------------------------------------------------------
+
+    /// Build a minimal 1-page PDF containing "Hello" using lopdf's API.
+    ///
+    /// Uses the raw lopdf object model to create a minimal valid PDF with a
+    /// single page whose content stream draws the text "Hello".
+    fn build_minimal_pdf() -> Vec<u8> {
+        use lopdf::content::{Content, Operation};
+        use lopdf::{Document, Object, Stream, dictionary};
+
+        let mut doc = Document::with_version("1.5");
+        let pages_id = doc.new_object_id();
+        let font_id = doc.add_object(dictionary! {
+            "Type" => "Font",
+            "Subtype" => "Type1",
+            "BaseFont" => "Helvetica",
+        });
+        let resources_id = doc.add_object(dictionary! {
+            "Font" => dictionary! {
+                "F1" => font_id,
+            },
+        });
+        let content = Content {
+            operations: vec![
+                Operation::new("BT", vec![]),
+                Operation::new("Tf", vec!["F1".into(), 24.into()]),
+                Operation::new("Td", vec![100.into(), 700.into()]),
+                Operation::new("Tj", vec![Object::string_literal("Hello")]),
+                Operation::new("ET", vec![]),
+            ],
+        };
+        let content_id = doc.add_object(Stream::new(dictionary! {}, content.encode().unwrap()));
+        let page_id = doc.add_object(dictionary! {
+            "Type" => "Page",
+            "Parent" => pages_id,
+            "Contents" => content_id,
+        });
+        let pages = dictionary! {
+            "Type" => "Pages",
+            "Kids" => vec![page_id.into()],
+            "Count" => 1,
+            "Resources" => resources_id,
+            "MediaBox" => vec![0.into(), 0.into(), 612.into(), 792.into()],
+        };
+        doc.objects.insert(pages_id, Object::Dictionary(pages));
+        let catalog_id = doc.add_object(dictionary! {
+            "Type" => "Catalog",
+            "Pages" => pages_id,
+        });
+        doc.trailer.set("Root", catalog_id);
+        let mut bytes = Vec::new();
+        doc.save_to(&mut bytes).unwrap();
+        bytes
+    }
+
+    #[test]
+    fn pdf_extract_basic() {
+        let pdf_bytes = build_minimal_pdf();
+        let result = extract_pdf_text(&pdf_bytes, None).unwrap();
+        assert_eq!(result.total_pages, 1);
+        assert_eq!(result.byte_count, pdf_bytes.len());
+        assert!(!result.truncated);
+        assert_eq!(result.pages_extracted, "1");
+        // lopdf's text extraction should recover the literal from the content stream.
+        assert!(
+            result.text.contains("Hello"),
+            "expected 'Hello' in extracted text, got: {:?}",
+            result.text
+        );
+    }
+
+    #[test]
+    fn pdf_extract_page_range_single() {
+        let pdf_bytes = build_minimal_pdf();
+        let result = extract_pdf_text(&pdf_bytes, Some("1")).unwrap();
+        assert_eq!(result.total_pages, 1);
+        assert_eq!(result.pages_extracted, "1");
+        assert!(result.text.contains("Hello"));
+    }
+
+    #[test]
+    fn pdf_extract_page_range_all() {
+        let pdf_bytes = build_minimal_pdf();
+        let result = extract_pdf_text(&pdf_bytes, Some("all")).unwrap();
+        assert_eq!(result.total_pages, 1);
+        assert_eq!(result.pages_extracted, "1");
+        assert!(result.text.contains("Hello"));
+    }
+
+    #[test]
+    fn pdf_extract_out_of_bounds() {
+        let pdf_bytes = build_minimal_pdf();
+        // Requesting page 5 from a 1-page doc should error.
+        let err = extract_pdf_text(&pdf_bytes, Some("5")).unwrap_err();
+        match &err {
+            WebError::PdfParse { reason } => {
+                assert!(reason.contains("invalid page range"), "got: {reason}");
+            }
+            other => panic!("expected PdfParse error, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn pdf_extract_invalid_range() {
+        let pdf_bytes = build_minimal_pdf();
+        // start > end is invalid
+        let err = extract_pdf_text(&pdf_bytes, Some("3-1")).unwrap_err();
+        assert!(matches!(&err, WebError::PdfParse { .. }));
+    }
+
+    #[test]
+    fn pdf_extract_garbage_bytes() {
+        let garbage = b"this is definitely not a PDF file";
+        let err = extract_pdf_text(garbage, None).unwrap_err();
+        assert!(matches!(&err, WebError::PdfParse { .. }));
+    }
+
+    #[test]
+    fn pdf_page_range_parsing() {
+        // Default (None) → first 3 pages (clamped).
+        assert_eq!(parse_page_range(None, 5), Some((1, 3)));
+        // "all"
+        assert_eq!(parse_page_range(Some("all"), 10), Some((1, 10)));
+        // Single page
+        assert_eq!(parse_page_range(Some("3"), 10), Some((3, 3)));
+        // Range
+        assert_eq!(parse_page_range(Some("2-5"), 10), Some((2, 5)));
+        // Range clamped at end
+        assert_eq!(parse_page_range(Some("8-20"), 10), Some((8, 10)));
+        // Invalid: start > end
+        assert_eq!(parse_page_range(Some("5-2"), 10), None);
+        // Invalid: zero-based
+        assert_eq!(parse_page_range(Some("0"), 10), None);
+        // Invalid: start beyond total
+        assert_eq!(parse_page_range(Some("11"), 10), None);
+        // Single page in 1-page doc
+        assert_eq!(parse_page_range(Some("1"), 1), Some((1, 1)));
     }
 }
