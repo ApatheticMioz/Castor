@@ -34,7 +34,7 @@ pub const TOOL_BASE_NAMES: [&str; 3] = [TOOL_COWORKER, TOOL_TASK, TOOL_SERVER];
 /// Input schema for the `coworker` tool.
 #[derive(Debug, Clone, Deserialize, JsonSchema)]
 pub struct CoworkerParams {
-    /// Task, inquiry, or architectural instruction (pure text-only).
+    /// Task, inquiry, or architectural instruction (supports code, diagnostics, and image inspection via read_file).
     pub prompt: String,
     /// Working directory for filesystem and shell tools (defaults to current workspace).
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -57,12 +57,6 @@ pub struct CoworkerParams {
     /// Task timeout in ms.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub timeout_ms: Option<u64>,
-    /// (Deprecated) Kept for schema/backward compatibility. The static length
-    /// ceiling this once bypassed has been replaced by the DGI Gatekeeper
-    /// (`mcp::dgi`), which rejects on calibrated monolith signatures rather
-    /// than raw length; the field no longer gates dispatch.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub allow_large_prompt: Option<bool>,
 }
 
 /// Input schema for the `task` tool.

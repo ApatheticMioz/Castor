@@ -55,6 +55,15 @@ pub struct FsExecutor {
     policy: SandboxPolicy,
 }
 
+struct WalkContext<'a> {
+    base: &'a Path,
+    max_depth: usize,
+    items: Vec<(String, String)>,
+    partial: bool,
+    truncated: bool,
+    max_items: usize,
+}
+
 impl FsExecutor {
     /// Construct with the tight single-root policy (workspace only). This is
     /// what the eval replay runner uses, where only the workspace may be
@@ -220,6 +229,26 @@ impl FsExecutor {
         ))
     }
 
+fn render_diff_snippet(target: &str, replacement: &str) -> String {
+    let mut diff = String::from("\n```diff\n");
+    let target_lines: Vec<&str> = target.lines().collect();
+    for line in target_lines.iter().take(6) {
+        diff.push_str(&format!("- {line}\n"));
+    }
+    if target_lines.len() > 6 {
+        diff.push_str("  ...\n");
+    }
+    let repl_lines: Vec<&str> = replacement.lines().collect();
+    for line in repl_lines.iter().take(6) {
+        diff.push_str(&format!("+ {line}\n"));
+    }
+    if repl_lines.len() > 6 {
+        diff.push_str("  ...\n");
+    }
+    diff.push_str("```");
+    diff
+}
+
     fn edit_file(
         &self,
         path: &str,
@@ -274,8 +303,9 @@ impl FsExecutor {
         };
 
         self.atomic_write(&resolved, &updated)?;
+        let diff_snippet = Self::render_diff_snippet(&effective_target, &effective_replacement);
         Ok(format!(
-            "Replaced {} occurrence(s) in {}",
+            "Replaced {} occurrence(s) in {}:{diff_snippet}",
             if replace_all { count } else { 1 },
             resolved.display()
         ))
@@ -293,54 +323,59 @@ impl FsExecutor {
             )));
         }
 
-        let mut items: Vec<(String, String)> = Vec::new();
-        let mut partial = false;
-        self.walk(&resolved, &resolved, 1, max_depth, &mut items, &mut partial)?;
+        let mut ctx = WalkContext {
+            base: &resolved,
+            max_depth,
+            items: Vec::new(),
+            partial: false,
+            truncated: false,
+            max_items: 100,
+        };
+        self.walk(&resolved, 1, &mut ctx)?;
 
-        let mut out = format!("{} ({} items):\n", resolved.display(), items.len());
-        for (kind, rel) in &items {
+        let mut out = format!("{} ({} items):\n", resolved.display(), ctx.items.len());
+        for (kind, rel) in &ctx.items {
             out.push_str(&format!("  [{kind}] {rel}\n"));
         }
-        if partial {
+        if ctx.truncated {
+            out.push_str("  ... [list truncated: maximum 100 items reached; specify deeper path or lower max_depth]\n");
+        }
+        if ctx.partial {
             out.push_str("  [partial: some directories were unreadable]\n");
         }
         Ok(out)
     }
 
-    fn walk(
-        &self,
-        base: &Path,
-        current: &Path,
-        depth: usize,
-        max_depth: usize,
-        items: &mut Vec<(String, String)>,
-        partial: &mut bool,
-    ) -> Result<(), FsError> {
-        if depth > max_depth {
+    fn walk(&self, current: &Path, depth: usize, ctx: &mut WalkContext<'_>) -> Result<(), FsError> {
+        if depth > ctx.max_depth || ctx.truncated {
             return Ok(());
         }
         let entries = match fs::read_dir(current) {
             Ok(e) => e,
             Err(_) => {
-                *partial = true;
+                ctx.partial = true;
                 return Ok(());
             }
         };
         for entry in entries {
+            if ctx.items.len() >= ctx.max_items {
+                ctx.truncated = true;
+                break;
+            }
             let entry = entry?;
             let name = entry.file_name().to_string_lossy().to_string();
             if IGNORED_DIRS.contains(&name.as_str()) {
                 continue;
             }
             let full = entry.path();
-            let rel = full.strip_prefix(base).unwrap_or(&full);
+            let rel = full.strip_prefix(ctx.base).unwrap_or(&full);
             let rel_str = rel.to_string_lossy().to_string();
             let ft = entry.file_type()?;
             if ft.is_dir() {
-                items.push(("dir".into(), rel_str));
-                self.walk(base, &full, depth + 1, max_depth, items, partial)?;
+                ctx.items.push(("dir".into(), rel_str));
+                self.walk(&full, depth + 1, ctx)?;
             } else {
-                items.push(("file".into(), rel_str));
+                ctx.items.push(("file".into(), rel_str));
             }
         }
         Ok(())
@@ -446,8 +481,8 @@ impl FsExecutor {
         for m in &matches {
             out.push_str(&format!("  {m}\n"));
         }
-        for s in &skipped {
-            out.push_str(&format!("  [skipped: {s}]\n"));
+        if !skipped.is_empty() {
+            out.push_str(&format!("  ({} binary files skipped)\n", skipped.len()));
         }
         Ok(out)
     }
@@ -863,5 +898,40 @@ mod tests {
         fs::create_dir_all(&img_dir).unwrap();
         let err_dir = ex.read_file("folder.webp", 1, None).unwrap_err();
         assert!(matches!(err_dir, FsError::InvalidArgs(msg) if msg.contains("is a directory")));
+    }
+
+    #[test]
+    fn edit_file_returns_unified_diff() {
+        let root = test_root("edit_diff");
+        let file = root.join("test.rs");
+        fs::write(&file, "fn old_logic() -> bool { true }\n").unwrap();
+        let ex = executor(&root);
+
+        let out = ex
+            .edit_file(
+                "test.rs",
+                "fn old_logic() -> bool { true }",
+                "fn new_logic() -> bool { false }",
+                false,
+            )
+            .unwrap();
+        assert!(out.contains("Replaced 1 occurrence(s)"));
+        assert!(out.contains("```diff"));
+        assert!(out.contains("- fn old_logic() -> bool { true }"));
+        assert!(out.contains("+ fn new_logic() -> bool { false }"));
+    }
+
+    #[test]
+    fn list_dir_caps_at_100_items() {
+        let root = test_root("list_cap");
+        let sub = root.join("files");
+        fs::create_dir_all(&sub).unwrap();
+        for i in 0..105 {
+            fs::write(sub.join(format!("file_{i:03}.txt")), "data").unwrap();
+        }
+        let ex = executor(&root);
+        let out = ex.list_dir("files", 1).unwrap();
+        assert!(out.contains("100 items"));
+        assert!(out.contains("list truncated: maximum 100 items reached"));
     }
 }

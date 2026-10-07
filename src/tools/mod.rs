@@ -98,7 +98,7 @@ pub fn builtin_tool_schemas() -> Vec<ToolSchema> {
     vec![
         ToolSchema {
             name: "read_file".to_string(),
-            description: "Read a file from disk. Can read whole files or specific line ranges.".to_string(),
+            description: "Read a file from disk (whole file or line range). Supports source code, PDFs (extracts text), and images (.png, .jpg, .webp, .gif, .bmp loaded for visual inspection).".to_string(),
             parameters: json!({
                 "type": "object",
                 "properties": {
@@ -138,7 +138,7 @@ pub fn builtin_tool_schemas() -> Vec<ToolSchema> {
         },
         ToolSchema {
             name: "list_dir".to_string(),
-            description: "List directory contents up to a maximum depth.".to_string(),
+            description: "List directory contents up to a maximum depth (capped at 100 items to conserve context).".to_string(),
             parameters: json!({
                 "type": "object",
                 "properties": {
@@ -500,12 +500,57 @@ mod tests {
             .unwrap();
         assert!(read_res.text.contains("hello world"));
 
+        // Edit the file and verify diff snippet
+        let edit_res = executor
+            .execute(
+                "edit_file",
+                r#"{"path": "hello.txt", "target_content": "world", "replacement_content": "rust"}"#,
+            )
+            .await
+            .unwrap();
+        assert!(edit_res.text.contains("Replaced 1 occurrence(s)"));
+        assert!(edit_res.text.contains("```diff"));
+        assert!(edit_res.text.contains("- world"));
+        assert!(edit_res.text.contains("+ rust"));
+
+        // List dir
+        let list_res = executor
+            .execute("list_dir", r#"{"path": "."}"#)
+            .await
+            .unwrap();
+        assert!(list_res.text.contains("hello.txt"));
+
+        // Search code
+        let search_res = executor
+            .execute("search_code", r#"{"query": "hello"}"#)
+            .await
+            .unwrap();
+        assert!(search_res.text.contains("hello.txt"));
+
         // Execute bash
         let bash_res = executor
             .execute("bash", r#"{"command": "echo 'from bash'"}"#)
             .await
             .unwrap();
         assert!(bash_res.text.contains("from bash"));
+
+        // Bash failure exit code
+        let bash_fail = executor
+            .execute("bash", r#"{"command": "exit 42"}"#)
+            .await
+            .unwrap();
+        assert!(bash_fail.text.contains("(exit code 42)"));
+
+        // Edit failure on missing target returns ToolError::Execute
+        let edit_err = executor
+            .execute(
+                "edit_file",
+                r#"{"path": "hello.txt", "target_content": "not_there", "replacement_content": "x"}"#,
+            )
+            .await
+            .unwrap_err();
+        let ToolError::Execute { ref message, .. } = edit_err;
+        assert!(message.contains("Target content not found"));
 
         // Unknown tool returns error
         let err = executor
