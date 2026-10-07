@@ -54,22 +54,23 @@ pub struct PaperEntity {
 impl PaperEntity {
     /// Format a clean, structured text representation for model consumption.
     pub fn format_display(&self) -> String {
+        use std::fmt::Write;
         let mut out = String::new();
-        out.push_str(&format!("**Title**: {}\n", self.title));
+        let _ = writeln!(out, "**Title**: {}", self.title);
 
         if let Some(year) = self.publication_year {
-            out.push_str(&format!("**Year**: {year}\n"));
+            let _ = writeln!(out, "**Year**: {year}");
         }
         if let Some(ref venue) = self.venue {
-            out.push_str(&format!("**Venue**: {venue}\n"));
+            let _ = writeln!(out, "**Venue**: {venue}");
         }
         if let Some(ref doi) = self.doi {
-            out.push_str(&format!("**DOI**: {doi}\n"));
+            let _ = writeln!(out, "**DOI**: {doi}");
         }
         if let Some(ref pdf) = self.open_access_pdf {
-            out.push_str(&format!("**Open Access PDF**: {pdf}\n"));
+            let _ = writeln!(out, "**Open Access PDF**: {pdf}");
         } else if let Some(ref landing) = self.landing_page_url {
-            out.push_str(&format!("**Landing Page**: {landing}\n"));
+            let _ = writeln!(out, "**Landing Page**: {landing}");
         }
 
         if !self.authors.is_empty() {
@@ -84,15 +85,15 @@ impl PaperEntity {
                     }
                 })
                 .collect();
-            out.push_str(&format!("**Authors**: {}\n", author_strs.join("; ")));
+            let _ = writeln!(out, "**Authors**: {}", author_strs.join("; "));
         }
 
         if let Some(citations) = self.cited_by_count {
-            out.push_str(&format!("**Citations**: {citations}\n"));
+            let _ = writeln!(out, "**Citations**: {citations}");
         }
 
         if let Some(ref abs) = self.abstract_text {
-            out.push_str(&format!("\n**Abstract**:\n{abs}"));
+            let _ = write!(out, "\n**Abstract**:\n{abs}");
         }
 
         out

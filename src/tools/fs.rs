@@ -14,6 +14,8 @@ use crate::runner::{ToolError, ToolExecutor, ToolOutcome};
 
 use super::sandbox::{self, AccessClass, SandboxError, SandboxPolicy};
 
+use base64::prelude::*;
+
 #[derive(Debug, Error)]
 pub enum FsError {
     #[error("{0}")]
@@ -26,29 +28,9 @@ pub enum FsError {
     EditError(String),
 }
 
-const B64_CHARS: &[u8] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
-
-/// Fast, dependency-free base64 encoder for image data URLs.
+/// Standard RFC 4648 base64 encoder for image data URLs.
 pub fn base64_encode(data: &[u8]) -> String {
-    let mut out = String::with_capacity(data.len().div_ceil(3) * 4);
-    for chunk in data.chunks(3) {
-        let b0 = chunk[0];
-        let b1 = chunk.get(1).copied().unwrap_or(0);
-        let b2 = chunk.get(2).copied().unwrap_or(0);
-        out.push(B64_CHARS[(b0 >> 2) as usize] as char);
-        out.push(B64_CHARS[(((b0 & 3) << 4) | (b1 >> 4)) as usize] as char);
-        if chunk.len() > 1 {
-            out.push(B64_CHARS[(((b1 & 0xF) << 2) | (b2 >> 6)) as usize] as char);
-        } else {
-            out.push('=');
-        }
-        if chunk.len() > 2 {
-            out.push(B64_CHARS[(b2 & 0x3F) as usize] as char);
-        } else {
-            out.push('=');
-        }
-    }
-    out
+    BASE64_STANDARD.encode(data)
 }
 
 pub struct FsExecutor {
@@ -230,17 +212,18 @@ impl FsExecutor {
     }
 
     fn render_diff_snippet(target: &str, replacement: &str) -> String {
+        use std::fmt::Write;
         let mut diff = String::from("\n```diff\n");
         let target_lines: Vec<&str> = target.lines().collect();
         for line in target_lines.iter().take(6) {
-            diff.push_str(&format!("- {line}\n"));
+            let _ = writeln!(diff, "- {line}");
         }
         if target_lines.len() > 6 {
             diff.push_str("  ...\n");
         }
         let repl_lines: Vec<&str> = replacement.lines().collect();
         for line in repl_lines.iter().take(6) {
-            diff.push_str(&format!("+ {line}\n"));
+            let _ = writeln!(diff, "+ {line}");
         }
         if repl_lines.len() > 6 {
             diff.push_str("  ...\n");
@@ -333,9 +316,10 @@ impl FsExecutor {
         };
         self.walk(&resolved, 1, &mut ctx)?;
 
+        use std::fmt::Write;
         let mut out = format!("{} ({} items):\n", resolved.display(), ctx.items.len());
         for (kind, rel) in &ctx.items {
-            out.push_str(&format!("  [{kind}] {rel}\n"));
+            let _ = writeln!(out, "  [{kind}] {rel}");
         }
         if ctx.truncated {
             out.push_str("  ... [list truncated: maximum 100 items reached; specify deeper path or lower max_depth]\n");
@@ -447,15 +431,17 @@ impl FsExecutor {
             .map(|l| l.to_string())
             .collect();
 
+        use std::fmt::Write;
         let mut out = format!("{} match(es) for '{query}':\n", matches.len());
         for m in &matches {
-            out.push_str(&format!("  {m}\n"));
+            let _ = writeln!(out, "  {m}");
         }
         if lines.len() > max_results {
-            out.push_str(&format!(
-                "  ... ({} more matches truncated)\n",
+            let _ = writeln!(
+                out,
+                "  ... ({} more matches truncated)",
                 lines.len() - max_results
-            ));
+            );
         }
         Ok(out)
     }
@@ -477,12 +463,13 @@ impl FsExecutor {
             &mut skipped,
         )?;
 
+        use std::fmt::Write;
         let mut out = format!("{} match(es) for '{query}':\n", matches.len());
         for m in &matches {
-            out.push_str(&format!("  {m}\n"));
+            let _ = writeln!(out, "  {m}");
         }
         if !skipped.is_empty() {
-            out.push_str(&format!("  ({} binary files skipped)\n", skipped.len()));
+            let _ = writeln!(out, "  ({} binary files skipped)", skipped.len());
         }
         Ok(out)
     }

@@ -407,12 +407,17 @@ fn resolve_ddg_link(link: &str) -> String {
 /// Percent-encode a string for use in a URL query / form body.
 fn percent_encode(s: &str) -> String {
     let mut out = String::with_capacity(s.len());
-    for b in s.as_bytes() {
+    const HEX: &[u8; 16] = b"0123456789ABCDEF";
+    for &b in s.as_bytes() {
         match b {
             b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' => {
-                out.push(*b as char)
+                out.push(b as char)
             }
-            _ => out.push_str(&format!("%{b:02X}")),
+            _ => {
+                out.push('%');
+                out.push(HEX[(b >> 4) as usize] as char);
+                out.push(HEX[(b & 0x0F) as usize] as char);
+            }
         }
     }
     out
@@ -607,11 +612,13 @@ fn cap_output(text: &str, full_len: usize) -> String {
     // Close an open markdown code fence so the document stays well-formed.
     let fence_count = out.lines().filter(|l| l.starts_with("```")).count();
     if fence_count % 2 == 1 {
-        out = format!("{out}\n```");
+        out.push_str("\n```");
     }
-    out.push_str(&format!(
+    use std::fmt::Write;
+    let _ = write!(
+        out,
         "\n\n[Content truncated: showing {cut} of {full_len} chars]"
-    ));
+    );
     out
 }
 
@@ -753,11 +760,10 @@ fn cap_output_pdf(text: &str, start: usize, end: usize, total_pages: usize) -> (
 
     let shown = &text[..cut];
     let next_start = end + 1;
-    let mut banner = String::new();
-    banner.push_str(&format!(
+    let banner = format!(
         "\n\n[PDF truncated: showing pages {start}-{end} of {total_pages} total. \
          Use page_range=\"{next_start}-{total_pages}\" for the next pages.]"
-    ));
+    );
 
     (format!("{shown}{banner}"), true)
 }

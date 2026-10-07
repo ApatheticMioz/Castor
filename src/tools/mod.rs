@@ -270,7 +270,8 @@ impl ToolExecutor for CompositeExecutor {
                     Ok(out) => {
                         let mut text = String::new();
                         if out.exit_code != 0 {
-                            text.push_str(&format!("(exit code {})\n", out.exit_code));
+                            use std::fmt::Write;
+                            let _ = writeln!(text, "(exit code {})", out.exit_code);
                         }
                         if !out.stdout.is_empty() {
                             text.push_str(&out.stdout);

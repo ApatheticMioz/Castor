@@ -287,25 +287,12 @@ fn posix_normalize(p: &str) -> String {
     }
 }
 
-/// Unicode/homoglyph defense: fold fullwidth & compatibility forms to their
-/// canonical ASCII equivalents (e.g. fullwidth `Ｗ` U+FF37 -> `W`) so a
-/// homoglyph path cannot dodge the protected-root string comparison.
-/// Mirrors `String.prototype.normalize("NFKC")` from the JS source for the
-/// fullwidth Latin block (U+FF01–U+FF5E -> U+0021–U+007E) and the fullwidth
-/// space (U+3000 -> U+0020).
+/// Unicode/homoglyph defense: normalize compatibility forms and fullwidth
+/// characters to their canonical ASCII equivalents via standard NFKC
+/// so homoglyphs cannot evade the protected-root policy check.
 fn nfkc_fold(s: &str) -> String {
-    s.chars()
-        .map(|c| {
-            let cp = c as u32;
-            if (0xFF01..=0xFF5E).contains(&cp) {
-                char::from_u32(cp - 0xFF01 + 0x0021).unwrap_or(c)
-            } else if cp == 0x3000 {
-                ' '
-            } else {
-                c
-            }
-        })
-        .collect()
+    use unicode_normalization::UnicodeNormalization;
+    s.nfkc().collect()
 }
 
 fn normalize_operand(operand: &str, cwd: &str, is_win: bool) -> String {
@@ -837,10 +824,8 @@ async fn execute(cmd: &str, cwd: &Path, timeout: Duration) -> Result<ShellOutput
             let out = std::mem::take(&mut *out_buf.lock().unwrap());
             let mut err = String::from_utf8_lossy(&std::mem::take(&mut *err_buf.lock().unwrap()))
                 .into_owned();
-            err.push_str(&format!(
-                "\n[Command timed out after {}ms]",
-                timeout.as_millis()
-            ));
+            use std::fmt::Write;
+            let _ = write!(err, "\n[Command timed out after {}ms]", timeout.as_millis());
             (124, out, err)
         }
     };

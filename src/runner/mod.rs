@@ -854,14 +854,18 @@ mod tests {
         }
     }
 
+    static TMP_RUNNER: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
     fn tmp_state() -> StateDir {
+        let n = TMP_RUNNER.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
         let dir = std::env::temp_dir().join(format!(
-            "castor_runner_{}_{}",
+            "castor_runner_{}_{}_{}",
             std::process::id(),
             std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
                 .unwrap()
-                .as_nanos()
+                .as_millis(),
+            n
         ));
         let state = StateDir::new(&dir);
         let _ = state.ensure();
