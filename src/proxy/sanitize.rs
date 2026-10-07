@@ -386,7 +386,10 @@ pub fn sanitize_request_body(body: &mut serde_json::Value) -> bool {
 }
 
 /// Parameterized request body sanitizer allowing callers/tests to bypass image stripping.
-pub fn sanitize_request_body_with_vision(body: &mut serde_json::Value, vision_enabled: bool) -> bool {
+pub fn sanitize_request_body_with_vision(
+    body: &mut serde_json::Value,
+    vision_enabled: bool,
+) -> bool {
     if vision_enabled {
         return false;
     }
@@ -679,7 +682,12 @@ mod tests {
         assert!(modified);
         let content = body["messages"][0]["content"].as_array().unwrap();
         assert_eq!(content[0]["type"], "text");
-        assert!(content[0]["text"].as_str().unwrap().contains("Image file omitted"));
+        assert!(
+            content[0]["text"]
+                .as_str()
+                .unwrap()
+                .contains("Image file omitted")
+        );
     }
 
     #[test]

@@ -582,7 +582,8 @@ pub async fn run_session(
             };
             tool_activity = true;
 
-            let (tool_content, image_attachment) = if outcome.text.starts_with("[IMAGE_ATTACHMENT:") {
+            let (tool_content, image_attachment) = if outcome.text.starts_with("[IMAGE_ATTACHMENT:")
+            {
                 if let Some(end_idx) = outcome.text.find(']') {
                     let header = &outcome.text[..end_idx];
                     let rest = outcome.text[end_idx + 1..].trim_start_matches(['\r', '\n']);
@@ -959,11 +960,15 @@ mod tests {
 
         let second_call_msgs = &recorder.calls.lock().await[1].messages;
         assert!(
-            second_call_msgs.iter().any(|m| m.role == "tool" && m.content.contains("Successfully loaded image file"))
+            second_call_msgs
+                .iter()
+                .any(|m| m.role == "tool" && m.content.contains("Successfully loaded image file"))
         );
-        assert!(
-            second_call_msgs.iter().any(|m| m.role == "user" && m.content.contains("[Visual Inspection Attachment: data:image/png;base64,iVBORw0KGgo=]"))
-        );
+        assert!(second_call_msgs.iter().any(|m| {
+            m.role == "user"
+                && m.content
+                    .contains("[Visual Inspection Attachment: data:image/png;base64,iVBORw0KGgo=]")
+        }));
     }
 
     #[tokio::test]

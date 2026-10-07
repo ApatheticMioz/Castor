@@ -229,25 +229,25 @@ impl FsExecutor {
         ))
     }
 
-fn render_diff_snippet(target: &str, replacement: &str) -> String {
-    let mut diff = String::from("\n```diff\n");
-    let target_lines: Vec<&str> = target.lines().collect();
-    for line in target_lines.iter().take(6) {
-        diff.push_str(&format!("- {line}\n"));
+    fn render_diff_snippet(target: &str, replacement: &str) -> String {
+        let mut diff = String::from("\n```diff\n");
+        let target_lines: Vec<&str> = target.lines().collect();
+        for line in target_lines.iter().take(6) {
+            diff.push_str(&format!("- {line}\n"));
+        }
+        if target_lines.len() > 6 {
+            diff.push_str("  ...\n");
+        }
+        let repl_lines: Vec<&str> = replacement.lines().collect();
+        for line in repl_lines.iter().take(6) {
+            diff.push_str(&format!("+ {line}\n"));
+        }
+        if repl_lines.len() > 6 {
+            diff.push_str("  ...\n");
+        }
+        diff.push_str("```");
+        diff
     }
-    if target_lines.len() > 6 {
-        diff.push_str("  ...\n");
-    }
-    let repl_lines: Vec<&str> = replacement.lines().collect();
-    for line in repl_lines.iter().take(6) {
-        diff.push_str(&format!("+ {line}\n"));
-    }
-    if repl_lines.len() > 6 {
-        diff.push_str("  ...\n");
-    }
-    diff.push_str("```");
-    diff
-}
 
     fn edit_file(
         &self,

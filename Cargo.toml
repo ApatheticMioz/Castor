@@ -6,6 +6,8 @@ license = "AGPL-3.0"
 description = "Castor: Rust MCP toolchain, proxy, and evo engine"
 repository = "https://github.com/ApatheticMioz/Castor"
 homepage = "https://github.com/ApatheticMioz/Castor#readme"
+keywords = ["mcp", "model-context-protocol", "agent-harness", "rust", "pair-programming"]
+categories = ["development-tools", "command-line-utilities", "asynchronous"]
 
 [[bin]]
 name = "castor"
@@ -44,7 +46,7 @@ infer = "0.16"
 lopdf = { version = "0.42", default-features = false }
 
 [target.'cfg(target_os = "linux")'.dependencies]
-# Kernel-level filesystem confinement for the sandboxed shell child (Issue #6).
+# Kernel-level filesystem confinement for the sandboxed shell child.
 # Only applied when the running kernel exposes the Landlock LSM (Linux >= 5.13).
 landlock = "0.4"
 

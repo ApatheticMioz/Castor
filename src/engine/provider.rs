@@ -49,7 +49,10 @@ impl Message {
         if self.role == "assistant" && self.content.is_empty() {
             obj.insert("content".into(), Value::Null);
         } else if self.role == "user"
-            && self.content.trim_start().starts_with("[Visual Inspection Attachment: data:image/")
+            && self
+                .content
+                .trim_start()
+                .starts_with("[Visual Inspection Attachment: data:image/")
         {
             let trimmed = self.content.trim();
             if let Some(data_url) = trimmed
@@ -824,7 +827,8 @@ mod tests {
     fn multimodal_visual_inspection_with_whitespace_and_newline() {
         let m = Message {
             role: "user".into(),
-            content: "  [Visual Inspection Attachment: data:image/jpeg;base64,abc123==] \r\n".into(),
+            content: "  [Visual Inspection Attachment: data:image/jpeg;base64,abc123==] \r\n"
+                .into(),
             tool_calls: vec![],
             tool_call_id: None,
         };

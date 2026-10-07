@@ -188,7 +188,7 @@ impl CastorMcpServer {
     /// fallback) and return the verdict together with an optional advisory
     /// note to append to the dispatch message.
     ///
-    /// Queues on the 1-slot [`TaskSemaphore`] as a real task to guarantee exclusive,
+    /// Queues on the 1-slot [`crate::task::semaphore::TaskSemaphore`] as a real task to guarantee exclusive,
     /// uncontended GPU access. Because DGI is a 1-forward pass logit probe (CIVP gate),
     /// it executes on the idle engine in <1s and immediately releases the semaphore.
     async fn evaluate_dgi(
@@ -234,7 +234,11 @@ impl CastorMcpServer {
             };
 
             let _ = registry
-                .transition(&dgi_task_id, crate::task::registry::TaskStatus::Executing, None)
+                .transition(
+                    &dgi_task_id,
+                    crate::task::registry::TaskStatus::Executing,
+                    None,
+                )
                 .await;
 
             let probe_timeout_secs = std::env::var("CASTOR_DGI_TIMEOUT_SECS")
