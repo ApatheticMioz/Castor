@@ -59,7 +59,7 @@ impl CompositeExecutor {
         let fs = FsExecutor::with_policy(policy);
         let searx_base =
             searxng_url.or_else(|| crate::tools::web::DEFAULT_SEARXNG.map(str::to_string));
-        let web = WebClient::with_base_urls(searx_base, None, None);
+        let web = WebClient::with_base_urls(searx_base, None);
         let paper = PaperClient::with_credentials(openalex_email, openalex_api_key);
         Ok(Self {
             fs,

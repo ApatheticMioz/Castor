@@ -7,7 +7,9 @@
 //!      *typed, actionable* error naming what to set or run — we do NOT
 //!      silently fall through to another provider.
 //!   2. Brave Search API (only when `brave_api_key` is configured).
-//!   3. DuckDuckGo HTML endpoint (last resort, no key required).
+//!
+//! If neither is configured, a typed, actionable `SearxngNotConfiguredError`
+//! is returned.
 //!
 //! `fetch_docs` performs a GET, gates on the `Content-Type` header (plus a
 //! binary sniff for unknown types), converts HTML to Markdown via `html2md`,
@@ -23,7 +25,6 @@ use thiserror::Error;
 /// Default base URLs (overridable in tests via [`WebClient::with_base_urls`]).
 pub const DEFAULT_SEARXNG: Option<&'static str> = Some("http://127.0.0.1:8888");
 const DEFAULT_BRAVE: &str = "https://api.search.brave.com/res/v1/web/search";
-const DEFAULT_DDG: &str = "https://html.duckduckgo.com/html/";
 
 /// Short timeout applied to every outbound request.
 const TIMEOUT: std::time::Duration = std::time::Duration::from_secs(15);
@@ -103,7 +104,6 @@ pub struct WebClient {
     client: reqwest::Client,
     searxng_base: Option<String>,
     brave_base: String,
-    ddg_base: String,
 }
 
 impl WebClient {
@@ -118,24 +118,16 @@ impl WebClient {
             client,
             searxng_base: DEFAULT_SEARXNG.map(str::to_string),
             brave_base: DEFAULT_BRAVE.to_string(),
-            ddg_base: DEFAULT_DDG.to_string(),
         }
     }
 
     /// Build a client with overridden provider base URLs (used by the test
     /// suite to point at local axum mocks).
-    pub fn with_base_urls(
-        searxng: Option<String>,
-        brave: Option<String>,
-        ddg: Option<String>,
-    ) -> Self {
+    pub fn with_base_urls(searxng: Option<String>, brave: Option<String>) -> Self {
         let mut c = Self::new();
         c.searxng_base = searxng;
         if let Some(b) = brave {
             c.brave_base = b;
-        }
-        if let Some(d) = ddg {
-            c.ddg_base = d;
         }
         c
     }
@@ -152,7 +144,7 @@ impl Default for WebClient {
 // ---------------------------------------------------------------------------
 
 impl WebClient {
-    /// Run the strict provider chain: SearXNG → Brave → DuckDuckGo.
+    /// Run the strict provider chain: SearXNG → Brave.
     pub async fn web_search(
         &self,
         query: &str,
@@ -191,13 +183,8 @@ impl WebClient {
             });
         }
 
-        // 3. DuckDuckGo HTML (last resort).
-        let results = self.search_ddg(q).await?;
-        Ok(SearchOutcome {
-            query: q.to_string(),
-            provider: "duckduckgo".into(),
-            results,
-        })
+        // Neither provider is configured / available.
+        Err(WebError::SearxngNotConfigured)
     }
 
     async fn search_searxng(
@@ -313,114 +300,6 @@ impl WebClient {
         }
         Ok(out)
     }
-
-    async fn search_ddg(&self, q: &str) -> Result<Vec<SearchResult>, WebError> {
-        let body = format!("q={}", percent_encode(q));
-        let resp = self
-            .client
-            .post(&self.ddg_base)
-            .header("Content-Type", "application/x-www-form-urlencoded")
-            .body(body)
-            .send()
-            .await
-            .map_err(|e| WebError::Http {
-                method: "POST".into(),
-                url: self.ddg_base.clone(),
-                status: 0,
-                reason: e.to_string(),
-            })?;
-
-        let status = resp.status();
-        if !status.is_success() {
-            return Err(WebError::Http {
-                method: "POST".into(),
-                url: self.ddg_base.clone(),
-                status: status.as_u16(),
-                reason: status.canonical_reason().unwrap_or("").to_string(),
-            });
-        }
-
-        let html = resp.text().await.map_err(|e| WebError::Http {
-            method: "POST".into(),
-            url: self.ddg_base.clone(),
-            status: 0,
-            reason: e.to_string(),
-        })?;
-
-        Ok(parse_ddg_html(&html))
-    }
-}
-
-/// Parse the DuckDuckGo HTML endpoint into normalized results.
-fn parse_ddg_html(html: &str) -> Vec<SearchResult> {
-    let doc = scraper::Html::parse_document(html);
-    let result_sel = match scraper::Selector::parse(".result") {
-        Ok(s) => s,
-        Err(_) => return Vec::new(),
-    };
-    let title_sel = match scraper::Selector::parse(".result__title a") {
-        Ok(s) => s,
-        Err(_) => return Vec::new(),
-    };
-    let snippet_sel = match scraper::Selector::parse(".result__snippet") {
-        Ok(s) => s,
-        Err(_) => return Vec::new(),
-    };
-
-    let mut out = Vec::new();
-    for el in doc.select(&result_sel) {
-        let title_el = match el.select(&title_sel).next() {
-            Some(t) => t,
-            None => continue,
-        };
-        let title = title_el.text().collect::<String>().trim().to_string();
-        let raw_link = title_el.attr("href").unwrap_or("").to_string();
-        let link = resolve_ddg_link(&raw_link);
-        let snippet = el
-            .select(&snippet_sel)
-            .next()
-            .map(|s| s.text().collect::<String>().trim().to_string())
-            .unwrap_or_default();
-        if !title.is_empty() && !link.is_empty() {
-            out.push(SearchResult {
-                title,
-                url: link,
-                snippet,
-            });
-        }
-    }
-    out
-}
-
-/// DuckDuckGo wraps the real URL in a `uddg` query parameter on its own
-/// redirect endpoint; decode it when present.
-fn resolve_ddg_link(link: &str) -> String {
-    if let Ok(u) = reqwest::Url::parse(link)
-        && let Some(uddg) = u.query_pairs().find(|(k, _)| k == "uddg").map(|(_, v)| v)
-        && !uddg.is_empty()
-    {
-        return uddg.to_string();
-    }
-    link.to_string()
-}
-
-/// Percent-encode a string for use in a URL query / form body.
-fn percent_encode(s: &str) -> String {
-    let mut out = String::with_capacity(s.len());
-    const HEX: &[u8; 16] = b"0123456789ABCDEF";
-    for &b in s.as_bytes() {
-        match b {
-            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' => {
-                out.push(b as char)
-            }
-            _ => {
-                out.push('%');
-                out.push(HEX[(b >> 4) as usize] as char);
-                out.push(HEX[(b & 0x0F) as usize] as char);
-            }
-        }
-    }
-    out
 }
 
 // ---------------------------------------------------------------------------
@@ -778,7 +657,7 @@ pub(crate) mod tests {
     use axum::Router;
     use axum::http::StatusCode;
     use axum::response::IntoResponse;
-    use axum::routing::{get, post};
+    use axum::routing::get;
 
     async fn start(app: Router) -> String {
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -829,17 +708,6 @@ pub(crate) mod tests {
         )
     }
 
-    async fn ddg_handler() -> axum::response::Response {
-        html_body(
-            r#"<html><body>
-<div class="result">
-  <span class="result__title"><a href="https://ddg.example/c">DDG Result</a></span>
-  <span class="result__snippet">ddg snippet</span>
-</div>
-</body></html>"#,
-        )
-    }
-
     async fn fetch_html_handler() -> axum::response::Response {
         html_body("<html><body><h1>Hello</h1><p>World</p></body></html>")
     }
@@ -884,7 +752,6 @@ pub(crate) mod tests {
         Router::new()
             .route("/searxng/search", get(searxng_handler))
             .route("/brave", get(brave_handler))
-            .route("/ddg", post(ddg_handler))
             .route("/fetch/html", get(fetch_html_handler))
             .route("/fetch/404", get(fetch_404_handler))
             .route("/fetch/binary", get(fetch_binary_handler))
@@ -896,7 +763,7 @@ pub(crate) mod tests {
     #[tokio::test]
     async fn searxng_results() {
         let base = start(router()).await;
-        let c = WebClient::with_base_urls(Some(format!("{base}/searxng")), None, None);
+        let c = WebClient::with_base_urls(Some(format!("{base}/searxng")), None);
         let out = c.web_search("rust async", None, None).await.unwrap();
         assert_eq!(out.provider, "searxng");
         assert_eq!(out.query, "rust async");
@@ -909,7 +776,7 @@ pub(crate) mod tests {
     #[tokio::test]
     async fn searxng_category_routing() {
         let base = start(router()).await;
-        let c = WebClient::with_base_urls(Some(format!("{base}/searxng")), None, None);
+        let c = WebClient::with_base_urls(Some(format!("{base}/searxng")), None);
         let out = c
             .web_search("network verification", None, Some("science"))
             .await
@@ -930,7 +797,7 @@ pub(crate) mod tests {
         let port = listener.local_addr().unwrap().port();
         drop(listener);
         let expected_url = format!("http://127.0.0.1:{port}");
-        let c = WebClient::with_base_urls(Some(expected_url.clone()), None, None);
+        let c = WebClient::with_base_urls(Some(expected_url.clone()), None);
         let err = c.web_search("rust", None, None).await.unwrap_err();
         match &err {
             WebError::SearxngUnreachable { url, reason } => {
@@ -954,7 +821,7 @@ pub(crate) mod tests {
     #[tokio::test]
     async fn brave_with_key_path() {
         let base = start(router()).await;
-        let c = WebClient::with_base_urls(None, Some(format!("{base}/brave")), None);
+        let c = WebClient::with_base_urls(None, Some(format!("{base}/brave")));
         let out = c.web_search("tokio", Some("bkey"), None).await.unwrap();
         assert_eq!(out.provider, "brave");
         assert_eq!(out.results.len(), 1);
@@ -964,25 +831,17 @@ pub(crate) mod tests {
     }
 
     #[tokio::test]
-    async fn ddg_fallback() {
-        let base = start(router()).await;
-        let c = WebClient::with_base_urls(None, None, Some(format!("{base}/ddg")));
-        let out = c.web_search("axum", None, None).await.unwrap();
-        assert_eq!(out.provider, "duckduckgo");
-        assert_eq!(out.results.len(), 1);
-        assert_eq!(out.results[0].title, "DDG Result");
-        assert_eq!(out.results[0].url, "https://ddg.example/c");
-        assert_eq!(out.results[0].snippet, "ddg snippet");
-    }
-
-    #[tokio::test]
-    async fn unconfigured_searxng_falls_to_ddg() {
-        // No SearXNG configured and no Brave key → straight to DuckDuckGo.
-        let base = start(router()).await;
-        let c = WebClient::with_base_urls(None, None, Some(format!("{base}/ddg")));
-        let out = c.web_search("serde", None, None).await.unwrap();
-        assert_eq!(out.provider, "duckduckgo");
-        assert!(!out.results.is_empty());
+    async fn unconfigured_searxng_yields_typed_actionable_error() {
+        let c = WebClient::with_base_urls(None, None);
+        let err = c.web_search("serde", None, None).await.unwrap_err();
+        match &err {
+            WebError::SearxngNotConfigured => {}
+            other => panic!("expected SearxngNotConfigured, got {other:?}"),
+        }
+        let msg = err.to_string();
+        assert!(msg.contains("SearxngNotConfiguredError"), "{msg}");
+        assert!(msg.contains("searxng_url"), "{msg}");
+        assert!(msg.contains("brave_api_key"), "{msg}");
     }
 
     #[tokio::test]
