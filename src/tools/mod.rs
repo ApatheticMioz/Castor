@@ -201,7 +201,7 @@ pub fn builtin_tool_schemas() -> Vec<ToolSchema> {
         },
         ToolSchema {
             name: "web_search".to_string(),
-            description: "Search the web using SearXNG with Brave and DuckDuckGo fallbacks. Supports category routing (e.g. 'general', 'science', 'it').".to_string(),
+            description: "Search the web using SearXNG with Brave search fallback. Supports category routing (e.g. 'general', 'science', 'it').".to_string(),
             parameters: json!({
                 "type": "object",
                 "properties": {

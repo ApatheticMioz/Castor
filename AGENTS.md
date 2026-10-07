@@ -143,7 +143,9 @@ Cargo.toml               # Single root crate manifest
 bin/
   castor.js              # Node.js cross-platform distribution shim
 src/
-  main.rs                # CLI entry point (clap dispatch, worker subcommand)
+  lib.rs                 # Library crate root (public modules, traits, and programmatic embedding)
+  main.rs                # Thin CLI binary entry point (delegates to castor::cli::run)
+  cli.rs                 # Clap CLI parsing, command routing, and internal worker dispatch
   config.rs              # Configuration loader (serde, env > json > defaults)
   platform.rs            # Cross-OS path translation and process tree management
   skills.rs              # agentskills.io SKILL.md indexer
@@ -175,7 +177,7 @@ src/
     sandbox.rs           # 5-layer path containment and 137-vector security policy
     shell.rs             # Safe bash executor and command AST validator
     ast.rs               # Structural AST search and replace via native ast-grep
-    web.rs               # Web search (SearXNG -> Brave -> DDG) and fetch (markdown conversion)
+    web.rs               # Web search (SearXNG -> Brave) and fetch (markdown conversion)
     paper.rs             # Academic paper lookup via OpenAlex (metadata, affiliations, OA PDFs)
     extensions.rs        # MCP extension bridges (rmcp child processes)
   evo/
