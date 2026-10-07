@@ -2,7 +2,9 @@
 //!
 //! When a task is dispatched, the MCP server spawns a detached worker process:
 //!
-//!     castor __worker <path-to-job-spec.json>
+//! ```bash
+//! castor __worker <path-to-job-spec.json>
+//! ```
 //!
 //! The worker:
 //! 1. Loads the [`JobSpec`].

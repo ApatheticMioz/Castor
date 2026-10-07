@@ -2,17 +2,21 @@
 //!
 //! A "skill" is a reusable workflow recipe stored at:
 //!
-//!     <dir>/<name>/SKILL.md
+//! ```text
+//! <dir>/<name>/SKILL.md
+//! ```
 //!
 //! Each SKILL.md has a YAML frontmatter block (the lines between the first
 //! pair of `---` markers) carrying `name` and `description`, followed by a
 //! markdown body:
 //!
-//!     ---
-//!     name: my-skill
-//!     description: One-line summary
-//!     ---
-//!     <workflow body in markdown>
+//! ```markdown
+//! ---
+//! name: my-skill
+//! description: One-line summary
+//! ---
+//! <workflow body in markdown>
+//! ```
 //!
 //! This module is **model-routed**: it only discovers skills and renders a
 //! compact index for the system prompt. There is deliberately **no keyword

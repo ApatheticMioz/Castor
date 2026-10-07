@@ -9,6 +9,10 @@ homepage = "https://github.com/ApatheticMioz/Castor#readme"
 keywords = ["mcp", "model-context-protocol", "agent-harness", "rust", "pair-programming"]
 categories = ["development-tools", "command-line-utilities", "asynchronous"]
 
+[lib]
+name = "castor"
+path = "src/lib.rs"
+
 [[bin]]
 name = "castor"
 path = "src/main.rs"
