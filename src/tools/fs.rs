@@ -26,6 +26,31 @@ pub enum FsError {
     EditError(String),
 }
 
+const B64_CHARS: &[u8] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+
+/// Fast, dependency-free base64 encoder for image data URLs.
+pub fn base64_encode(data: &[u8]) -> String {
+    let mut out = String::with_capacity(data.len().div_ceil(3) * 4);
+    for chunk in data.chunks(3) {
+        let b0 = chunk[0];
+        let b1 = chunk.get(1).copied().unwrap_or(0);
+        let b2 = chunk.get(2).copied().unwrap_or(0);
+        out.push(B64_CHARS[(b0 >> 2) as usize] as char);
+        out.push(B64_CHARS[(((b0 & 3) << 4) | (b1 >> 4)) as usize] as char);
+        if chunk.len() > 1 {
+            out.push(B64_CHARS[(((b1 & 0xF) << 2) | (b2 >> 6)) as usize] as char);
+        } else {
+            out.push('=');
+        }
+        if chunk.len() > 2 {
+            out.push(B64_CHARS[(b2 & 0x3F) as usize] as char);
+        } else {
+            out.push('=');
+        }
+    }
+    out
+}
+
 pub struct FsExecutor {
     policy: SandboxPolicy,
 }
@@ -99,8 +124,52 @@ impl FsExecutor {
                 "Path is a directory, not a file: {path}"
             )));
         }
-        sandbox::check_binary(&resolved)?;
-        let content = fs::read_to_string(&resolved)?;
+        let ext = resolved.extension().and_then(|e| e.to_str()).unwrap_or("");
+        let is_pdf = ext.eq_ignore_ascii_case("pdf");
+        let is_image = matches!(
+            ext.to_ascii_lowercase().as_str(),
+            "png" | "jpg" | "jpeg" | "webp" | "gif" | "bmp"
+        );
+        let content = if is_pdf {
+            let bytes = fs::read(&resolved)?;
+            let pdf_res = super::web::extract_pdf_text(&bytes, None)
+                .map_err(|e| FsError::InvalidArgs(format!("PDF parse error: {e}")))?;
+            pdf_res.text
+        } else if is_image {
+            let bytes = fs::read(&resolved)?;
+            if bytes.is_empty() {
+                return Err(FsError::InvalidArgs(format!(
+                    "Image file '{}' is empty (0 bytes)",
+                    resolved.display()
+                )));
+            }
+            const MAX_IMAGE_BYTES: usize = 20 * 1024 * 1024;
+            if bytes.len() > MAX_IMAGE_BYTES {
+                return Err(FsError::InvalidArgs(format!(
+                    "Image file '{}' exceeds maximum allowed size ({} bytes > 20 MB ceiling)",
+                    resolved.display(),
+                    bytes.len()
+                )));
+            }
+            let mime = match ext.to_ascii_lowercase().as_str() {
+                "png" => "image/png",
+                "jpg" | "jpeg" => "image/jpeg",
+                "webp" => "image/webp",
+                "gif" => "image/gif",
+                "bmp" => "image/bmp",
+                _ => "image/png",
+            };
+            let b64 = base64_encode(&bytes);
+            return Ok(format!(
+                "[IMAGE_ATTACHMENT:data:{mime};base64,{b64}:path:{}]\nSuccessfully loaded image file '{}' ({} bytes) for visual inspection.",
+                resolved.display(),
+                resolved.display(),
+                bytes.len()
+            ));
+        } else {
+            sandbox::check_binary(&resolved)?;
+            fs::read_to_string(&resolved)?
+        };
         let lines: Vec<&str> = content.split('\n').collect();
         let total = lines.len();
         let start = start_line.saturating_sub(1);
@@ -709,6 +778,24 @@ mod tests {
     #[test]
     fn binary_read_fail_fast() {
         let root = test_root("binary");
+        let bin = root.join("binary.bin");
+        fs::write(
+            &bin,
+            [0x7F, b'E', b'L', b'F', 0x02, 0x01, 0x01, 0x00, 0, 0, 0, 0],
+        )
+        .unwrap();
+        let ex = executor(&root);
+
+        let err = ex.read_file("binary.bin", 1, None).unwrap_err();
+        assert!(matches!(
+            err,
+            FsError::Sandbox(SandboxError::BinaryFile { .. })
+        ));
+    }
+
+    #[test]
+    fn read_file_image_returns_attachment() {
+        let root = test_root("image_read");
         let png = root.join("img.png");
         fs::write(
             &png,
@@ -717,11 +804,21 @@ mod tests {
         .unwrap();
         let ex = executor(&root);
 
-        let err = ex.read_file("img.png", 1, None).unwrap_err();
-        assert!(matches!(
-            err,
-            FsError::Sandbox(SandboxError::BinaryFile { .. })
-        ));
+        let out = ex.read_file("img.png", 1, None).unwrap();
+        assert!(out.starts_with("[IMAGE_ATTACHMENT:data:image/png;base64,"));
+        assert!(out.contains("Successfully loaded image file"));
+    }
+
+    #[test]
+    fn read_file_pdf_extracts_text() {
+        let root = test_root("pdf_read");
+        let pdf = root.join("doc.pdf");
+        let pdf_bytes = super::super::web::tests::build_minimal_pdf();
+        fs::write(&pdf, &pdf_bytes).unwrap();
+        let ex = executor(&root);
+
+        let out = ex.read_file("doc.pdf", 1, None).unwrap();
+        assert!(out.contains("Hello"), "PDF text must be extracted: {out}");
     }
 
     #[test]
@@ -731,5 +828,40 @@ mod tests {
 
         let err = ex.read_file("/etc/passwd", 1, None).unwrap_err();
         assert!(matches!(err, FsError::Sandbox(SandboxError::PathEscape(_))));
+    }
+
+    #[test]
+    fn base64_rfc4648_test_vectors() {
+        assert_eq!(base64_encode(b""), "");
+        assert_eq!(base64_encode(b"f"), "Zg==");
+        assert_eq!(base64_encode(b"fo"), "Zm8=");
+        assert_eq!(base64_encode(b"foo"), "Zm9v");
+        assert_eq!(base64_encode(b"foob"), "Zm9vYg==");
+        assert_eq!(base64_encode(b"fooba"), "Zm9vYmE=");
+        assert_eq!(base64_encode(b"foobar"), "Zm9vYmFy");
+    }
+
+    #[test]
+    fn read_file_image_case_insensitive_and_empty_check() {
+        let root = test_root("image_edge_cases");
+        let ex = executor(&root);
+
+        // Case-insensitivity: .PNG uppercase extension
+        let upper_png = root.join("TEST.PNG");
+        fs::write(&upper_png, [0x89, b'P', b'N', b'G', 1, 2, 3]).unwrap();
+        let out = ex.read_file("TEST.PNG", 1, None).unwrap();
+        assert!(out.starts_with("[IMAGE_ATTACHMENT:data:image/png;base64,"));
+
+        // Empty 0-byte image fails fast
+        let empty_jpg = root.join("empty.jpg");
+        fs::write(&empty_jpg, []).unwrap();
+        let err = ex.read_file("empty.jpg", 1, None).unwrap_err();
+        assert!(matches!(err, FsError::InvalidArgs(msg) if msg.contains("0 bytes")));
+
+        // Directory with image extension is rejected
+        let img_dir = root.join("folder.webp");
+        fs::create_dir_all(&img_dir).unwrap();
+        let err_dir = ex.read_file("folder.webp", 1, None).unwrap_err();
+        assert!(matches!(err_dir, FsError::InvalidArgs(msg) if msg.contains("is a directory")));
     }
 }

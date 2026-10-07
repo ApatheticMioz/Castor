@@ -77,5 +77,12 @@ mod tests {
                 std::path::PathBuf::from("relative/path")
             );
         }
+        #[cfg(windows)]
+        {
+            assert_eq!(
+                to_host_path("D:\\LLM_Ecosystem"),
+                std::path::PathBuf::from("D:\\LLM_Ecosystem")
+            );
+        }
     }
 }

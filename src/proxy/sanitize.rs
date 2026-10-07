@@ -368,6 +368,13 @@ impl SseSanitizer {
 pub const IMAGE_PLACEHOLDER: &str = "[Image file omitted: Local Qwen3.8-27B runs in pure text mode for Universal 245K context. \
      Images must be inspected multimodally by the Lead Architect.]";
 
+/// Returns whether local vision support is enabled via environment variables.
+pub fn is_vision_enabled() -> bool {
+    std::env::var("CASTOR_ENABLE_VISION")
+        .or_else(|_| std::env::var("CASTOR_VISION"))
+        .is_ok_and(|v| v == "1" || v.eq_ignore_ascii_case("true"))
+}
+
 /// Sanitize a chat-completions request body by replacing image blocks with
 /// text placeholders. Returns `true` if any modification was made.
 ///
@@ -375,6 +382,14 @@ pub const IMAGE_PLACEHOLDER: &str = "[Image file omitted: Local Qwen3.8-27B runs
 /// It prevents the "At most 0 image(s) may be provided" 400 from text-only
 /// engines when a client sends `image_url` / `image` content blocks.
 pub fn sanitize_request_body(body: &mut serde_json::Value) -> bool {
+    sanitize_request_body_with_vision(body, is_vision_enabled())
+}
+
+/// Parameterized request body sanitizer allowing callers/tests to bypass image stripping.
+pub fn sanitize_request_body_with_vision(body: &mut serde_json::Value, vision_enabled: bool) -> bool {
+    if vision_enabled {
+        return false;
+    }
     let mut modified = false;
     if let Some(messages) = body.get_mut("messages").and_then(|m| m.as_array_mut()) {
         for msg in messages.iter_mut() {
@@ -627,6 +642,62 @@ mod tests {
         let modified = sanitize_request_body(&mut body);
         assert!(!modified);
         assert_eq!(body["messages"][0]["content"], "Hello, how are you?");
+    }
+
+    static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    #[test]
+    fn multimodal_guard_allows_images_when_vision_enabled() {
+        let mut body = serde_json::json!({
+            "model": "qwen3.8-27b",
+            "messages": [{
+                "role": "user",
+                "content": [
+                    {"type": "text", "text": "What is this?"},
+                    {"type": "image_url", "image_url": {"url": "data:image/png;base64,..."}}
+                ]
+            }]
+        });
+        let modified = sanitize_request_body_with_vision(&mut body, true);
+        assert!(!modified);
+        let content = body["messages"][0]["content"].as_array().unwrap();
+        assert_eq!(content[1]["type"], "image_url");
+    }
+
+    #[test]
+    fn multimodal_guard_blocks_images_when_vision_disabled() {
+        let mut body = serde_json::json!({
+            "model": "qwen3.8-27b",
+            "messages": [{
+                "role": "user",
+                "content": [
+                    {"type": "image_url", "image_url": {"url": "data:image/png;base64,..."}}
+                ]
+            }]
+        });
+        let modified = sanitize_request_body_with_vision(&mut body, false);
+        assert!(modified);
+        let content = body["messages"][0]["content"].as_array().unwrap();
+        assert_eq!(content[0]["type"], "text");
+        assert!(content[0]["text"].as_str().unwrap().contains("Image file omitted"));
+    }
+
+    #[test]
+    fn vision_env_flags_toggle_detection() {
+        let _guard = ENV_LOCK.lock().unwrap();
+        unsafe {
+            std::env::set_var("CASTOR_ENABLE_VISION", "1");
+            assert!(is_vision_enabled());
+            std::env::set_var("CASTOR_ENABLE_VISION", "0");
+            assert!(!is_vision_enabled());
+            std::env::remove_var("CASTOR_ENABLE_VISION");
+
+            std::env::set_var("CASTOR_VISION", "TRUE");
+            assert!(is_vision_enabled());
+            std::env::set_var("CASTOR_VISION", "false");
+            assert!(!is_vision_enabled());
+            std::env::remove_var("CASTOR_VISION");
+        }
     }
 
     #[test]

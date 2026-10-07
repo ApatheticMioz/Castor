@@ -12,7 +12,9 @@
 //! via `tokio::process` with `process_group(0)`, stdout/stderr captured with
 //! byte caps, and timeout kills the whole process group.
 
-use std::path::{Path, PathBuf};
+use std::path::Path;
+#[cfg(target_os = "linux")]
+use std::path::PathBuf;
 use std::process::Stdio;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, OnceLock};
@@ -689,9 +691,11 @@ async fn execute(cmd: &str, cwd: &Path, timeout: Duration) -> Result<ShellOutput
         .arg("-c")
         .arg(cmd)
         .current_dir(cwd)
-        .process_group(0)
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
+
+    #[cfg(unix)]
+    cmd_builder.process_group(0);
 
     #[cfg(target_os = "linux")]
     if let Some(home) = std::env::var_os("HOME").map(PathBuf::from) {
@@ -741,6 +745,7 @@ async fn execute(cmd: &str, cwd: &Path, timeout: Duration) -> Result<ShellOutput
     }
 
     let mut child = cmd_builder.spawn()?;
+    #[cfg(unix)]
     let pid = child.id().unwrap_or(0);
 
     let stdout = child.stdout.take().expect("piped stdout");

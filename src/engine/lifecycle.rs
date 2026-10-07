@@ -270,10 +270,10 @@ impl EngineLifecycle {
         let Some(mut child) = self.child.lock().await.take() else {
             return Ok(());
         };
-        if let Some(pid) = child.id() {
+        if let Some(_pid) = child.id() {
             #[cfg(unix)]
             unsafe {
-                libc::kill(-(pid as i32), libc::SIGKILL);
+                libc::kill(-(_pid as i32), libc::SIGKILL);
             }
             let _ = child.wait().await;
         }

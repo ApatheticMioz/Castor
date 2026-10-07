@@ -582,13 +582,36 @@ pub async fn run_session(
             };
             tool_activity = true;
 
+            let (tool_content, image_attachment) = if outcome.text.starts_with("[IMAGE_ATTACHMENT:") {
+                if let Some(end_idx) = outcome.text.find(']') {
+                    let header = &outcome.text[..end_idx];
+                    let rest = outcome.text[end_idx + 1..].trim_start_matches(['\r', '\n']);
+                    let data_url = header.strip_prefix("[IMAGE_ATTACHMENT:").unwrap_or("");
+                    let data_url = data_url.split(":path:").next().unwrap_or("");
+                    (rest.to_string(), Some(data_url.to_string()))
+                } else {
+                    (outcome.text.clone(), None)
+                }
+            } else {
+                (outcome.text.clone(), None)
+            };
+
             // Append the tool result as a tool message.
             messages.push(Message {
                 role: "tool".into(),
-                content: outcome.text.clone(),
+                content: tool_content.clone(),
                 tool_call_id: Some(tc.id.clone()),
                 tool_calls: Vec::new(),
             });
+
+            if let Some(data_url) = image_attachment {
+                messages.push(Message {
+                    role: "user".into(),
+                    content: format!("[Visual Inspection Attachment: {data_url}]"),
+                    tool_call_id: None,
+                    tool_calls: Vec::new(),
+                });
+            }
 
             // Record the tool_result event.
             logger
@@ -598,7 +621,7 @@ pub async fn run_session(
                     "tool_call_id": tc.id,
                     "name": tc.name,
                     "is_error": outcome.text.starts_with("Error:"),
-                    "output": outcome.text,
+                    "output": tool_content,
                 }))
                 .map_err(RunnerError::Io)?;
 
@@ -899,6 +922,47 @@ mod tests {
             events
                 .iter()
                 .any(|e| e["type"] == "final" && e["status"] == "completed")
+        );
+    }
+
+    #[tokio::test]
+    async fn image_tool_outcome_attaches_visual_block() {
+        let state = tmp_state();
+        let logger = logger_for(&state);
+        let recorder = std::sync::Arc::new(CallRecorder::default());
+        let engine = RecordingEngine::new(
+            vec![
+                comp("", vec![tc("c1", "read_file", "{\"path\":\"img.png\"}")]),
+                comp("I see a button in the screenshot.", Vec::new()),
+            ],
+            recorder.clone(),
+        );
+        let executor = MockExecutor::new(vec![
+            "[IMAGE_ATTACHMENT:data:image/png;base64,iVBORw0KGgo=:path:img.png]\nSuccessfully loaded image file 'img.png' (12 bytes) for visual inspection.".into(),
+        ]);
+
+        let res = run_session(
+            &engine,
+            &executor,
+            &logger,
+            "sys",
+            "look at img.png",
+            &[tool_schema("read_file")],
+            80,
+            None,
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(res.final_text, "I see a button in the screenshot.");
+        assert_eq!(res.turns, 2);
+
+        let second_call_msgs = &recorder.calls.lock().await[1].messages;
+        assert!(
+            second_call_msgs.iter().any(|m| m.role == "tool" && m.content.contains("Successfully loaded image file"))
+        );
+        assert!(
+            second_call_msgs.iter().any(|m| m.role == "user" && m.content.contains("[Visual Inspection Attachment: data:image/png;base64,iVBORw0KGgo=]"))
         );
     }
 

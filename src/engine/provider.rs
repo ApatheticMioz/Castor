@@ -48,6 +48,32 @@ impl Message {
         obj.insert("role".into(), json!(self.role));
         if self.role == "assistant" && self.content.is_empty() {
             obj.insert("content".into(), Value::Null);
+        } else if self.role == "user"
+            && self.content.trim_start().starts_with("[Visual Inspection Attachment: data:image/")
+        {
+            let trimmed = self.content.trim();
+            if let Some(data_url) = trimmed
+                .strip_prefix("[Visual Inspection Attachment: ")
+                .and_then(|s| s.strip_suffix(']'))
+            {
+                obj.insert(
+                    "content".into(),
+                    json!([
+                        {
+                            "type": "text",
+                            "text": "Inspect the attached image:"
+                        },
+                        {
+                            "type": "image_url",
+                            "image_url": {
+                                "url": data_url.trim()
+                            }
+                        }
+                    ]),
+                );
+            } else {
+                obj.insert("content".into(), json!(self.content));
+            }
         } else {
             obj.insert("content".into(), json!(self.content));
         }
@@ -772,5 +798,54 @@ mod tests {
         let out = client.chat(&[msg()], &[], false, None).await.unwrap();
         let sent = sent_body(&out);
         assert_effort_fields(&sent, None);
+    }
+
+    #[test]
+    fn multimodal_visual_inspection_serializes_image_url() {
+        let m = Message {
+            role: "user".into(),
+            content: "[Visual Inspection Attachment: data:image/png;base64,iVBORw0KGgo=]".into(),
+            tool_calls: vec![],
+            tool_call_id: None,
+        };
+        let json = m.to_json();
+        assert_eq!(json["role"], "user");
+        let parts = json["content"].as_array().expect("must be content array");
+        assert_eq!(parts.len(), 2);
+        assert_eq!(parts[0]["type"], "text");
+        assert_eq!(parts[1]["type"], "image_url");
+        assert_eq!(
+            parts[1]["image_url"]["url"],
+            "data:image/png;base64,iVBORw0KGgo="
+        );
+    }
+
+    #[test]
+    fn multimodal_visual_inspection_with_whitespace_and_newline() {
+        let m = Message {
+            role: "user".into(),
+            content: "  [Visual Inspection Attachment: data:image/jpeg;base64,abc123==] \r\n".into(),
+            tool_calls: vec![],
+            tool_call_id: None,
+        };
+        let json = m.to_json();
+        let parts = json["content"].as_array().expect("must be content array");
+        assert_eq!(parts.len(), 2);
+        assert_eq!(
+            parts[1]["image_url"]["url"],
+            "data:image/jpeg;base64,abc123=="
+        );
+    }
+
+    #[test]
+    fn multimodal_malformed_retains_string_content() {
+        let m = Message {
+            role: "user".into(),
+            content: "[Visual Inspection Attachment: not-an-image]".into(),
+            tool_calls: vec![],
+            tool_call_id: None,
+        };
+        let json = m.to_json();
+        assert!(json["content"].is_string());
     }
 }

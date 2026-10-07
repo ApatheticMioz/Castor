@@ -216,7 +216,7 @@ skills/                  # Reusable SKILL.md workflow recipes
 
 ### 4.3 NEVER
 - **NEVER** let a file or shell operation escape the workspace root. The 5-layer defense is non-negotiable.
-- **NEVER** dump raw binary file bytes (`.pdf`, `.png`, etc.) into plaintext string buffers or transcripts (`BinaryFileError` guard).
+- **NEVER** dump raw binary file bytes (`.png`, `.jpg`, `.exe`, etc.) into plaintext string buffers or transcripts (`BinaryFileError` guard). PDF documents are natively parsed in-memory into clean UTF-8 text by both `read_file` (local filesystem) and `web_fetch` (online URLs) via `lopdf`.
 - **NEVER** silently catch, suppress, or mask errors or upstream HTTP status codes (Rule 8).
 - **NEVER** weaken, skip, or delete a failing test to "unblock" the build.
 - **NEVER** interrupt the running vLLM engine, fire completion probes into `:18020`, or issue stop/reboot commands during testing unless `ALLOW_ENGINE_INTERRUPT=1` is explicitly set.

@@ -767,7 +767,7 @@ fn cap_output_pdf(text: &str, start: usize, end: usize, total_pages: usize) -> (
 // ---------------------------------------------------------------------------
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
     use axum::Router;
     use axum::http::StatusCode;
@@ -1113,7 +1113,7 @@ mod tests {
     ///
     /// Uses the raw lopdf object model to create a minimal valid PDF with a
     /// single page whose content stream draws the text "Hello".
-    fn build_minimal_pdf() -> Vec<u8> {
+    pub fn build_minimal_pdf() -> Vec<u8> {
         use lopdf::content::{Content, Operation};
         use lopdf::{Document, Object, Stream, dictionary};
 

@@ -9,8 +9,8 @@ pub mod dgi;
 pub mod worker;
 
 use rmcp::model::{
-    CallToolRequestParams, CallToolResponse, CallToolResult, ContentBlock, ListToolsResult,
-    PaginatedRequestParams, ServerCapabilities, ServerConfig, Tool,
+    CacheScope, CallToolRequestParams, CallToolResponse, CallToolResult, ContentBlock,
+    ListToolsResult, PaginatedRequestParams, ServerCapabilities, ServerConfig, Tool,
 };
 use rmcp::serve_server;
 use rmcp::service::RequestContext;
@@ -193,6 +193,10 @@ impl CastorMcpServer {
     /// Run the DGI Gatekeeper: 1-forward pass model probe (or soft heuristic
     /// fallback) and return the verdict together with an optional advisory
     /// note to append to the dispatch message.
+    ///
+    /// Queues on the 1-slot [`TaskSemaphore`] as a real task to guarantee exclusive,
+    /// uncontended GPU access. Because DGI is a 1-forward pass logit probe (CIVP gate),
+    /// it executes on the idle engine in <1s and immediately releases the semaphore.
     async fn evaluate_dgi(
         loaded: &crate::config::LoadedConfig,
         prompt: &str,
@@ -200,13 +204,78 @@ impl CastorMcpServer {
         let dgi = if let (Some(base_url), Some(model)) =
             (&loaded.config.base_url, &loaded.config.model)
         {
+            let state = crate::state::StateDir::from_config(&loaded.config);
+            let _ = state.ensure();
+            let max_slots = loaded.config.max_concurrent_tasks as usize;
+            let sem = crate::task::semaphore::TaskSemaphore::new(&state, max_slots);
+            let registry = crate::task::registry::TaskRegistry::new(&state);
+
+            let prompt_preview = if prompt.len() > 60 {
+                format!("[dgi] {}...", &prompt[..60])
+            } else {
+                format!("[dgi] {prompt}")
+            };
+            let dgi_task_id = registry
+                .create(&prompt_preview, "dgi", "dgi_gate")
+                .await
+                .unwrap_or_else(|_| format!("task_dgi_{}", now_epoch_ms()));
+
+            // Queue on the 1-slot semaphore as a real task slot lease.
+            // Guarantees exclusive engine access while executing the 1-forward pass probe.
+            let lease = sem.acquire(&dgi_task_id).await;
+            struct SlotGuard<'a> {
+                sem: &'a crate::task::semaphore::TaskSemaphore,
+                lease: Option<crate::task::semaphore::SlotLease>,
+            }
+            impl<'a> Drop for SlotGuard<'a> {
+                fn drop(&mut self) {
+                    if let Some(ref l) = self.lease.take() {
+                        let _ = self.sem.release(l);
+                    }
+                }
+            }
+            let guard = SlotGuard {
+                sem: &sem,
+                lease: Some(lease),
+            };
+
+            let _ = registry
+                .transition(&dgi_task_id, crate::task::registry::TaskStatus::Executing, None)
+                .await;
+
+            let probe_timeout_secs = std::env::var("CASTOR_DGI_TIMEOUT_SECS")
+                .ok()
+                .and_then(|v| v.parse::<u64>().ok())
+                .unwrap_or(30);
             let http = reqwest::Client::builder()
-                .timeout(std::time::Duration::from_millis(10000))
+                .timeout(std::time::Duration::from_secs(probe_timeout_secs))
                 .build()
                 .unwrap_or_default();
-            match dgi::evaluate_model_probe(base_url, model, prompt, &http).await {
-                Ok(v) => v,
+
+            let probe_res = dgi::evaluate_model_probe(base_url, model, prompt, &http).await;
+
+            // Immediately release the semaphore (<1s slot hold time).
+            drop(guard);
+
+            match probe_res {
+                Ok(v) => {
+                    let _ = registry
+                        .transition(
+                            &dgi_task_id,
+                            crate::task::registry::TaskStatus::Completed,
+                            Some(format!("DGI verdict: {v:?}")),
+                        )
+                        .await;
+                    v
+                }
                 Err(err) => {
+                    let _ = registry
+                        .transition(
+                            &dgi_task_id,
+                            crate::task::registry::TaskStatus::Failed,
+                            Some(format!("DGI probe error: {err}")),
+                        )
+                        .await;
                     tracing::warn!(
                         error = %err,
                         "[dgi] warning: 1-forward pass model probe failed ({err}). \
@@ -604,8 +673,37 @@ impl CastorMcpServer {
             }
             "stats" => {
                 let stats = crate::telemetry::derive_stats(state.root(), &Default::default());
-                let text =
-                    serde_json::to_string_pretty(&stats).unwrap_or_else(|_| "{}".to_string());
+                let text = format!(
+                    "# Castor Telemetry Stats\n\
+                     - total_prompt_tokens: {}\n\
+                     - total_completion_tokens: {}\n\
+                     - total_reasoning_tokens: {}\n\
+                     - total_cached_tokens: {}\n\
+                     - total_sessions: {}\n\
+                     - total_turns: {}\n\
+                     - total_tasks_completed: {}\n\
+                     - total_tasks_failed: {}\n\
+                     - total_tasks_cancelled: {}\n\
+                     - total_tool_calls: {}\n\
+                     - total_tool_errors: {}\n\
+                     - estimated_cost_saved_usd: {:.2}\n\
+                     - net_savings_usd: {:.2}\n\
+                     - benchmark_model: {}\n",
+                    stats.total_prompt_tokens,
+                    stats.total_completion_tokens,
+                    stats.total_reasoning_tokens,
+                    stats.total_cached_tokens,
+                    stats.total_sessions,
+                    stats.total_turns,
+                    stats.total_tasks_completed,
+                    stats.total_tasks_failed,
+                    stats.total_tasks_cancelled,
+                    stats.total_tool_calls,
+                    stats.total_tool_errors,
+                    stats.estimated_cost_saved_usd,
+                    stats.net_savings_usd,
+                    stats.benchmark_model
+                );
                 CallToolResult::success(vec![ContentBlock::text(text)])
             }
             other => CallToolResult::error(vec![ContentBlock::text(format!(
@@ -669,7 +767,10 @@ impl ServerHandler for CastorMcpServer {
         _request: Option<PaginatedRequestParams>,
         _context: RequestContext<RoleServer>,
     ) -> Result<ListToolsResult, rmcp::ErrorData> {
-        Ok(ListToolsResult::with_all_items(self.tools()))
+        let mut result = ListToolsResult::with_all_items(self.tools());
+        result.ttl_ms = Some(300_000);
+        result.cache_scope = Some(CacheScope::Public);
+        Ok(result)
     }
 
     async fn call_tool(
