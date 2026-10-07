@@ -360,7 +360,7 @@ mod tests {
         let root = std::env::temp_dir().join(format!("castor_ast_{}_{}", std::process::id(), name));
         let _ = fs::remove_dir_all(&root);
         fs::create_dir_all(root.join("src")).unwrap();
-        root
+        dunce::canonicalize(&root).unwrap_or(root)
     }
 
     #[test]
@@ -520,8 +520,8 @@ mod tests {
                 "language '{lang}' ({rel}) should match pattern: {pattern}"
             );
             assert_eq!(
-                matches[0].file,
-                expected.to_string_lossy(),
+                std::path::Path::new(&matches[0].file),
+                expected.as_path(),
                 "language '{lang}' resolved to wrong file: {}",
                 matches[0].file
             );

@@ -681,8 +681,24 @@ mod tests {
 
     fn set_mtime(path: &Path, t: SystemTime) {
         let times = std::fs::FileTimes::new().set_modified(t);
-        if let Ok(f) = fs::File::open(path) {
-            let _ = f.set_times(times);
+        #[cfg(windows)]
+        {
+            use std::os::windows::fs::OpenOptionsExt;
+            const FILE_FLAG_BACKUP_SEMANTICS: u32 = 0x0200_0000;
+            const FILE_WRITE_ATTRIBUTES: u32 = 0x0100;
+            if let Ok(f) = fs::OpenOptions::new()
+                .access_mode(FILE_WRITE_ATTRIBUTES)
+                .custom_flags(FILE_FLAG_BACKUP_SEMANTICS)
+                .open(path)
+            {
+                let _ = f.set_times(times);
+            }
+        }
+        #[cfg(not(windows))]
+        {
+            if let Ok(f) = fs::File::open(path) {
+                let _ = f.set_times(times);
+            }
         }
     }
 

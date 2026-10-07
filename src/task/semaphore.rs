@@ -92,7 +92,30 @@ fn is_linux_zombie(pid: u32) -> bool {
         .unwrap_or(false)
 }
 
-#[cfg(not(unix))]
+#[cfg(windows)]
+pub fn pid_alive(pid: u32) -> bool {
+    if pid == 0 {
+        return false;
+    }
+    if pid == std::process::id() {
+        return true;
+    }
+    unsafe {
+        use windows_sys::Win32::Foundation::CloseHandle;
+        use windows_sys::Win32::System::Threading::{
+            OpenProcess, PROCESS_QUERY_LIMITED_INFORMATION,
+        };
+        let handle = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, 0, pid);
+        if !handle.is_null() {
+            CloseHandle(handle);
+            true
+        } else {
+            false
+        }
+    }
+}
+
+#[cfg(all(not(unix), not(windows)))]
 pub fn pid_alive(_pid: u32) -> bool {
     false
 }
@@ -519,7 +542,12 @@ mod tests {
             .and_then(|p| p.parent()) // .../debug
             .unwrap()
             .to_path_buf();
-        debug_dir.join("castor")
+        let bin = debug_dir.join("castor");
+        if cfg!(windows) {
+            bin.with_extension("exe")
+        } else {
+            bin
+        }
     }
 
     /// A defunct (zombie) worker must be treated as DEAD so it cannot hold a

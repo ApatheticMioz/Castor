@@ -163,10 +163,8 @@ impl EngineLifecycle {
 
         let err_buf: Arc<std::sync::Mutex<VecDeque<String>>> =
             Arc::new(std::sync::Mutex::new(VecDeque::new()));
-        let mut c = Command::new("sh");
-        c.arg("-c")
-            .arg(&cmd)
-            .stdin(Stdio::null())
+        let mut c = Self::shell_command(&cmd);
+        c.stdin(Stdio::null())
             .stdout(Stdio::null())
             .stderr(Stdio::piped());
         #[cfg(unix)]
@@ -249,11 +247,26 @@ impl EngineLifecycle {
         self.boot().await
     }
 
+    fn shell_command(cmd: &str) -> Command {
+        #[cfg(windows)]
+        {
+            let mut c = Command::new("cmd");
+            c.raw_arg(format!("/c {cmd}"));
+            c
+        }
+        #[cfg(not(windows))]
+        {
+            let mut c = Command::new("sh");
+            c.arg("-c").arg(cmd);
+            c
+        }
+    }
+
     /// Stop the engine: run the configured `stop_command` if present, else
     /// kill the spawned child's process group.
     pub async fn stop(&self) -> Result<(), LifecycleError> {
         if let Some(cmd) = &self.config.stop_command {
-            let out = Command::new("sh").arg("-c").arg(cmd).output().await?;
+            let out = Self::shell_command(cmd).output().await?;
             if !out.status.success() {
                 return Err(LifecycleError::Stop(format!(
                     "stop command exited {}: {}",
@@ -274,6 +287,10 @@ impl EngineLifecycle {
             #[cfg(unix)]
             unsafe {
                 libc::kill(-(_pid as i32), libc::SIGKILL);
+            }
+            #[cfg(windows)]
+            {
+                crate::platform::kill_process_tree(_pid);
             }
             let _ = child.wait().await;
         }
@@ -316,6 +333,35 @@ mod tests {
                 return false;
             }
             tokio::time::sleep(interval).await;
+        }
+    }
+
+    fn test_sleep(secs: f64) -> String {
+        if cfg!(windows) {
+            format!("powershell -Command \"Start-Sleep -Seconds {}\"", secs)
+        } else {
+            format!("sleep {secs}")
+        }
+    }
+
+    fn test_touch(path: &Path) -> String {
+        if cfg!(windows) {
+            format!("type nul > \"{}\"", path.display())
+        } else {
+            format!("touch \"{}\"", path.display())
+        }
+    }
+
+    fn test_delay_and_touch(millis: u64, path: &Path) -> String {
+        if cfg!(windows) {
+            format!(
+                "powershell -Command \"Start-Sleep -Milliseconds {}\" & type nul > \"{}\"",
+                millis,
+                path.display()
+            )
+        } else {
+            let secs = millis as f64 / 1000.0;
+            format!("sleep {}; touch \"{}\"", secs, path.display())
         }
     }
 
@@ -430,7 +476,8 @@ mod tests {
         let state = tmp_state();
         let marker = state.root().join("launched.marker");
         let (_base, port) = start_mock(vec!["test-model".into()], u64::MAX).await;
-        let mut cfg = test_config(&state, Some(&format!("touch {}", marker.display())), None);
+        let touch_cmd = test_touch(&marker);
+        let mut cfg = test_config(&state, Some(&touch_cmd), None);
         cfg.ports.engine = port;
         let lc = EngineLifecycle::new(&cfg, &state).with_boot_timeout(Duration::from_millis(2000));
         let err = lc.boot().await.unwrap_err();
@@ -451,11 +498,9 @@ mod tests {
         let state = tmp_state();
         let stop_marker = state.root().join("stopped.marker");
         let (_base, port) = start_mock(vec!["test-model".into()], u64::MAX).await;
-        let mut cfg = test_config(
-            &state,
-            Some("sleep 30"),
-            Some(&format!("touch {}", stop_marker.display())),
-        );
+        let sleep_cmd = test_sleep(30.0);
+        let touch_cmd = test_touch(&stop_marker);
+        let mut cfg = test_config(&state, Some(&sleep_cmd), Some(&touch_cmd));
         cfg.ports.engine = port;
         let lc = EngineLifecycle::new(&cfg, &state).with_boot_timeout(Duration::from_millis(500));
 
@@ -485,11 +530,9 @@ mod tests {
         let state = tmp_state();
         let stop_marker = state.root().join("stopped2.marker");
         let (_base, port) = start_mock(vec!["test-model".into()], u64::MAX).await;
-        let mut cfg = test_config(
-            &state,
-            Some("sleep 30"),
-            Some(&format!("sleep 0.2; touch {}", stop_marker.display())),
-        );
+        let sleep_cmd = test_sleep(30.0);
+        let delay_touch_cmd = test_delay_and_touch(200, &stop_marker);
+        let mut cfg = test_config(&state, Some(&sleep_cmd), Some(&delay_touch_cmd));
         cfg.ports.engine = port;
         let lc = Arc::new(
             EngineLifecycle::new(&cfg, &state).with_boot_timeout(Duration::from_millis(800)),
@@ -526,7 +569,8 @@ mod tests {
     async fn stop_runs_stop_command() {
         let state = tmp_state();
         let marker = state.root().join("stop.marker");
-        let cfg = test_config(&state, None, Some(&format!("touch {}", marker.display())));
+        let touch_cmd = test_touch(&marker);
+        let cfg = test_config(&state, None, Some(&touch_cmd));
         let lc = EngineLifecycle::new(&cfg, &state);
         lc.stop().await.unwrap();
         assert!(marker.exists());
@@ -536,7 +580,8 @@ mod tests {
     async fn stale_boot_lock_reclaimed() {
         let state = tmp_state();
         let (_base, port) = start_mock(vec!["test-model".into()], u64::MAX).await;
-        let mut cfg = test_config(&state, Some("sleep 30"), None);
+        let sleep_cmd = test_sleep(30.0);
+        let mut cfg = test_config(&state, Some(&sleep_cmd), None);
         cfg.ports.engine = port;
 
         // Backdate a foreign boot lock well beyond its TTL.
@@ -563,6 +608,7 @@ mod tests {
         );
     }
 
+    #[cfg(unix)]
     #[tokio::test]
     async fn stop_kills_process_group_when_no_stop_command() {
         let state = tmp_state();

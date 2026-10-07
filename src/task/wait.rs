@@ -444,6 +444,12 @@ mod tests {
 
     /// A dead pid (spawn a child, wait for it to exit).
     fn dead_pid() -> u32 {
+        #[cfg(windows)]
+        let mut c = std::process::Command::new("cmd")
+            .args(["/c", "exit", "0"])
+            .spawn()
+            .unwrap();
+        #[cfg(not(windows))]
         let mut c = std::process::Command::new("true").spawn().unwrap();
         let pid = c.id();
         let _ = c.wait();

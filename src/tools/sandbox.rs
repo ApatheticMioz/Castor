@@ -65,7 +65,7 @@ pub fn resolve_workspace_root(root: &Path) -> Result<PathBuf, SandboxError> {
             root.display()
         )));
     }
-    fs::canonicalize(&host_root).map_err(|e| {
+    dunce::canonicalize(&host_root).map_err(|e| {
         SandboxError::WorkspaceRoot(format!(
             "WorkspaceRootError: cannot canonicalize workspace root '{}': {e}",
             root.display()
@@ -74,7 +74,24 @@ pub fn resolve_workspace_root(root: &Path) -> Result<PathBuf, SandboxError> {
 }
 
 fn is_within(path: &Path, root: &Path) -> bool {
-    path.strip_prefix(root).is_ok()
+    if path.strip_prefix(root).is_ok() {
+        return true;
+    }
+    #[cfg(windows)]
+    {
+        let p_str = path
+            .to_string_lossy()
+            .replace('/', "\\")
+            .to_ascii_lowercase();
+        let r_str = root
+            .to_string_lossy()
+            .replace('/', "\\")
+            .to_ascii_lowercase();
+        if p_str == r_str || p_str.starts_with(&format!("{r_str}\\")) {
+            return true;
+        }
+    }
+    false
 }
 
 /// Layer 2: refuse symlink escapes. An existing target must canonicalize
@@ -82,7 +99,7 @@ fn is_within(path: &Path, root: &Path) -> bool {
 /// canonicalize inside the root.
 pub fn verify_symlink_containment(target: &Path, root: &Path) -> Result<PathBuf, SandboxError> {
     if target.exists() {
-        let real = fs::canonicalize(target)?;
+        let real = dunce::canonicalize(target)?;
         if !is_within(&real, root) {
             return Err(SandboxError::SymlinkEscape(format!(
                 "SymlinkEscapeError: Real path '{}' escapes sandbox root '{}'",
@@ -99,7 +116,7 @@ pub fn verify_symlink_containment(target: &Path, root: &Path) -> Result<PathBuf,
             break;
         }
         if p.exists() {
-            let real = fs::canonicalize(&p)?;
+            let real = dunce::canonicalize(&p)?;
             if !is_within(&real, root) {
                 return Err(SandboxError::SymlinkEscape(format!(
                     "SymlinkEscapeError: Parent directory '{}' resolves to '{}' escaping root '{}'",
@@ -117,7 +134,13 @@ pub fn verify_symlink_containment(target: &Path, root: &Path) -> Result<PathBuf,
 
 /// Layer 3: refuse absolute paths that do not land inside the workspace root.
 pub fn refuse_out_of_tree(root: &Path, target: &Path) -> Result<PathBuf, SandboxError> {
-    if target.is_absolute() && !is_within(target, root) {
+    let s = target.to_string_lossy();
+    let is_root_anchored = target.is_absolute()
+        || s.starts_with('/')
+        || s.starts_with('\\')
+        || (s.len() >= 2 && s.as_bytes()[1] == b':' && s.as_bytes()[0].is_ascii_alphabetic());
+
+    if is_root_anchored && !is_within(target, root) {
         return Err(SandboxError::PathEscape(format!(
             "PathEscapeError: Access denied. Path '{}' escapes sandbox root '{}'",
             target.display(),
@@ -262,13 +285,17 @@ impl ResolvedPath {
 }
 
 fn canonical_or_self(p: &Path) -> PathBuf {
-    fs::canonicalize(p).unwrap_or_else(|_| p.to_path_buf())
+    dunce::canonicalize(p).unwrap_or_else(|_| p.to_path_buf())
 }
 
-fn dedupe(mut v: Vec<PathBuf>) -> Vec<PathBuf> {
-    v.sort();
-    v.dedup();
-    v
+fn dedupe(v: Vec<PathBuf>) -> Vec<PathBuf> {
+    let mut out = Vec::new();
+    for p in v {
+        if !out.contains(&p) {
+            out.push(p);
+        }
+    }
+    out
 }
 
 /// Canonical `$HOME` for the current user (platform-aware).
@@ -428,14 +455,8 @@ impl SandboxPolicy {
 
         // (5) Lexical out-of-tree check first — a plainly-absolute path outside
         // every root is a PathEscape (layer 3), not a symlink error.
-        let lexical_in_write = self
-            .write_roots
-            .iter()
-            .any(|r| normalized.strip_prefix(r).is_ok());
-        let lexical_in_read = self
-            .read_roots
-            .iter()
-            .any(|r| normalized.strip_prefix(r).is_ok());
+        let lexical_in_write = self.write_roots.iter().any(|r| is_within(&normalized, r));
+        let lexical_in_read = self.read_roots.iter().any(|r| is_within(&normalized, r));
         if !lexical_in_write && !lexical_in_read {
             return Err(SandboxError::PathEscape(format!(
                 "PathEscapeError: Access denied. Path '{}' escapes all allowed roots",
@@ -446,15 +467,12 @@ impl SandboxPolicy {
         // (6) Symlink containment: resolve to the real location; it must itself
         // land inside a root or the symlink escapes the sandbox.
         let real = if normalized.exists() {
-            fs::canonicalize(&normalized).unwrap_or(normalized.clone())
+            dunce::canonicalize(&normalized).unwrap_or(normalized.clone())
         } else {
             normalized.clone()
         };
-        let real_in_write = self
-            .write_roots
-            .iter()
-            .any(|r| real.strip_prefix(r).is_ok());
-        let real_in_read = self.read_roots.iter().any(|r| real.strip_prefix(r).is_ok());
+        let real_in_write = self.write_roots.iter().any(|r| is_within(&real, r));
+        let real_in_read = self.read_roots.iter().any(|r| is_within(&real, r));
         if !real_in_write && !real_in_read {
             return Err(SandboxError::SymlinkEscape(format!(
                 "SymlinkEscapeError: Path '{}' resolves to '{}' escaping all allowed roots",
@@ -579,7 +597,7 @@ mod tests {
     fn workspace_root_resolves_to_canonical() {
         let root = test_root("root_ok");
         let resolved = resolve_workspace_root(&root).unwrap();
-        assert_eq!(resolved, fs::canonicalize(&root).unwrap());
+        assert_eq!(resolved, dunce::canonicalize(&root).unwrap());
     }
 
     #[test]

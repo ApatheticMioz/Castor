@@ -347,6 +347,7 @@ dependencies = [
  "axum",
  "chrono",
  "clap",
+ "dunce",
  "encoding_rs",
  "futures-util",
  "html2md",
@@ -368,6 +369,7 @@ dependencies = [
  "toml",
  "tracing",
  "tracing-subscriber",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]

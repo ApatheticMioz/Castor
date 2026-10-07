@@ -281,8 +281,14 @@ fn apply_setup(task_dir: &Path, config: &TaskConfig, workspace: &Path) -> Result
     if !setup_path.is_file() {
         return Ok(()); // declared but missing → no-op
     }
-    let output = std::process::Command::new("bash")
-        .arg(&setup_path)
+    let bash = crate::platform::bash_path();
+    let bash_arg = if cfg!(windows) {
+        setup_path.to_string_lossy().to_string()
+    } else {
+        crate::platform::to_wsl_path(&setup_path)
+    };
+    let output = std::process::Command::new(bash)
+        .arg(&bash_arg)
         .current_dir(workspace)
         .output()
         .map_err(|e| format!("spawn {}: {e}", setup_path.display()))?;

@@ -686,7 +686,8 @@ fn build_landlock_ruleset(cwd: &Path) -> Result<landlock::RulesetCreated, String
 
 async fn execute(cmd: &str, cwd: &Path, timeout: Duration) -> Result<ShellOutput, ShellError> {
     let t0 = Instant::now();
-    let mut cmd_builder = tokio::process::Command::new("bash");
+    let bash = crate::platform::bash_path();
+    let mut cmd_builder = tokio::process::Command::new(bash);
     cmd_builder
         .arg("-c")
         .arg(cmd)
@@ -745,7 +746,6 @@ async fn execute(cmd: &str, cwd: &Path, timeout: Duration) -> Result<ShellOutput
     }
 
     let mut child = cmd_builder.spawn()?;
-    #[cfg(unix)]
     let pid = child.id().unwrap_or(0);
 
     let stdout = child.stdout.take().expect("piped stdout");
@@ -824,7 +824,12 @@ async fn execute(cmd: &str, cwd: &Path, timeout: Duration) -> Result<ShellOutput
                     libc::waitpid(pid as i32, &mut st, 0);
                 }
             }
-            #[cfg(not(unix))]
+            #[cfg(windows)]
+            if pid > 0 {
+                crate::platform::kill_process_tree(pid);
+                let _ = child.kill().await;
+            }
+            #[cfg(not(any(unix, windows)))]
             {
                 let _ = child.kill().await;
             }

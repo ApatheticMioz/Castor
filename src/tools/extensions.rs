@@ -449,7 +449,8 @@ for line in sys.stdin:
 
     fn mock_command() -> String {
         let path = write_mock();
-        format!("python3 {}", path.display())
+        let py = if cfg!(windows) { "python" } else { "python3" };
+        format!("{py} {}", path.display())
     }
 
     /// Is a pid alive? (Unix: signal 0; Windows: tasklist probe.)
