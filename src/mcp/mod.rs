@@ -200,6 +200,18 @@ impl CastorMcpServer {
         {
             let state = crate::state::StateDir::from_config(&loaded.config);
             let _ = state.ensure();
+
+            let lc = crate::engine::EngineLifecycle::new(&loaded.config, &state);
+            if !lc.canary().await {
+                let fallback = dgi::evaluate(prompt);
+                let note = if loaded.config.launch_command.is_some() {
+                    Some("- **[DGI]**: Engine is currently offline (auto-boot will start it); 1-forward pass model probe bypassed with soft heuristic.".to_string())
+                } else {
+                    Some("- **[DGI]**: Engine is offline; 1-forward pass model probe bypassed with soft heuristic.".to_string())
+                };
+                return (fallback, note);
+            }
+
             let max_slots = loaded.config.max_concurrent_tasks as usize;
             let sem = crate::task::semaphore::TaskSemaphore::new(&state, max_slots);
             let registry = crate::task::registry::TaskRegistry::new(&state);
@@ -414,9 +426,19 @@ impl CastorMcpServer {
         let bin = Self::resolve_worker_bin();
         let mut cmd = tokio::process::Command::new(&bin);
         cmd.arg("__worker").arg(&spec_path);
+        let log_file = state.tasks().join(format!("worker_{task_id}.log"));
         cmd.stdin(std::process::Stdio::null());
-        cmd.stdout(std::process::Stdio::null());
-        cmd.stderr(std::process::Stdio::null());
+        if let Ok(file) = std::fs::File::create(&log_file) {
+            if let Ok(dup) = file.try_clone() {
+                cmd.stdout(dup);
+            } else {
+                cmd.stdout(std::process::Stdio::null());
+            }
+            cmd.stderr(file);
+        } else {
+            cmd.stdout(std::process::Stdio::null());
+            cmd.stderr(std::process::Stdio::null());
+        }
         #[cfg(unix)]
         cmd.process_group(0);
 

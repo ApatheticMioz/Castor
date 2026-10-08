@@ -59,11 +59,33 @@ fn now_epoch_ms() -> u64 {
 
 /// Execute a job specification against the real local engine.
 pub async fn run_job(spec: &JobSpec, state: &StateDir, config: &Config) -> Result<String, String> {
+    let registry = TaskRegistry::new(state);
+    let now = now_epoch_ms();
+    let _ = registry
+        .update(&spec.task_id, |r| {
+            r.pid = Some(std::process::id());
+            r.heartbeat = now;
+        })
+        .await;
+
     let lc = crate::engine::EngineLifecycle::new(config, state);
     if let Err(e) = lc.ensure_running().await {
-        return Err(format!("Engine auto-boot failed: {e}"));
+        let err_msg = format!("Engine auto-boot failed: {e}");
+        let _ = registry
+            .transition(&spec.task_id, TaskStatus::Failed, Some(err_msg.clone()))
+            .await;
+        return Err(err_msg);
     }
-    let engine = EngineClient::from_config(config).map_err(|e| e.to_string())?;
+    let engine = match EngineClient::from_config(config) {
+        Ok(eng) => eng,
+        Err(e) => {
+            let err_msg = e.to_string();
+            let _ = registry
+                .transition(&spec.task_id, TaskStatus::Failed, Some(err_msg.clone()))
+                .await;
+            return Err(err_msg);
+        }
+    };
     run_job_with_engine(spec, state, config, &engine).await
 }
 
@@ -402,6 +424,48 @@ mod tests {
             serde_json::json!("xhigh"),
             "session_start must carry the tier string: {session_start}"
         );
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[tokio::test]
+    async fn run_job_marks_task_failed_when_auto_boot_fails() {
+        let dir = std::env::temp_dir().join(format!("test_boot_fail_{}", now_epoch_ms()));
+        let state = StateDir::new(&dir);
+        state.ensure().unwrap();
+
+        let registry = TaskRegistry::new(&state);
+        let task_id = registry
+            .create("failing boot task", "test", "sess_boot_fail")
+            .await
+            .unwrap();
+
+        let spec = JobSpec {
+            task_id: task_id.clone(),
+            prompt: "failing boot task".into(),
+            cwd: "test".into(),
+            session_id: "sess_boot_fail".into(),
+            reasoning_effort: None,
+            extensions: None,
+            skills: None,
+            test_command: None,
+            turns_budget: None,
+            timeout_ms: None,
+        };
+
+        let loaded = crate::config::load().expect("load default config");
+        let mut config = loaded.config;
+        config.state_dir = dir.clone();
+        config.launch_command = None;
+        config.ports.engine = 0;
+
+        let res = run_job(&spec, &state, &config).await;
+        assert!(res.is_err());
+        assert!(res.unwrap_err().contains("Engine auto-boot failed"));
+
+        let rec = registry.get(&task_id).await.expect("task record exists");
+        assert_eq!(rec.status, TaskStatus::Failed);
+        assert!(rec.reason.unwrap().contains("Engine auto-boot failed"));
 
         let _ = std::fs::remove_dir_all(&dir);
     }

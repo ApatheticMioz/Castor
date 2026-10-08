@@ -23,7 +23,9 @@ use crate::engine::{EngineClient, EngineError, Message, Metrics, ToolSchema};
 use crate::state::StateDir;
 
 use events::EventLogger;
-use loop_detector::{LoopDetector, LoopState, PROBE_ADVISORY, ProbeState, ProbeTracker};
+use loop_detector::{
+    LoopDetector, LoopState, PROBE_ADVISORY, ProbeState, ProbeTracker, is_read_only_prompt,
+};
 
 /// Default turn budget (from the task record; extendable up to `MAX_ELASTIC_TURNS`).
 pub const DEFAULT_TURNS_BUDGET: u32 = 80;
@@ -320,7 +322,8 @@ pub async fn run_session(
     let mut messages = vec![msg("system", system_prompt), msg("user", user_prompt)];
     let mut loop_detector = LoopDetector::new(LOOP_WINDOW, LOOP_THRESHOLD);
     let probe_budget = options.map_or(DEFAULT_PROBE_BUDGET, |o| o.probe_budget);
-    let mut probe_tracker = ProbeTracker::new(probe_budget);
+    let is_read_only = is_read_only_prompt(user_prompt);
+    let mut probe_tracker = ProbeTracker::new(probe_budget).with_read_only(is_read_only);
     let mut turns: u32 = 0;
     let mut final_text = String::new();
     let mut final_produced = false;
@@ -1719,6 +1722,55 @@ mod tests {
         .await;
 
         assert!(matches!(res, Err(RunnerError::ProbeImpasse { probes: 6 })));
+        let _ = std::fs::remove_dir_all(state.root());
+    }
+
+    #[tokio::test]
+    async fn read_only_prompt_does_not_trip_probe_impasse() {
+        let state = tmp_state();
+        let logger = logger_for(&state);
+        let recorder = std::sync::Arc::new(CallRecorder::default());
+        let executor = MockExecutor::new(vec![
+            "out1".into(),
+            "out2".into(),
+            "out3".into(),
+            "out4".into(),
+            "out5".into(),
+            "out6".into(),
+            "out7".into(),
+        ]);
+
+        let engine = RecordingEngine::new(
+            vec![
+                comp("", vec![tc("c1", "bash", r#"{"command":"git log"}"#)]),
+                comp("", vec![tc("c2", "bash", r#"{"command":"git diff"}"#)]),
+                comp("", vec![tc("c3", "bash", r#"{"command":"git status"}"#)]),
+                comp("", vec![tc("c4", "bash", r#"{"command":"git tag"}"#)]),
+                comp("", vec![tc("c5", "bash", r#"{"command":"git rev-list"}"#)]),
+                comp("", vec![tc("c6", "bash", r#"{"command":"git shortlog"}"#)]),
+                comp("", vec![tc("c7", "bash", r#"{"command":"git show"}"#)]),
+                comp("Velocity report complete.", vec![]),
+            ],
+            recorder.clone(),
+        );
+
+        let mut opts = SessionOptions::with_state(state.clone());
+        opts.probe_budget = 2; // threshold 2, impasse ceiling 6
+
+        let res = run_session(
+            &engine,
+            &executor,
+            &logger,
+            "sys",
+            "RESEARCH SLICE A1 — strictly read-only: no file writes",
+            &[tool_schema("bash")],
+            80,
+            Some(&opts),
+        )
+        .await;
+
+        assert!(res.is_ok(), "read-only prompt must not trip probe impasse: {res:?}");
+        assert_eq!(res.unwrap().final_text, "Velocity report complete.");
         let _ = std::fs::remove_dir_all(state.root());
     }
 

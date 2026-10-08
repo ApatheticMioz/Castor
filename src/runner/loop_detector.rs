@@ -112,6 +112,20 @@ pub enum ProbeState {
 /// Tracks consecutive non-mutating exploratory probes (`bash` commands that
 /// do not target `.scratch/`) and signals when the probe budget is reached
 /// or when an impasse is encountered.
+/// Returns `true` when a prompt specifies a read-only or analysis task.
+pub fn is_read_only_prompt(prompt: &str) -> bool {
+    let p = prompt.to_lowercase();
+    p.contains("read-only")
+        || p.contains("read only")
+        || p.contains("readonly")
+        || p.contains("no file writes")
+        || p.contains("no mutations")
+        || p.contains("pure read")
+}
+
+/// Tracks consecutive non-mutating exploratory probes (`bash` commands that
+/// do not target `.scratch/`) and signals when the probe budget is reached
+/// or when an impasse is encountered.
 ///
 /// Mutating tools (`write_file`, `edit_file`, `ast_replace`, `apply_patch`)
 /// reset the counter. Commands that reference a `.scratch/` path component
@@ -121,19 +135,30 @@ pub struct ProbeTracker {
     budget: usize,
     consecutive_probes: usize,
     advisory_injected: bool,
+    read_only: bool,
 }
 
 impl ProbeTracker {
     pub fn new(budget: usize) -> Self {
         Self {
-            budget: budget.max(1),
+            budget,
             consecutive_probes: 0,
             advisory_injected: false,
+            read_only: false,
         }
+    }
+
+    pub fn with_read_only(mut self, read_only: bool) -> Self {
+        self.read_only = read_only;
+        self
     }
 
     /// Record a tool execution and evaluate probe state.
     pub fn record(&mut self, name: &str, args: &str) -> ProbeState {
+        // Disabled when budget is 0 or when running in a read-only session.
+        if self.budget == 0 || self.read_only {
+            return ProbeState::Ok;
+        }
         // Mutating tools reset the probe streak.
         if is_mutating_tool(name) {
             self.consecutive_probes = 0;
@@ -337,4 +362,31 @@ mod tests {
         // `.scratch` as part of a longer name should NOT match.
         assert!(!targets_scratchpad("cat .scratchpad/file.txt"));
     }
+
+    #[test]
+    fn read_only_probe_tracker_never_trips_advisory_or_impasse() {
+        let mut t = ProbeTracker::new(1).with_read_only(true);
+        for _ in 0..20 {
+            assert_eq!(t.record("bash", "{\"command\":\"git log\"}"), ProbeState::Ok);
+        }
+        assert_eq!(t.consecutive_probes(), 0);
+    }
+
+    #[test]
+    fn zero_budget_disables_probe_tracker() {
+        let mut t = ProbeTracker::new(0);
+        for _ in 0..20 {
+            assert_eq!(t.record("bash", "{\"command\":\"ls\"}"), ProbeState::Ok);
+        }
+        assert_eq!(t.consecutive_probes(), 0);
+    }
+
+    #[test]
+    fn read_only_prompt_classification() {
+        assert!(is_read_only_prompt("RESEARCH SLICE A1 — strictly read-only: no file writes"));
+        assert!(is_read_only_prompt("READ-ONLY ANALYSIS TASK"));
+        assert!(is_read_only_prompt("Query git history, readonly, pure read"));
+        assert!(!is_read_only_prompt("Implement feature X in src/runner/mod.rs"));
+    }
 }
+
