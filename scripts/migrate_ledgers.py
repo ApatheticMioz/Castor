@@ -114,11 +114,11 @@ def main():
     total_lines_migrated = 0
     paths = []
     
-    for base in ["/mnt/c/Users/Apath/.castor/sessions", "/mnt/c/Users/Apath/.anser/sessions"]:
+    for base in ["/mnt/c/Users/Apath/.castor/sessions"]:
         if os.path.exists(base):
             paths.extend(glob.glob(f"{base}/*/events.jsonl"))
             
-    print(f"Discovered {len(paths)} session files across .castor and .anser.")
+    print(f"Discovered {len(paths)} session files across .castor.")
     
     for p in paths:
         changed, m_lines, t_lines = migrate_file(p)

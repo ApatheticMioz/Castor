@@ -1236,7 +1236,8 @@ mod tests {
 
     #[tokio::test]
     async fn stdio_task_status_and_cancel() {
-        let (mut child, mut reader, mut stdin) = spawn_and_handshake(&[], &[]).await;
+        let (mut child, mut reader, mut stdin) =
+            spawn_and_handshake(&[], &[("CASTOR_SYNC_TIMEOUT_SECS", "0")]).await;
 
         send_line(
             &mut stdin,

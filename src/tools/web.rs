@@ -47,7 +47,7 @@ pub enum WebError {
     )]
     SearxngNotConfigured,
     #[error(
-        "SearxngUnreachableError: SearXNG at {url} is unreachable ({reason}). Verify the instance is running (e.g. `docker start anser-searxng` or `docker compose up -d`) and that `searxng_url` points at it, or configure a `brave_api_key` to fall back to Brave."
+        "SearxngUnreachableError: SearXNG at {url} is unreachable ({reason}). Verify the instance is running (e.g. `docker start castor-searxng` or `docker compose up -d`) and that `searxng_url` points at it, or configure a `brave_api_key` to fall back to Brave."
     )]
     SearxngUnreachable { url: String, reason: String },
     #[error("BraveSearchError: {0}")]
@@ -156,18 +156,42 @@ impl WebClient {
             return Err(WebError::InvalidQuery);
         }
 
-        // 1. SearXNG (only when configured). A configured-but-failing instance
-        //    is a hard, actionable error — no silent fallthrough.
+        // 1. SearXNG (only when configured).
         if let Some(base) = self.searxng_base.as_deref() {
             match self.search_searxng(q, base, category).await {
-                Ok(results) => {
+                Ok(results) if !results.is_empty() => {
                     return Ok(SearchOutcome {
                         query: q.to_string(),
                         provider: "searxng".into(),
                         results,
                     });
                 }
-                Err(e) => return Err(e),
+                Ok(results) => {
+                    if let Some(key) = brave_api_key.filter(|k| !k.is_empty()) {
+                        let brave_results = self.search_brave(q, key).await?;
+                        return Ok(SearchOutcome {
+                            query: q.to_string(),
+                            provider: "brave".into(),
+                            results: brave_results,
+                        });
+                    }
+                    return Ok(SearchOutcome {
+                        query: q.to_string(),
+                        provider: "searxng".into(),
+                        results,
+                    });
+                }
+                Err(e) => {
+                    if let Some(key) = brave_api_key.filter(|k| !k.is_empty()) {
+                        let brave_results = self.search_brave(q, key).await?;
+                        return Ok(SearchOutcome {
+                            query: q.to_string(),
+                            provider: "brave".into(),
+                            results: brave_results,
+                        });
+                    }
+                    return Err(e);
+                }
             }
         }
 
@@ -691,7 +715,9 @@ pub(crate) mod tests {
             std::collections::HashMap<String, String>,
         >,
     ) -> axum::response::Response {
-        if let Some(cat) = params.get("categories") {
+        if params.get("q").map(|s| s.as_str()) == Some("empty") {
+            json_body(r#"{"results":[]}"#)
+        } else if let Some(cat) = params.get("categories") {
             json_body(&format!(
                 r#"{{"results":[{{"title":"SearXNG {cat} Result","url":"https://searx.example/{cat}","content":"{cat} snippet"}}]}}"#
             ))
@@ -828,6 +854,35 @@ pub(crate) mod tests {
         assert_eq!(out.results[0].title, "Brave Result");
         assert_eq!(out.results[0].url, "https://brave.example/b");
         assert_eq!(out.results[0].snippet, "brave snippet");
+    }
+
+    #[tokio::test]
+    async fn searxng_empty_falls_back_to_brave_when_configured() {
+        let base = start(router()).await;
+        let c = WebClient::with_base_urls(
+            Some(format!("{base}/searxng")),
+            Some(format!("{base}/brave")),
+        );
+        let out = c.web_search("empty", Some("bkey"), None).await.unwrap();
+        assert_eq!(out.provider, "brave");
+        assert_eq!(out.results.len(), 1);
+        assert_eq!(out.results[0].title, "Brave Result");
+    }
+
+    #[tokio::test]
+    async fn searxng_down_falls_back_to_brave_when_configured() {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        drop(listener);
+        let base = start(router()).await;
+        let c = WebClient::with_base_urls(
+            Some(format!("http://127.0.0.1:{port}")),
+            Some(format!("{base}/brave")),
+        );
+        let out = c.web_search("rust", Some("bkey"), None).await.unwrap();
+        assert_eq!(out.provider, "brave");
+        assert_eq!(out.results.len(), 1);
+        assert_eq!(out.results[0].title, "Brave Result");
     }
 
     #[tokio::test]
