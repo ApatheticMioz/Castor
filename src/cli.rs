@@ -137,6 +137,9 @@ fn format_plan(plan: &pruner::PrunePlan) -> String {
     for p in &plan.evo {
         out.push_str(&format!("evo       {}\n", p.display()));
     }
+    for p in &plan.scratch {
+        out.push_str(&format!("scratch   {}\n", p.display()));
+    }
     out
 }
 
@@ -167,6 +170,16 @@ pub fn run_clean(state_dir: &std::path::Path, yes: bool) -> Result<String, Strin
     }
     for p in &plan.evo {
         out.push_str(&format!("deleted evo       {}\n", p.display()));
+    }
+    for p in &plan.scratch {
+        out.push_str(&format!("deleted scratch   {}\n", p.display()));
+    }
+    let cwd_scratch = std::path::Path::new(".scratch");
+    if cwd_scratch.is_dir()
+        && let Ok(ws_deleted) = pruner::prune_scratch_dir(cwd_scratch, pruner::DEFAULT_SCRATCH_TTL_MS, None)
+        && ws_deleted > 0
+    {
+        out.push_str(&format!("deleted {ws_deleted} workspace .scratch item(s)\n"));
     }
     out.push_str(&format!("deleted {deleted} item(s)\n"));
     Ok(out)

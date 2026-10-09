@@ -26,6 +26,9 @@ use std::path::{Path, PathBuf};
 
 use thiserror::Error;
 
+/// Default TTL for scratch directory artifacts (4 days in milliseconds).
+pub const DEFAULT_SCRATCH_TTL_MS: u64 = 4 * 86_400_000;
+
 /// Retention policy (defaults ported from `state_pruner.js`).
 #[derive(Debug, Clone)]
 pub struct PrunePolicy {
@@ -35,6 +38,8 @@ pub struct PrunePolicy {
     pub max_count: usize,
     /// Max total session size in MB (default 50).
     pub max_size_mb: u64,
+    /// Max scratch artifact age in milliseconds (default 4 days).
+    pub scratch_ttl_ms: u64,
     /// Override "now" (epoch ms) for deterministic tests.
     pub now: Option<u64>,
 }
@@ -45,6 +50,7 @@ impl Default for PrunePolicy {
             max_age_ms: 14 * 86_400_000,
             max_count: 200,
             max_size_mb: 50,
+            scratch_ttl_ms: DEFAULT_SCRATCH_TTL_MS,
             now: None,
         }
     }
@@ -75,6 +81,8 @@ pub struct PrunePlan {
     pub telemetry: Vec<PathBuf>,
     /// Evo sub-directories to remove (`remove_dir_all`).
     pub evo: Vec<PathBuf>,
+    /// Scratch directories or files to remove.
+    pub scratch: Vec<PathBuf>,
     /// Set to `true` by [`apply`] once the plan has been executed.
     pub applied: bool,
 }
@@ -82,7 +90,11 @@ pub struct PrunePlan {
 impl PrunePlan {
     /// Total number of paths this plan would delete.
     pub fn len(&self) -> usize {
-        self.sessions.len() + self.tasks.len() + self.telemetry.len() + self.evo.len()
+        self.sessions.len()
+            + self.tasks.len()
+            + self.telemetry.len()
+            + self.evo.len()
+            + self.scratch.len()
     }
 
     pub fn is_empty(&self) -> bool {
@@ -121,7 +133,7 @@ impl PartialEq for PruneError {
 /// Compute a [`PrunePlan`] for `state_dir` under `policy`.
 ///
 /// This is a pure read: nothing is deleted. The returned plan lists exactly
-/// the sessions / tasks / telemetry / evo entries that would be deleted.
+/// the sessions / tasks / telemetry / evo / scratch entries that would be deleted.
 pub fn plan(state_dir: &Path, policy: &PrunePolicy) -> PrunePlan {
     let now = policy.now();
 
@@ -129,8 +141,16 @@ pub fn plan(state_dir: &Path, policy: &PrunePolicy) -> PrunePlan {
     let tasks = plan_tasks(state_dir, policy, now);
     let telemetry = plan_telemetry(state_dir, policy, now);
     let evo = plan_evo(state_dir, policy, now);
+    let scratch = plan_scratch(&state_dir.join(".scratch"), policy.scratch_ttl_ms, now);
 
-    let fingerprint = compute_fingerprint(state_dir, &sessions, &tasks, &telemetry, &evo);
+    let fingerprint = compute_fingerprint(
+        state_dir,
+        &sessions,
+        &tasks,
+        &telemetry,
+        &evo,
+        &scratch,
+    );
 
     PrunePlan {
         state_dir: state_dir.to_path_buf(),
@@ -139,6 +159,7 @@ pub fn plan(state_dir: &Path, policy: &PrunePolicy) -> PrunePlan {
         tasks,
         telemetry,
         evo,
+        scratch,
         applied: false,
     }
 }
@@ -151,7 +172,8 @@ pub fn plan(state_dir: &Path, policy: &PrunePolicy) -> PrunePlan {
 ///   was not produced by `plan` for this state dir, or the state has drifted).
 ///
 /// Deletion is `remove_dir_all` for sessions/evo and `remove_file` for
-/// tasks/telemetry. I/O errors are returned verbatim.
+/// tasks/telemetry. For scratch items, directories are recursively deleted
+/// and files are removed. I/O errors are returned verbatim.
 pub fn apply(state_dir: &Path, plan: &mut PrunePlan) -> Result<usize, PruneError> {
     if plan.applied {
         return Err(PruneError::AlreadyApplied);
@@ -165,6 +187,7 @@ pub fn apply(state_dir: &Path, plan: &mut PrunePlan) -> Result<usize, PruneError
         &plan.tasks,
         &plan.telemetry,
         &plan.evo,
+        &plan.scratch,
     );
     if fp != plan.fingerprint {
         return Err(PruneError::NotFromPlan);
@@ -186,6 +209,14 @@ pub fn apply(state_dir: &Path, plan: &mut PrunePlan) -> Result<usize, PruneError
     }
     for p in &plan.evo {
         fs::remove_dir_all(p)?;
+        deleted += 1;
+    }
+    for p in &plan.scratch {
+        if p.is_dir() {
+            fs::remove_dir_all(p)?;
+        } else {
+            fs::remove_file(p)?;
+        }
         deleted += 1;
     }
 
@@ -561,6 +592,54 @@ fn plan_evo(state_dir: &Path, policy: &PrunePolicy, now: u64) -> Vec<PathBuf> {
 }
 
 // ---------------------------------------------------------------------------
+// Scratch planning & pruning
+// ---------------------------------------------------------------------------
+
+/// Compute candidate paths directly under `scratch_dir` older than `ttl_ms`.
+pub fn plan_scratch(scratch_dir: &Path, ttl_ms: u64, now: u64) -> Vec<PathBuf> {
+    if !scratch_dir.is_dir() {
+        return Vec::new();
+    }
+    let entries = match fs::read_dir(scratch_dir) {
+        Ok(e) => e,
+        Err(_) => return Vec::new(),
+    };
+    let mut out = Vec::new();
+    for entry in entries.flatten() {
+        let path = entry.path();
+        let mtime = mtime_of(&path);
+        if now.saturating_sub(mtime) > ttl_ms {
+            out.push(path);
+        }
+    }
+    out
+}
+
+/// Prune all items directly under `scratch_dir` older than `ttl_ms` (defaults to 4 days).
+/// Recursively deletes directories and removes files. Returns the count of deleted items.
+pub fn prune_scratch_dir(
+    scratch_dir: &Path,
+    ttl_ms: u64,
+    now: Option<u64>,
+) -> Result<usize, std::io::Error> {
+    if !scratch_dir.is_dir() {
+        return Ok(0);
+    }
+    let now_val = now.unwrap_or_else(now_millis);
+    let candidates = plan_scratch(scratch_dir, ttl_ms, now_val);
+    let mut count = 0;
+    for p in candidates {
+        if p.is_dir() {
+            fs::remove_dir_all(&p)?;
+        } else {
+            fs::remove_file(&p)?;
+        }
+        count += 1;
+    }
+    Ok(count)
+}
+
+// ---------------------------------------------------------------------------
 // Fingerprint
 // ---------------------------------------------------------------------------
 
@@ -577,6 +656,7 @@ fn compute_fingerprint(
     tasks: &[PathBuf],
     telemetry: &[PathBuf],
     evo: &[PathBuf],
+    scratch: &[PathBuf],
 ) -> u64 {
     let mut h: u64 = 0xcbf29ce484222325;
     let prime: u64 = 0x00000100000001b3;
@@ -592,7 +672,7 @@ fn compute_fingerprint(
 
     // Layout snapshot: for each managed sub-directory, hash the sorted
     // (name, mtime) pairs of its entries.
-    for sub in ["sessions", "tasks", "telemetry", "evo"] {
+    for sub in ["sessions", "tasks", "telemetry", "evo", ".scratch"] {
         let dir = state_dir.join(sub);
         let mut entries: Vec<(String, u64)> = match fs::read_dir(&dir) {
             Ok(rd) => rd
@@ -623,6 +703,9 @@ fn compute_fingerprint(
         hash_bytes(p.to_string_lossy().as_bytes());
     }
     for p in evo {
+        hash_bytes(p.to_string_lossy().as_bytes());
+    }
+    for p in scratch {
         hash_bytes(p.to_string_lossy().as_bytes());
     }
     h
@@ -859,6 +942,7 @@ mod tests {
         assert_eq!(p.tasks.len(), 0);
         assert_eq!(p.telemetry.len(), 0);
         assert_eq!(p.evo.len(), 0);
+        assert_eq!(p.scratch.len(), 0);
 
         let n = apply(&root, &mut p).unwrap();
         assert_eq!(n, 0);
@@ -1098,4 +1182,56 @@ mod tests {
 
         let _ = fs::remove_dir_all(&root);
     }
+
+    #[test]
+    fn scratch_old_item_pruned() {
+        let root = tmp_dir();
+        make_state(&root);
+
+        let scratch_dir = root.join(".scratch");
+        fs::create_dir_all(&scratch_dir).unwrap();
+
+        let now = 100 * 86_400_000;
+        // 5 days old (> 4-day TTL)
+        let old = UNIX_EPOCH + Duration::from_millis(now - 5 * 86_400_000);
+        // 1 day old (< 4-day TTL)
+        let new = UNIX_EPOCH + Duration::from_millis(now - 86_400_000);
+
+        let old_file = scratch_dir.join("old_tool_out.txt");
+        fs::write(&old_file, "old output").unwrap();
+        set_mtime(&old_file, old);
+
+        let new_file = scratch_dir.join("new_tool_out.txt");
+        fs::write(&new_file, "new output").unwrap();
+        set_mtime(&new_file, new);
+
+        let old_subdir = scratch_dir.join("old_tmp");
+        fs::create_dir_all(&old_subdir).unwrap();
+        set_mtime(&old_subdir, old);
+
+        let mut p = plan(&root, &policy_now(now));
+        assert_eq!(p.scratch.len(), 2);
+        assert!(p.scratch.contains(&old_file));
+        assert!(p.scratch.contains(&old_subdir));
+        assert!(!p.scratch.contains(&new_file));
+
+        let n = apply(&root, &mut p).unwrap();
+        assert_eq!(n, 2);
+        assert!(!old_file.exists());
+        assert!(!old_subdir.exists());
+        assert!(new_file.exists());
+
+        // Also test prune_scratch_dir helper directly
+        let another_old = scratch_dir.join("another_old.txt");
+        fs::write(&another_old, "another").unwrap();
+        set_mtime(&another_old, old);
+
+        let count = prune_scratch_dir(&scratch_dir, DEFAULT_SCRATCH_TTL_MS, Some(now)).unwrap();
+        assert_eq!(count, 1);
+        assert!(!another_old.exists());
+        assert!(new_file.exists());
+
+        let _ = fs::remove_dir_all(&root);
+    }
 }
+
