@@ -72,20 +72,45 @@ Task file: [`corpus_b_tasks.jsonl`](file:///d:/LLM_Ecosystem/benchmarks/swe-rebe
 
 ---
 
-## 3. How to Run the 3-Arm Matched-Control Benchmark
+## 3. Standardized Workspaces & Execution Protocol
+
+The 6-task corpus is duplicated across 3 completely independent arms under [`benchmarks/swe-rebench/workspaces/`](file:///d:/LLM_Ecosystem/benchmarks/swe-rebench/workspaces/):
+* `benchmarks/swe-rebench/workspaces/solo_gemini/` (Tasks 1 to 6)
+* `benchmarks/swe-rebench/workspaces/solo_qwen/`   (Tasks 1 to 6)
+* `benchmarks/swe-rebench/workspaces/castor/`      (Tasks 1 to 6)
+
+### Environment Parity Guarantee:
+* Each workspace is checked out at the exact `base_commit`.
+* Zero pre-baked `.venv` folders exist in any workspace (`lack of .venv` parity).
+* Every `PROMPT.md` instructs the model: `Use project-specific venv (pip/uv) only, do not rely on global environment.`
+* `solo_gemini` prompts add: `Do not use Castor.`
+* Zero solution hints, zero file coordinates, and zero pre-baked diffs across all prompts.
+
+---
+
+## 4. How to Run Each Arm
 
 ### Arm 1: Solo Gemini (Cloud Baseline)
-1. In a fresh chat session, clone the target repo and checkout `base_commit`.
-2. Provide the raw `problem_statement` text.
-3. Allow Gemini to use standard cloud file and bash tools to inspect, edit, and produce a patch.
-4. Record: Wall-clock time, total cloud tokens, and whether test pass.
+1. Open the task directory in Antigravity: `d:\LLM_Ecosystem\benchmarks\swe-rebench\workspaces\solo_gemini\<task_folder>`
+2. Open a new chat, copy the prompt from `PROMPT.md`, and execute.
+3. Record and grade:
+   ```bash
+   python benchmarks/swe-rebench/record_run.py --arm solo_gemini --task <task_folder>
+   ```
 
 ### Arm 2: Solo Qwen (Local Baseline @ $0)
-1. Run local Qwen3.8-27B against the raw `problem_statement` using standard tool prompt (no lead architect steering).
-2. Record: Wall-clock time, turn count, and whether test pass.
+1. Open the task directory: `d:\LLM_Ecosystem\benchmarks\swe-rebench\workspaces\solo_qwen\<task_folder>`
+2. Dispatch Qwen3.8-27B with the raw unassisted `PROMPT.md` (no architectural hints).
+3. Record and grade:
+   ```bash
+   python benchmarks/swe-rebench/record_run.py --arm solo_qwen --task <task_folder>
+   ```
 
 ### Arm 3: Gemini + Castor (Pair-Programming Treatment)
-1. Gemini operates as Lead Architect, decomposing the issue and steering Castor via `castor_coworker`.
-2. Castor runs structural AST search/replace (`ast_replace`), syntax gate, and test execution locally at $0 token cost.
-3. Truncation protection and disk spillover prevent context blowouts.
-4. Record: Cloud tokens (drastically reduced), pass rate, and patch quality.
+1. Open the task directory: `d:\LLM_Ecosystem\benchmarks\swe-rebench\workspaces\castor\<task_folder>`
+2. Lead Architect investigates with the coworker using raw problem statement (no pre-disclosed solution).
+3. Record and grade:
+   ```bash
+   python benchmarks/swe-rebench/record_run.py --arm castor --task <task_folder>
+   ```
+

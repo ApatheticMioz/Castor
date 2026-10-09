@@ -38,6 +38,7 @@ yarn-error.log*
 
 # Benchmarks scratch directories & raw evaluation runs
 benchmarks/swe-rebench/scratch/
+benchmarks/swe-rebench/workspaces/
 benchmarks/swe-rebench/__pycache__/
 *.log
 
