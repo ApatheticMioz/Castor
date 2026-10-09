@@ -307,6 +307,8 @@ impl EngineClient {
                         .and_then(|d| d.get("cached_tokens"))
                         .and_then(Value::as_u64)
                         .or_else(|| usage.get("cache_read_input_tokens").and_then(Value::as_u64))
+                        .or_else(|| usage.get("cached_prompt_tokens").and_then(Value::as_u64))
+                        .or_else(|| usage.get("cache_read_tokens").and_then(Value::as_u64))
                     {
                         cached_tokens = Some(k);
                     }
@@ -423,6 +425,8 @@ impl EngineClient {
                 .and_then(|d| d.get("cached_tokens"))
                 .and_then(Value::as_u64)
                 .or_else(|| u.get("cache_read_input_tokens").and_then(Value::as_u64))
+                .or_else(|| u.get("cached_prompt_tokens").and_then(Value::as_u64))
+                .or_else(|| u.get("cache_read_tokens").and_then(Value::as_u64))
         });
         let completion_tokens = usage
             .and_then(|u| u.get("completion_tokens"))

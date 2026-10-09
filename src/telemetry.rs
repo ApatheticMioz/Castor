@@ -16,6 +16,7 @@ use std::fs;
 use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
+#[cfg(test)]
 use serde_json::Value;
 use tracing_subscriber::prelude::*;
 
@@ -24,8 +25,39 @@ use tracing_subscriber::prelude::*;
 const PROMPT_COST_PER_MILLION: f64 = 2.0;
 const COMPLETION_COST_PER_MILLION: f64 = 10.0;
 
+/// Default average system electrical power consumption in kilowatts (250 W).
+const DEFAULT_SYSTEM_POWER_KW: f64 = 0.25;
+
+/// Default effective electricity rate in USD per kilowatt-hour ($0.18/kWh).
+const DEFAULT_ELECTRICITY_COST_PER_KWH: f64 = 0.18;
+
 /// The benchmark model the cost-saved figure is quoted against.
 const BENCHMARK_MODEL: &str = "Claude Sonnet 5";
+
+fn default_electricity_rate() -> f64 {
+    DEFAULT_ELECTRICITY_COST_PER_KWH
+}
+
+fn default_system_power_watts() -> u32 {
+    (DEFAULT_SYSTEM_POWER_KW * 1000.0).round() as u32
+}
+
+fn system_power_kw() -> f64 {
+    std::env::var("CASTOR_SYSTEM_WATTS")
+        .or_else(|_| std::env::var("CASTOR_POWER_WATTS"))
+        .ok()
+        .and_then(|s| s.parse::<f64>().ok())
+        .map(|w| w / 1000.0)
+        .unwrap_or(DEFAULT_SYSTEM_POWER_KW)
+}
+
+fn electricity_rate_usd() -> f64 {
+    std::env::var("CASTOR_ELECTRICITY_RATE")
+        .or_else(|_| std::env::var("CASTOR_ELECTRICITY_RATE_USD"))
+        .ok()
+        .and_then(|s| s.parse::<f64>().ok())
+        .unwrap_or(DEFAULT_ELECTRICITY_COST_PER_KWH)
+}
 
 /// Derived statistics over the session + task ledgers.
 ///
@@ -38,6 +70,9 @@ pub struct Stats {
     pub total_reasoning_tokens: u64,
     pub total_prompt_tokens: u64,
     pub total_cached_tokens: u64,
+    /// Total prompt tokens on turns that reported cache metrics.
+    #[serde(default)]
+    pub total_cache_eligible_prompt_tokens: u64,
     pub total_turns: u64,
     pub total_sessions: u64,
     pub total_tasks_completed: u64,
@@ -61,6 +96,12 @@ pub struct Stats {
     pub estimated_electricity_cost_usd: f64,
     /// Estimated energy consumption in kWh.
     pub estimated_energy_kwh: f64,
+    /// Electricity cost rate used in calculations (USD per kWh).
+    #[serde(default = "default_electricity_rate")]
+    pub electricity_rate_usd: f64,
+    /// System electrical draw in watts used in calculations.
+    #[serde(default = "default_system_power_watts")]
+    pub system_power_watts: u32,
     /// Net operational savings in USD (virtual cloud cost - electricity cost).
     pub net_savings_usd: f64,
     /// Deliberation ratio: reasoning tokens / completion tokens.
@@ -101,6 +142,7 @@ impl Default for Stats {
             total_reasoning_tokens: 0,
             total_prompt_tokens: 0,
             total_cached_tokens: 0,
+            total_cache_eligible_prompt_tokens: 0,
             total_turns: 0,
             total_sessions: 0,
             total_tasks_completed: 0,
@@ -116,6 +158,8 @@ impl Default for Stats {
             estimated_cost_saved_usd: 0.0,
             estimated_electricity_cost_usd: 0.0,
             estimated_energy_kwh: 0.0,
+            electricity_rate_usd: DEFAULT_ELECTRICITY_COST_PER_KWH,
+            system_power_watts: (DEFAULT_SYSTEM_POWER_KW * 1000.0).round() as u32,
             net_savings_usd: 0.0,
             reasoning_ratio: None,
             edit_write_ratio: None,
@@ -215,6 +259,8 @@ pub struct DayBucket {
     pub turns: u64,
     pub prompt_tokens: u64,
     pub cached_tokens: u64,
+    #[serde(default)]
+    pub cache_eligible_prompt_tokens: u64,
     pub completion_tokens: u64,
     pub reasoning_tokens: u64,
     pub tool_calls: u64,
@@ -252,6 +298,7 @@ struct SessionRollup {
     total_turns: u64,
     total_prompt_tokens: u64,
     total_cached_tokens: u64,
+    total_cache_eligible_prompt_tokens: u64,
     total_completion_tokens: u64,
     total_reasoning_tokens: u64,
     total_tool_calls: u64,
@@ -271,6 +318,7 @@ impl SessionRollup {
         self.total_turns += other.total_turns;
         self.total_prompt_tokens += other.total_prompt_tokens;
         self.total_cached_tokens += other.total_cached_tokens;
+        self.total_cache_eligible_prompt_tokens += other.total_cache_eligible_prompt_tokens;
         self.total_completion_tokens += other.total_completion_tokens;
         self.total_reasoning_tokens += other.total_reasoning_tokens;
         self.total_tool_calls += other.total_tool_calls;
@@ -301,6 +349,8 @@ impl SessionRollup {
             let entry = self.daily.entry(day).or_default();
             entry.turns += b.turns;
             entry.prompt_tokens += b.prompt_tokens;
+            entry.cached_tokens += b.cached_tokens;
+            entry.cache_eligible_prompt_tokens += b.cache_eligible_prompt_tokens;
             entry.completion_tokens += b.completion_tokens;
             entry.reasoning_tokens += b.reasoning_tokens;
             entry.tool_calls += b.tool_calls;
@@ -313,100 +363,351 @@ impl SessionRollup {
     }
 }
 
-fn process_session_dirs(paths: &[PathBuf], opts: &StatsOptions) -> SessionRollup {
-    let mut rollup = SessionRollup::default();
+fn add_session_to_rollup(rollup: &mut SessionRollup, session: &SessionAgg, opts: &StatsOptions) {
+    rollup.total_sessions += 1;
+    rollup.total_turns += session.turns;
+    rollup.total_prompt_tokens += session.prompt_tokens;
+    rollup.total_cached_tokens += session.cached_tokens;
+    rollup.total_cache_eligible_prompt_tokens += session.cache_eligible_prompt_tokens;
+    rollup.total_completion_tokens += session.completion_tokens;
+    rollup.total_reasoning_tokens += session.reasoning_tokens;
+    rollup.total_tool_calls += session.tool_calls;
+    rollup.total_tool_errors += session.tool_errors;
+    for (name, n) in &session.tool_calls_by_name {
+        *rollup.tool_calls.entry(name.clone()).or_insert(0) += n;
+    }
+    for (name, n) in &session.tool_errors_by_name {
+        *rollup.tool_errors.entry(name.clone()).or_insert(0) += n;
+    }
+    if let Some(d) = session.duration_ms {
+        rollup.duration_sum += d;
+        rollup.duration_count += 1;
+    }
+    if opts.by_day {
+        if let Some(first_day) = session.first_ms.map(utc_day) {
+            rollup.daily.entry(first_day).or_default().sessions += 1;
+        }
+        for (day, ev) in &session.events_by_day {
+            let b = rollup.daily.entry(day.clone()).or_default();
+            b.turns += ev.turns;
+            b.prompt_tokens += ev.prompt_tokens;
+            b.cached_tokens += ev.cached_tokens;
+            b.cache_eligible_prompt_tokens += ev.cache_eligible_prompt_tokens;
+            b.completion_tokens += ev.completion_tokens;
+            b.reasoning_tokens += ev.reasoning_tokens;
+            b.tool_calls += ev.tool_calls;
+            b.tool_errors += ev.tool_errors;
+        }
+        if let Some((day, d)) = session.last_ms.map(utc_day).zip(session.duration_ms) {
+            let b = rollup.daily.entry(day).or_default();
+            b.duration_ms = Some(b.duration_ms.unwrap_or(0) + d);
+        }
+    }
+    if let Some(first_ms) = session.first_ms {
+        match rollup.first_ms {
+            None => rollup.first_ms = Some(first_ms),
+            Some(cur) if first_ms < cur => rollup.first_ms = Some(first_ms),
+            _ => {}
+        }
+    }
+    if let Some(last_ms) = session.last_ms {
+        match rollup.last_ms {
+            None => rollup.last_ms = Some(last_ms),
+            Some(cur) if last_ms > cur => rollup.last_ms = Some(last_ms),
+            _ => {}
+        }
+    }
+}
+
+fn get_file_meta(p: &Path) -> Option<(u64, u64)> {
+    let meta = fs::metadata(p).ok()?;
+    let size = meta.len();
+    let mtime = meta
+        .modified()
+        .ok()
+        .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+        .map(|d| d.as_millis() as u64)
+        .unwrap_or(0);
+    Some((size, mtime))
+}
+
+type SessionParseResult = (PathBuf, Option<(u64, u64)>, SessionAgg);
+
+fn parse_chunk_of_sessions(
+    paths: &[PathBuf],
+) -> Vec<SessionParseResult> {
+    let mut results = Vec::with_capacity(paths.len());
     for path in paths {
         if !path.is_dir() {
             continue;
         }
         let events_path = path.join("events.jsonl");
+        let meta = get_file_meta(&events_path);
         let Ok(raw) = fs::read_to_string(&events_path) else {
             continue;
         };
-        let Some(session) = parse_session_events(&raw, opts.since_ms) else {
-            continue;
-        };
+        if let Some(agg) = parse_session_events(&raw, None) {
+            results.push((path.clone(), meta, agg));
+        }
+    }
+    results
+}
 
-        rollup.total_sessions += 1;
-        rollup.total_turns += session.turns;
-        rollup.total_prompt_tokens += session.prompt_tokens;
-        rollup.total_cached_tokens += session.cached_tokens;
-        rollup.total_completion_tokens += session.completion_tokens;
-        rollup.total_reasoning_tokens += session.reasoning_tokens;
-        rollup.total_tool_calls += session.tool_calls;
-        rollup.total_tool_errors += session.tool_errors;
-        for (name, n) in session.tool_calls_by_name {
-            *rollup.tool_calls.entry(name).or_insert(0) += n;
+fn process_session_dirs_and_update(
+    paths: &[PathBuf],
+    opts: &StatsOptions,
+    cache_sessions: &mut BTreeMap<String, CachedSession>,
+    cache_dirty: &mut bool,
+) -> SessionRollup {
+    let mut rollup = SessionRollup::default();
+    let results = parse_chunk_of_sessions(paths);
+    for (dir, meta, agg) in results {
+        let name = dir
+            .file_name()
+            .and_then(|n| n.to_str())
+            .unwrap_or_default()
+            .to_string();
+        if let Some((size, mtime)) = meta {
+            cache_sessions.insert(
+                name,
+                CachedSession {
+                    mtime_ms: mtime,
+                    file_size: size,
+                    is_final: agg.is_final,
+                    agg: agg.clone(),
+                },
+            );
+            *cache_dirty = true;
         }
-        for (name, n) in session.tool_errors_by_name {
-            *rollup.tool_errors.entry(name).or_insert(0) += n;
-        }
-        if let Some(d) = session.duration_ms {
-            rollup.duration_sum += d;
-            rollup.duration_count += 1;
-        }
-        if opts.by_day {
-            if let Some(first_day) = session.first_ms.map(utc_day) {
-                rollup.daily.entry(first_day).or_default().sessions += 1;
-            }
-            for (day, ev) in session.events_by_day {
-                let b = rollup.daily.entry(day).or_default();
-                b.turns += ev.turns;
-                b.prompt_tokens += ev.prompt_tokens;
-                b.cached_tokens += ev.cached_tokens;
-                b.completion_tokens += ev.completion_tokens;
-                b.reasoning_tokens += ev.reasoning_tokens;
-                b.tool_calls += ev.tool_calls;
-                b.tool_errors += ev.tool_errors;
-            }
-            if let Some((day, d)) = session.last_ms.map(utc_day).zip(session.duration_ms) {
-                let b = rollup.daily.entry(day).or_default();
-                b.duration_ms = Some(b.duration_ms.unwrap_or(0) + d);
-            }
-        }
-        if let Some(first_ms) = session.first_ms {
-            match rollup.first_ms {
-                None => rollup.first_ms = Some(first_ms),
-                Some(cur) if first_ms < cur => rollup.first_ms = Some(first_ms),
+        if let Some(cutoff) = opts.since_ms {
+            match (agg.first_ms, agg.last_ms) {
+                (Some(f), _) if f >= cutoff => {
+                    add_session_to_rollup(&mut rollup, &agg, opts);
+                }
+                (Some(_), Some(l)) if l < cutoff => {}
+                (Some(_), Some(_)) => {
+                    let events_path = dir.join("events.jsonl");
+                    if let Some(filtered) = fs::read_to_string(events_path)
+                        .ok()
+                        .and_then(|raw| parse_session_events(&raw, opts.since_ms))
+                    {
+                        add_session_to_rollup(&mut rollup, &filtered, opts);
+                    }
+                }
                 _ => {}
             }
-        }
-        if let Some(last_ms) = session.last_ms {
-            match rollup.last_ms {
-                None => rollup.last_ms = Some(last_ms),
-                Some(cur) if last_ms > cur => rollup.last_ms = Some(last_ms),
-                _ => {}
-            }
+        } else {
+            add_session_to_rollup(&mut rollup, &agg, opts);
         }
     }
     rollup
 }
 
-fn load_session_rollups(
+fn load_session_rollups_cached(
     session_dirs: &[PathBuf],
     opts: &StatsOptions,
     num_threads: usize,
-) -> SessionRollup {
+    cache_sessions: &mut BTreeMap<String, CachedSession>,
+) -> (SessionRollup, bool) {
     if session_dirs.is_empty() {
-        return SessionRollup::default();
+        return (SessionRollup::default(), false);
     }
-    if session_dirs.len() <= 4 || num_threads <= 1 {
-        return process_session_dirs(session_dirs, opts);
+
+    let mut rollup = SessionRollup::default();
+    let mut to_parse: Vec<PathBuf> = Vec::new();
+    let mut cache_dirty = false;
+
+    let current_dir_names: std::collections::HashSet<String> = session_dirs
+        .iter()
+        .filter_map(|p| p.file_name().and_then(|n| n.to_str()).map(|s| s.to_string()))
+        .collect();
+    let initial_cache_len = cache_sessions.len();
+    cache_sessions.retain(|k, _| current_dir_names.contains(k));
+    if cache_sessions.len() != initial_cache_len {
+        cache_dirty = true;
     }
-    let chunk_size = session_dirs.len().div_ceil(num_threads);
-    std::thread::scope(|s| {
-        let mut handles = Vec::with_capacity(num_threads);
-        for chunk in session_dirs.chunks(chunk_size.max(1)) {
-            handles.push(s.spawn(move || process_session_dirs(chunk, opts)));
-        }
-        let mut total = SessionRollup::default();
-        for h in handles {
-            if let Ok(part) = h.join() {
-                total.merge(part);
+
+    for path in session_dirs {
+        let name = path
+            .file_name()
+            .and_then(|n| n.to_str())
+            .unwrap_or_default();
+        if let Some(cached) = cache_sessions.get(name) {
+            if cached.is_final {
+                if let Some(cutoff) = opts.since_ms {
+                    match (cached.agg.first_ms, cached.agg.last_ms) {
+                        (Some(f), _) if f >= cutoff => {
+                            add_session_to_rollup(&mut rollup, &cached.agg, opts);
+                        }
+                        (Some(_), Some(l)) if l < cutoff => {}
+                        (Some(_), Some(_)) => {
+                            to_parse.push(path.clone());
+                        }
+                        _ => {}
+                    }
+                } else {
+                    add_session_to_rollup(&mut rollup, &cached.agg, opts);
+                }
+                continue;
+            } else {
+                let events_path = path.join("events.jsonl");
+                if get_file_meta(&events_path) == Some((cached.file_size, cached.mtime_ms)) {
+                    if let Some(cutoff) = opts.since_ms {
+                        match (cached.agg.first_ms, cached.agg.last_ms) {
+                            (Some(f), _) if f >= cutoff => {
+                                add_session_to_rollup(&mut rollup, &cached.agg, opts);
+                            }
+                            (Some(_), Some(l)) if l < cutoff => {}
+                            (Some(_), Some(_)) => {
+                                to_parse.push(path.clone());
+                            }
+                            _ => {}
+                        }
+                    } else {
+                        add_session_to_rollup(&mut rollup, &cached.agg, opts);
+                    }
+                    continue;
+                }
             }
         }
-        total
-    })
+        to_parse.push(path.clone());
+    }
+
+    if to_parse.is_empty() {
+        return (rollup, cache_dirty);
+    }
+
+    let parsed_rollup = if to_parse.len() <= 4 || num_threads <= 1 {
+        process_session_dirs_and_update(&to_parse, opts, cache_sessions, &mut cache_dirty)
+    } else {
+        let chunk_size = to_parse.len().div_ceil(num_threads);
+        std::thread::scope(|s| {
+            let mut handles = Vec::with_capacity(num_threads);
+            for chunk in to_parse.chunks(chunk_size.max(1)) {
+                handles.push(s.spawn(move || parse_chunk_of_sessions(chunk)));
+            }
+            let mut chunk_rollup = SessionRollup::default();
+            for h in handles {
+                if let Ok(results) = h.join() {
+                    for (dir, meta, agg) in results {
+                        let name = dir
+                            .file_name()
+                            .and_then(|n| n.to_str())
+                            .unwrap_or_default()
+                            .to_string();
+                        if let Some((size, mtime)) = meta {
+                            cache_sessions.insert(
+                                name,
+                                CachedSession {
+                                    mtime_ms: mtime,
+                                    file_size: size,
+                                    is_final: agg.is_final,
+                                    agg: agg.clone(),
+                                },
+                            );
+                            cache_dirty = true;
+                        }
+                        if let Some(cutoff) = opts.since_ms {
+                            match (agg.first_ms, agg.last_ms) {
+                                (Some(f), _) if f >= cutoff => {
+                                    add_session_to_rollup(&mut chunk_rollup, &agg, opts);
+                                }
+                                (Some(_), Some(l)) if l < cutoff => {}
+                                (Some(_), Some(_)) => {
+                                    let events_path = dir.join("events.jsonl");
+                                    if let Some(filtered) = fs::read_to_string(events_path)
+                                        .ok()
+                                        .and_then(|raw| parse_session_events(&raw, opts.since_ms))
+                                    {
+                                        add_session_to_rollup(
+                                            &mut chunk_rollup,
+                                            &filtered,
+                                            opts,
+                                        );
+                                    }
+                                }
+                                _ => {}
+                            }
+                        } else {
+                            add_session_to_rollup(&mut chunk_rollup, &agg, opts);
+                        }
+                    }
+                }
+            }
+            chunk_rollup
+        })
+    };
+
+    rollup.merge(parsed_rollup);
+    (rollup, cache_dirty)
+}
+
+fn load_task_metrics_cached(
+    task_files: &[PathBuf],
+    since_ms: Option<i128>,
+    _num_threads: usize,
+    cache_tasks: &mut BTreeMap<String, CachedTask>,
+) -> (TaskMetrics, bool) {
+    if task_files.is_empty() {
+        return (TaskMetrics::default(), false);
+    }
+    let mut metrics = TaskMetrics::default();
+    let mut cache_dirty = false;
+
+    let current_file_names: std::collections::HashSet<String> = task_files
+        .iter()
+        .filter_map(|p| p.file_name().and_then(|n| n.to_str()).map(|s| s.to_string()))
+        .collect();
+    let initial_cache_len = cache_tasks.len();
+    cache_tasks.retain(|k, _| current_file_names.contains(k));
+    if cache_tasks.len() != initial_cache_len {
+        cache_dirty = true;
+    }
+
+    for path in task_files {
+        let name = path
+            .file_name()
+            .and_then(|n| n.to_str())
+            .unwrap_or_default();
+        let (status, ts) = if let Some(cached) = cache_tasks.get(name) {
+            (cached.status.clone(), cached.timestamp_ms)
+        } else {
+            let Ok(raw) = fs::read_to_string(path) else {
+                continue;
+            };
+            let Ok(v) = serde_json::from_str::<FastTask>(&raw) else {
+                continue;
+            };
+            let status = v.status.unwrap_or_default().to_string();
+            let ts = v.ended_at.or(v.started_at).or(v.created_at);
+            cache_tasks.insert(
+                name.to_string(),
+                CachedTask {
+                    status: status.clone(),
+                    timestamp_ms: ts,
+                },
+            );
+            cache_dirty = true;
+            (status, ts)
+        };
+
+        if let Some(cutoff) = since_ms {
+            match ts {
+                Some(t) if (t as i128) < cutoff => continue,
+                None => continue,
+                _ => {}
+            }
+        }
+
+        match status.as_str() {
+            "completed" => metrics.completed += 1,
+            "failed" => metrics.failed += 1,
+            "cancelled" => metrics.cancelled += 1,
+            _ => {}
+        }
+    }
+
+    (metrics, cache_dirty)
 }
 
 #[derive(Default)]
@@ -414,69 +715,6 @@ struct TaskMetrics {
     completed: u64,
     failed: u64,
     cancelled: u64,
-}
-
-fn process_task_files(paths: &[PathBuf], since_ms: Option<i128>) -> TaskMetrics {
-    let mut metrics = TaskMetrics::default();
-    for path in paths {
-        if path.extension().and_then(|e| e.to_str()) != Some("json") {
-            continue;
-        }
-        let Ok(raw) = fs::read_to_string(path) else {
-            continue;
-        };
-        let Ok(v) = serde_json::from_str::<Value>(&raw) else {
-            continue;
-        };
-        if let Some(cutoff) = since_ms {
-            let ts = v
-                .get("ended_at")
-                .or_else(|| v.get("started_at"))
-                .or_else(|| v.get("created_at"))
-                .and_then(|x| x.as_u64());
-            match ts {
-                Some(t) if (t as i128) < cutoff => continue,
-                None => continue,
-                _ => {}
-            }
-        }
-        match v.get("status").and_then(|s| s.as_str()) {
-            Some("completed") => metrics.completed += 1,
-            Some("failed") => metrics.failed += 1,
-            Some("cancelled") => metrics.cancelled += 1,
-            _ => {}
-        }
-    }
-    metrics
-}
-
-fn load_task_metrics(
-    task_files: &[PathBuf],
-    since_ms: Option<i128>,
-    num_threads: usize,
-) -> TaskMetrics {
-    if task_files.is_empty() {
-        return TaskMetrics::default();
-    }
-    if task_files.len() <= 4 || num_threads <= 1 {
-        return process_task_files(task_files, since_ms);
-    }
-    let chunk_size = task_files.len().div_ceil(num_threads);
-    std::thread::scope(|s| {
-        let mut handles = Vec::with_capacity(num_threads);
-        for chunk in task_files.chunks(chunk_size.max(1)) {
-            handles.push(s.spawn(move || process_task_files(chunk, since_ms)));
-        }
-        let mut total = TaskMetrics::default();
-        for h in handles {
-            if let Ok(part) = h.join() {
-                total.completed += part.completed;
-                total.failed += part.failed;
-                total.cancelled += part.cancelled;
-            }
-        }
-        total
-    })
 }
 
 /// Derive the cumulative [`Stats`] by walking the existing ledgers:
@@ -503,8 +741,32 @@ pub fn derive_stats(state_dir: &Path, opts: &StatsOptions) -> Stats {
         .filter(|p| p.extension().and_then(|e| e.to_str()) == Some("json"))
         .collect();
 
-    let session_rollup = load_session_rollups(&session_dirs, opts, num_threads);
-    let task_metrics = load_task_metrics(&task_files, opts.since_ms, num_threads);
+    let cache_enabled = std::env::var("CASTOR_STATS_NO_CACHE").is_err();
+    let cache_path = state_dir.join("telemetry").join(".stats_cache.json");
+    let mut cache: TelemetryCache = if cache_enabled {
+        fs::read_to_string(&cache_path)
+            .ok()
+            .and_then(|raw| serde_json::from_str(&raw).ok())
+            .unwrap_or_default()
+    } else {
+        TelemetryCache::default()
+    };
+
+    let (session_rollup, sessions_updated) =
+        load_session_rollups_cached(&session_dirs, opts, num_threads, &mut cache.sessions);
+    let (task_metrics, tasks_updated) =
+        load_task_metrics_cached(&task_files, opts.since_ms, num_threads, &mut cache.tasks);
+
+    if cache_enabled && (sessions_updated || tasks_updated) {
+        let telemetry_dir = state_dir.join("telemetry");
+        let _ = fs::create_dir_all(&telemetry_dir);
+        if let Ok(raw) = serde_json::to_string(&cache) {
+            let tmp = telemetry_dir.join(format!(".stats_cache.json.tmp.{}", std::process::id()));
+            if fs::write(&tmp, raw).is_ok() {
+                let _ = fs::rename(tmp, cache_path);
+            }
+        }
+    }
 
     let mut stats = Stats {
         total_turns: session_rollup.total_turns,
@@ -514,6 +776,7 @@ pub fn derive_stats(state_dir: &Path, opts: &StatsOptions) -> Stats {
         total_tasks_cancelled: task_metrics.cancelled,
         total_prompt_tokens: session_rollup.total_prompt_tokens,
         total_cached_tokens: session_rollup.total_cached_tokens,
+        total_cache_eligible_prompt_tokens: session_rollup.total_cache_eligible_prompt_tokens,
         total_completion_tokens: session_rollup.total_completion_tokens,
         total_reasoning_tokens: session_rollup.total_reasoning_tokens,
         total_tool_calls: session_rollup.total_tool_calls,
@@ -541,14 +804,18 @@ pub fn derive_stats(state_dir: &Path, opts: &StatsOptions) -> Stats {
         + (stats.total_completion_tokens as f64 / 1_000_000.0) * COMPLETION_COST_PER_MILLION;
     stats.estimated_cost_saved_usd = (stats.estimated_cost_saved_usd * 100.0).round() / 100.0;
 
+    let kw = system_power_kw();
+    let rate = electricity_rate_usd();
     let hours = stats.total_duration_ms as f64 / 3_600_000.0;
-    let kwh = (hours * 0.30 * 100.0).round() / 100.0;
+    let kwh = (hours * kw * 100.0).round() / 100.0;
     stats.estimated_energy_kwh = kwh;
-    stats.estimated_electricity_cost_usd = ((kwh * 0.16) * 100.0).round() / 100.0;
+    stats.estimated_electricity_cost_usd = ((kwh * rate) * 100.0).round() / 100.0;
     stats.net_savings_usd =
         ((stats.estimated_cost_saved_usd - stats.estimated_electricity_cost_usd).max(0.0) * 100.0)
             .round()
             / 100.0;
+    stats.electricity_rate_usd = rate;
+    stats.system_power_watts = (kw * 1000.0).round() as u32;
 
     stats.reasoning_ratio = if stats.total_completion_tokens > 0 {
         Some(
@@ -699,9 +966,45 @@ fn bar_chart(count: u64, max: u64, width: usize) -> String {
     format!("{}{}{}", "█".repeat(full), frac, " ".repeat(empty))
 }
 
-/// Format an ISO-8601 UTC timestamp to a compact readable string (`YYYY-MM-DD HH:MM UTC`).
-fn fmt_iso_compact(iso: &str) -> String {
-    if let Some((date, time)) = iso.split_once('T') {
+fn ordinal_suffix(day: u32) -> &'static str {
+    match day {
+        11..=13 => "th",
+        _ => match day % 10 {
+            1 => "st",
+            2 => "nd",
+            3 => "rd",
+            _ => "th",
+        },
+    }
+}
+
+/// Format an ISO-8601 UTC timestamp to a human-readable date string
+/// (e.g. `4th September, 2026 22:58 UTC`).
+fn fmt_human_date(iso: &str) -> String {
+    use chrono::{Datelike, Timelike};
+    if let Ok(dt) = chrono::DateTime::parse_from_rfc3339(iso) {
+        let day = dt.day();
+        let suffix = ordinal_suffix(day);
+        let month = match dt.month() {
+            1 => "January",
+            2 => "February",
+            3 => "March",
+            4 => "April",
+            5 => "May",
+            6 => "June",
+            7 => "July",
+            8 => "August",
+            9 => "September",
+            10 => "October",
+            11 => "November",
+            12 => "December",
+            _ => "",
+        };
+        let year = dt.year();
+        let hour = dt.hour();
+        let min = dt.minute();
+        format!("{day}{suffix} {month}, {year} {hour:02}:{min:02} UTC")
+    } else if let Some((date, time)) = iso.split_once('T') {
         let clean_time = time.split('.').next().unwrap_or(time).trim_end_matches('Z');
         let short_time = if clean_time.len() >= 5 {
             &clean_time[..5]
@@ -733,8 +1036,8 @@ pub fn format_stats_card_styled(stats: &Stats, color: bool) -> String {
         out.push_str(&format!(
             "{}Horizon: {} -> {}{}\n",
             p.dim,
-            fmt_iso_compact(first),
-            fmt_iso_compact(last),
+            fmt_human_date(first),
+            fmt_human_date(last),
             p.reset
         ));
     }
@@ -845,8 +1148,13 @@ pub fn format_stats_card_styled(stats: &Stats, color: bool) -> String {
         fmt_scaled(stats.total_prompt_tokens)
     ));
     if stats.total_cached_tokens > 0 {
+        let denom = if stats.total_cache_eligible_prompt_tokens > 0 {
+            stats.total_cache_eligible_prompt_tokens
+        } else {
+            stats.total_prompt_tokens.max(1)
+        };
         let hit_rate =
-            (stats.total_cached_tokens as f64 / stats.total_prompt_tokens.max(1) as f64) * 100.0;
+            (stats.total_cached_tokens as f64 / denom as f64) * 100.0;
         out.push_str(&format!(
             "  Cached Tokens          {:>10}  {}{:.1}% cache hit{}\n",
             fmt_scaled(stats.total_cached_tokens),
@@ -893,11 +1201,23 @@ pub fn format_stats_card_styled(stats: &Stats, color: bool) -> String {
         "  Virtual Cloud Cost     {:>10}\n",
         fmt_usd_grouped(stats.estimated_cost_saved_usd)
     ));
+    let rate = if stats.electricity_rate_usd > 0.0 {
+        stats.electricity_rate_usd
+    } else {
+        DEFAULT_ELECTRICITY_COST_PER_KWH
+    };
+    let watts = if stats.system_power_watts > 0 {
+        stats.system_power_watts
+    } else {
+        (DEFAULT_SYSTEM_POWER_KW * 1000.0).round() as u32
+    };
     out.push_str(&format!(
-        "  Local Power Cost (Est) {:>10}  {}{:.1} kWh @ $0.16/kWh, 300W{}\n",
+        "  Local Power Cost (Est) {:>10}  {}{:.1} kWh @ ${:.2}/kWh, {}W{}\n",
         fmt_usd_grouped(stats.estimated_electricity_cost_usd),
         p.dim,
         stats.estimated_energy_kwh,
+        rate,
+        watts,
         p.reset
     ));
     let net_pct = if stats.estimated_cost_saved_usd > 0.0 {
@@ -949,8 +1269,8 @@ pub fn format_stats_card_styled(stats: &Stats, color: bool) -> String {
             p.bold, p.reset
         ));
         out.push_str(&format!(
-            "  {}{:<22} {:>8} {:>7}  {:<16} {:>8} {:>9}{}\n",
-            p.dim, "TOOL", "CALLS", "SHARE", "DISTRIBUTION", "ERRORS", "ERR RATE", p.reset
+            "  {}{:<22} {:>8} {:>7}  {:<16} {:>16}{}\n",
+            p.dim, "TOOL", "CALLS", "SHARE", "DISTRIBUTION", "ERRORS (%)", p.reset
         ));
         let mut sorted_tools: Vec<(&String, &u64)> = stats.tool_calls.iter().collect();
         sorted_tools.sort_by(|a, b| b.1.cmp(a.1).then_with(|| a.0.cmp(b.0)));
@@ -963,29 +1283,29 @@ pub fn format_stats_card_styled(stats: &Stats, color: bool) -> String {
         };
         let (head, tail) = sorted_tools.split_at(threshold);
 
+        let format_err_col = |errs: u64, total: u64| -> String {
+            if errs > 0 {
+                let err_rate = (errs as f64 / total.max(1) as f64) * 100.0;
+                let text = format!("{} ({:.1}%)", fmt_grouped(errs), err_rate);
+                let pad = 16usize.saturating_sub(text.len());
+                format!("{}{}{}{}", " ".repeat(pad), p.red, text, p.reset)
+            } else {
+                let pad = 15usize;
+                format!("{}{}{}{}", " ".repeat(pad), p.dim, "-", p.reset)
+            }
+        };
+
         for &(ref name, &count) in head {
             let bar = bar_chart(count, max_calls, 14);
             let pct = (count as f64 / stats.total_tool_calls.max(1) as f64) * 100.0;
             let errs = stats.tool_errors.get(name.as_str()).copied().unwrap_or(0);
-            let err_str = if errs > 0 {
-                format!("{}{:>8}{}", p.red, fmt_grouped(errs), p.reset)
-            } else {
-                format!("{}-{: >7}", p.dim, p.reset)
-            };
-            let err_rate = (errs as f64 / count.max(1) as f64) * 100.0;
-            let err_rate_str = if errs > 0 {
-                format!("{}{:>8.1}%{}", p.red, err_rate, p.reset)
-            } else {
-                format!("{}-{: >7}", p.dim, p.reset)
-            };
             out.push_str(&format!(
-                "  {:<22} {:>8} {:>6.1}%  {:<16} {} {}\n",
+                "  {:<22} {:>8} {:>6.1}%  {:<16} {}\n",
                 name,
                 fmt_grouped(count),
                 pct,
                 bar,
-                err_str,
-                err_rate_str
+                format_err_col(errs, count),
             ));
         }
 
@@ -997,26 +1317,14 @@ pub fn format_stats_card_styled(stats: &Stats, color: bool) -> String {
                 .sum();
             let tail_pct = (tail_count as f64 / stats.total_tool_calls.max(1) as f64) * 100.0;
             let bar = bar_chart(tail_count, max_calls, 14);
-            let err_str = if tail_errs > 0 {
-                format!("{}{:>8}{}", p.red, fmt_grouped(tail_errs), p.reset)
-            } else {
-                format!("{}-{: >7}", p.dim, p.reset)
-            };
-            let err_rate = (tail_errs as f64 / tail_count.max(1) as f64) * 100.0;
-            let err_rate_str = if tail_errs > 0 {
-                format!("{}{:>8.1}%{}", p.red, err_rate, p.reset)
-            } else {
-                format!("{}-{: >7}", p.dim, p.reset)
-            };
             let label = format!("other ({} tools)", tail.len());
             out.push_str(&format!(
-                "  {:<22} {:>8} {:>6.1}%  {:<16} {} {}\n",
+                "  {:<22} {:>8} {:>6.1}%  {:<16} {}\n",
                 label,
                 fmt_grouped(tail_count),
                 tail_pct,
                 bar,
-                err_str,
-                err_rate_str
+                format_err_col(tail_errs, tail_count),
             ));
         }
         out.push('\n');
@@ -1027,11 +1335,13 @@ pub fn format_stats_card_styled(stats: &Stats, color: bool) -> String {
 
 /// Per-UTC-day event aggregates for one session (the per-session half of a
 /// daily bucket; the session-level fields are merged in by `derive_stats`).
-#[derive(Default)]
+#[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
 struct DayEvents {
     turns: u64,
     prompt_tokens: u64,
     cached_tokens: u64,
+    #[serde(default)]
+    cache_eligible_prompt_tokens: u64,
     completion_tokens: u64,
     reasoning_tokens: u64,
     tool_calls: u64,
@@ -1039,10 +1349,13 @@ struct DayEvents {
 }
 
 /// Per-session aggregates extracted from one `events.jsonl` ledger.
+#[derive(Debug, Clone, PartialEq, Default, Serialize, Deserialize)]
 struct SessionAgg {
     turns: u64,
     prompt_tokens: u64,
     cached_tokens: u64,
+    #[serde(default)]
+    cache_eligible_prompt_tokens: u64,
     completion_tokens: u64,
     reasoning_tokens: u64,
     tool_calls: u64,
@@ -1056,6 +1369,136 @@ struct SessionAgg {
     last_ms: Option<i128>,
     /// Per-UTC-day event aggregates (civil date `YYYY-MM-DD` → events).
     events_by_day: BTreeMap<String, DayEvents>,
+    #[serde(default)]
+    is_final: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Default, Serialize, Deserialize)]
+struct CachedSession {
+    mtime_ms: u64,
+    file_size: u64,
+    is_final: bool,
+    agg: SessionAgg,
+}
+
+#[derive(Debug, Clone, PartialEq, Default, Serialize, Deserialize)]
+struct CachedTask {
+    status: String,
+    timestamp_ms: Option<u64>,
+}
+
+#[derive(Debug, Clone, PartialEq, Default, Serialize, Deserialize)]
+struct TelemetryCache {
+    #[serde(default)]
+    version: u32,
+    #[serde(default)]
+    sessions: BTreeMap<String, CachedSession>,
+    #[serde(default)]
+    tasks: BTreeMap<String, CachedTask>,
+}
+
+#[derive(Deserialize)]
+struct FastEvent<'a> {
+    #[serde(borrow)]
+    r#type: Option<&'a str>,
+    #[serde(borrow)]
+    timestamp: Option<RawTimestamp<'a>>,
+    #[serde(borrow)]
+    name: Option<&'a str>,
+    #[serde(default)]
+    is_error: Option<bool>,
+    #[serde(default)]
+    duration_ms: Option<u64>,
+    metrics: Option<FastMetrics>,
+    usage: Option<FastUsage>,
+    prompt_tokens: Option<u64>,
+    cached_tokens: Option<u64>,
+    completion_tokens: Option<u64>,
+    reasoning_tokens: Option<u64>,
+    cache_read_input_tokens: Option<u64>,
+    cached_prompt_tokens: Option<u64>,
+    cache_read_tokens: Option<u64>,
+    prompt_tokens_details: Option<FastPromptDetails>,
+}
+
+#[derive(Deserialize)]
+#[serde(untagged)]
+enum RawTimestamp<'a> {
+    #[serde(borrow)]
+    Str(&'a str),
+    Num(i64),
+}
+
+#[derive(Deserialize)]
+struct FastUsage {
+    prompt_tokens_details: Option<FastPromptDetails>,
+}
+
+#[derive(Deserialize)]
+struct FastMetrics {
+    prompt_tokens: Option<u64>,
+    cached_tokens: Option<u64>,
+    completion_tokens: Option<u64>,
+    reasoning_tokens: Option<u64>,
+    cache_read_input_tokens: Option<u64>,
+    cached_prompt_tokens: Option<u64>,
+    cache_read_tokens: Option<u64>,
+    prompt_tokens_details: Option<FastPromptDetails>,
+    usage: Option<FastUsage>,
+}
+
+#[derive(Deserialize)]
+struct FastPromptDetails {
+    cached_tokens: Option<u64>,
+}
+
+impl<'a> FastEvent<'a> {
+    fn tokens(&self) -> (Option<u64>, Option<u64>, Option<u64>, Option<u64>) {
+        if let Some(m) = &self.metrics {
+            let prompt = m.prompt_tokens;
+            let cached = m
+                .cached_tokens
+                .or(m.cache_read_input_tokens)
+                .or(m.cached_prompt_tokens)
+                .or(m.cache_read_tokens)
+                .or_else(|| m.prompt_tokens_details.as_ref().and_then(|d| d.cached_tokens))
+                .or_else(|| {
+                    m.usage
+                        .as_ref()
+                        .and_then(|u| u.prompt_tokens_details.as_ref())
+                        .and_then(|d| d.cached_tokens)
+                });
+            let completion = m.completion_tokens;
+            let reasoning = m.reasoning_tokens;
+            (prompt, cached, completion, reasoning)
+        } else {
+            let prompt = self.prompt_tokens;
+            let cached = self
+                .cached_tokens
+                .or(self.cache_read_input_tokens)
+                .or(self.cached_prompt_tokens)
+                .or(self.cache_read_tokens)
+                .or_else(|| self.prompt_tokens_details.as_ref().and_then(|d| d.cached_tokens))
+                .or_else(|| {
+                    self.usage
+                        .as_ref()
+                        .and_then(|u| u.prompt_tokens_details.as_ref())
+                        .and_then(|d| d.cached_tokens)
+                });
+            let completion = self.completion_tokens;
+            let reasoning = self.reasoning_tokens;
+            (prompt, cached, completion, reasoning)
+        }
+    }
+}
+
+#[derive(Deserialize)]
+struct FastTask<'a> {
+    #[serde(borrow)]
+    status: Option<&'a str>,
+    ended_at: Option<u64>,
+    started_at: Option<u64>,
+    created_at: Option<u64>,
 }
 
 /// Format an epoch-millisecond instant as a UTC civil date string
@@ -1099,21 +1542,7 @@ fn read_dir_or_empty(dir: &Path) -> Vec<PathBuf> {
 /// whose timestamp is `>=` the cutoff (an untimestamped event is excluded
 /// because it cannot be proven inside the window).
 fn parse_session_events(raw: &str, since: Option<i128>) -> Option<SessionAgg> {
-    let mut agg = SessionAgg {
-        turns: 0,
-        prompt_tokens: 0,
-        cached_tokens: 0,
-        completion_tokens: 0,
-        reasoning_tokens: 0,
-        tool_calls: 0,
-        tool_errors: 0,
-        tool_calls_by_name: BTreeMap::new(),
-        tool_errors_by_name: BTreeMap::new(),
-        duration_ms: None,
-        first_ms: None,
-        last_ms: None,
-        events_by_day: BTreeMap::new(),
-    };
+    let mut agg = SessionAgg::default();
     let mut any = false;
 
     for line in raw.lines() {
@@ -1121,19 +1550,12 @@ fn parse_session_events(raw: &str, since: Option<i128>) -> Option<SessionAgg> {
         if line.is_empty() {
             continue;
         }
-        let Ok(v) = serde_json::from_str::<Value>(line) else {
+        let Ok(ev) = serde_json::from_str::<FastEvent>(line) else {
             continue; // corrupt line: skip
         };
 
-        // Normalize this event's timestamp to epoch milliseconds (the single
-        // canonical order for both the horizon and the `--since` window).
-        let ms = v.get("timestamp").and_then(parse_timestamp_ms);
+        let ms = parse_timestamp_ms_from_raw(ev.timestamp.as_ref());
 
-        // `--since` time-window filter: keep the event only when its
-        // timestamp is at or after the cutoff. Without a cutoff, nothing is
-        // filtered and untimestamped events pass. With a cutoff, an
-        // untimestamped event cannot be proven inside the window and is
-        // excluded.
         let in_window = match (since, ms) {
             (None, _) => true,
             (Some(cutoff), Some(m)) => m >= cutoff,
@@ -1155,54 +1577,53 @@ fn parse_session_events(raw: &str, since: Option<i128>) -> Option<SessionAgg> {
             });
         }
 
-        // Daily bucketing: attribute this event's contribution to its UTC
-        // civil day (only for events that carry a timestamp).
         let day = ms.map(utc_day);
 
-        match v.get("type").and_then(|t| t.as_str()) {
-            // One model turn (canonical `dispatch`); carries per-turn token
-            // usage under `metrics`.
+        match ev.r#type {
             Some("dispatch") => {
                 agg.turns += 1;
-                let (prompt, cached, completion, reasoning) = read_turn_tokens(&v);
-                agg.prompt_tokens += prompt.unwrap_or(0);
-                agg.cached_tokens += cached.unwrap_or(0);
+                let (prompt, cached, completion, reasoning) = ev.tokens();
+                let p = prompt.unwrap_or(0);
+                agg.prompt_tokens += p;
+                if let Some(c) = cached {
+                    agg.cached_tokens += c;
+                    agg.cache_eligible_prompt_tokens += p;
+                }
                 agg.completion_tokens += completion.unwrap_or(0);
                 agg.reasoning_tokens += reasoning.unwrap_or(0);
                 if let Some(day) = day {
-                    let ev = agg.events_by_day.entry(day).or_default();
-                    ev.turns += 1;
-                    ev.prompt_tokens += prompt.unwrap_or(0);
-                    ev.cached_tokens += cached.unwrap_or(0);
-                    ev.completion_tokens += completion.unwrap_or(0);
-                    ev.reasoning_tokens += reasoning.unwrap_or(0);
+                    let ev_day = agg.events_by_day.entry(day).or_default();
+                    ev_day.turns += 1;
+                    ev_day.prompt_tokens += p;
+                    if let Some(c) = cached {
+                        ev_day.cached_tokens += c;
+                        ev_day.cache_eligible_prompt_tokens += p;
+                    }
+                    ev_day.completion_tokens += completion.unwrap_or(0);
+                    ev_day.reasoning_tokens += reasoning.unwrap_or(0);
                 }
             }
-            // One executed tool call: canonical `name` + optional `is_error`.
             Some("tool_result") => {
-                if let Some(name) = v.get("name").and_then(|n| n.as_str()) {
+                if let Some(name) = ev.name {
                     agg.tool_calls += 1;
-                    let is_err = v.get("is_error").and_then(|e| e.as_bool()) == Some(true);
+                    let is_err = ev.is_error.unwrap_or(false);
                     if is_err {
                         agg.tool_errors += 1;
                         *agg.tool_errors_by_name.entry(name.to_string()).or_insert(0) += 1;
                     }
                     *agg.tool_calls_by_name.entry(name.to_string()).or_insert(0) += 1;
                     if let Some(day) = day {
-                        let ev = agg.events_by_day.entry(day).or_default();
-                        ev.tool_calls += 1;
+                        let ev_day = agg.events_by_day.entry(day).or_default();
+                        ev_day.tool_calls += 1;
                         if is_err {
-                            ev.tool_errors += 1;
+                            ev_day.tool_errors += 1;
                         }
                     }
                 }
             }
-            // Session terminal (canonical `final`), carrying an optional
-            // `duration_ms`. The session-total completion token count is
-            // deliberately NOT accumulated here — it is already the sum of the
-            // per-turn metrics, so adding it would double-count.
             Some("final") => {
-                if let Some(d) = v.get("duration_ms").and_then(|x| x.as_u64()) {
+                agg.is_final = true;
+                if let Some(d) = ev.duration_ms {
                     agg.duration_ms = Some(d);
                 }
             }
@@ -1213,27 +1634,6 @@ fn parse_session_events(raw: &str, since: Option<i128>) -> Option<SessionAgg> {
     any.then_some(agg)
 }
 
-/// Read a turn's token usage from a ledger event's `metrics` sub-object.
-///
-/// The canonical schema places per-turn usage under `metrics` with the keys
-/// `prompt_tokens` / `cached_tokens` / `completion_tokens` / `reasoning_tokens`.
-/// Any absent field is `None` (never a silent zero).
-fn read_turn_tokens(v: &Value) -> (Option<u64>, Option<u64>, Option<u64>, Option<u64>) {
-    let src = v.get("metrics").unwrap_or(v);
-    let prompt = src.get("prompt_tokens").and_then(Value::as_u64);
-    let cached = src
-        .get("cached_tokens")
-        .and_then(Value::as_u64)
-        .or_else(|| src.get("cache_read_input_tokens").and_then(Value::as_u64))
-        .or_else(|| {
-            src.get("prompt_tokens_details")
-                .and_then(|d| d.get("cached_tokens"))
-                .and_then(Value::as_u64)
-        });
-    let completion = src.get("completion_tokens").and_then(Value::as_u64);
-    let reasoning = src.get("reasoning_tokens").and_then(Value::as_u64);
-    (prompt, cached, completion, reasoning)
-}
 
 /// Normalize a ledger `timestamp` into integer epoch milliseconds (UTC).
 ///
@@ -1245,12 +1645,29 @@ fn read_turn_tokens(v: &Value) -> (Option<u64>, Option<u64>, Option<u64>, Option
 /// milliseconds directly). Anything else — a missing timestamp, a bare integer
 /// string, a legacy `…ms` string, or malformed text — yields `None`; the event
 /// still counts but carries no timestamp for windowing.
+#[cfg(test)]
 fn parse_timestamp_ms(v: &Value) -> Option<i128> {
     match v {
         Value::Number(n) => n.as_i64().map(|x| x as i128),
-        Value::String(s) => chrono::DateTime::parse_from_rfc3339(s.trim())
-            .ok()
-            .map(|dt| dt.timestamp_millis() as i128),
+        Value::String(s) => parse_timestamp_str(s),
+        _ => None,
+    }
+}
+
+fn parse_timestamp_str(s: &str) -> Option<i128> {
+    let s = s.trim();
+    if s.ends_with("ms") || s.parse::<i64>().is_ok() {
+        return None;
+    }
+    chrono::DateTime::parse_from_rfc3339(s)
+        .ok()
+        .map(|dt| dt.timestamp_millis() as i128)
+}
+
+fn parse_timestamp_ms_from_raw(ts: Option<&RawTimestamp>) -> Option<i128> {
+    match ts {
+        Some(RawTimestamp::Num(n)) => Some(*n as i128),
+        Some(RawTimestamp::Str(s)) => parse_timestamp_str(s),
         _ => None,
     }
 }
@@ -1848,5 +2265,109 @@ mod tests {
         );
         assert!(colored.contains("CASTOR OPERATIONAL TELEMETRY"));
         assert!(colored.contains("+$42.50"));
+    }
+
+    #[test]
+    fn styled_card_displays_cached_tokens_and_power_rate() {
+        let stats = Stats {
+            total_turns: 50,
+            total_sessions: 2,
+            total_tasks_completed: 2,
+            total_prompt_tokens: 10_000_000,
+            total_cache_eligible_prompt_tokens: 1_000_000,
+            total_cached_tokens: 900_000,
+            total_completion_tokens: 100_000,
+            estimated_electricity_cost_usd: 1.25,
+            electricity_rate_usd: 0.18,
+            system_power_watts: 250,
+            estimated_energy_kwh: 6.94,
+            ..Default::default()
+        };
+
+        let card = format_stats_card_styled(&stats, false);
+        assert!(
+            card.contains("900.0k") && card.contains("90.0% cache hit"),
+            "card should calculate cache hit percentage against eligible tokens: {card}"
+        );
+        assert!(
+            card.contains("@ $0.18/kWh, 250W"),
+            "card should display configured electricity rate and 250W system power: {card}"
+        );
+    }
+
+    #[test]
+    fn telemetry_cache_roundtrip() {
+        let state = tmp_state();
+        let cache_path = state.join(".stats_cache.json");
+
+        let mut cache = TelemetryCache::default();
+        let agg = SessionAgg {
+            turns: 10,
+            prompt_tokens: 5000,
+            cached_tokens: 4500,
+            is_final: true,
+            ..Default::default()
+        };
+        let entry = CachedSession {
+            mtime_ms: 123456789,
+            file_size: 4096,
+            is_final: true,
+            agg,
+        };
+        cache.sessions.insert("session_alpha".to_string(), entry);
+
+        let json = serde_json::to_string(&cache).expect("serialize");
+        fs::write(&cache_path, &json).expect("write");
+
+        let loaded: TelemetryCache = fs::read_to_string(&cache_path)
+            .ok()
+            .and_then(|raw| serde_json::from_str(&raw).ok())
+            .expect("deserialize");
+
+        assert_eq!(loaded.sessions.len(), 1);
+        let loaded_entry = loaded.sessions.get("session_alpha").unwrap();
+        assert_eq!(loaded_entry.agg.turns, 10);
+        assert_eq!(loaded_entry.agg.cached_tokens, 4500);
+        assert!(loaded_entry.is_final);
+
+        let _ = fs::remove_dir_all(&state);
+    }
+
+    #[test]
+    fn telemetry_cache_speeds_up_derive_stats() {
+        let state = tmp_state();
+        write(
+            &state.join("sessions/s1/events.jsonl"),
+            concat!(
+                "{\"type\":\"dispatch\",\"turn\":1,\"timestamp\":\"2026-10-06T10:00:00.000Z\",\"metrics\":{\"prompt_tokens\":1000,\"cached_tokens\":900,\"completion_tokens\":100}}\n",
+                "{\"type\":\"final\",\"status\":\"completed\",\"duration_ms\":500,\"timestamp\":\"2026-10-06T10:00:01.000Z\"}\n"
+            ),
+        );
+        write(
+            &state.join("tasks/task_1.json"),
+            "{\"id\":\"task_1\",\"status\":\"completed\",\"ended_at\":1760000000000}",
+        );
+
+        // First derivation: cold, populates cache
+        let s1 = derive_stats(&state, &Default::default());
+        assert_eq!(s1.total_sessions, 1);
+        assert_eq!(s1.total_prompt_tokens, 1000);
+        assert_eq!(s1.total_cached_tokens, 900);
+        assert_eq!(s1.total_cache_eligible_prompt_tokens, 1000);
+        assert_eq!(s1.total_tasks_completed, 1);
+
+        // Verify cache file was written
+        let cache_file = state.join("telemetry/.stats_cache.json");
+        assert!(cache_file.exists(), "cache file should be written to telemetry/.stats_cache.json");
+
+        // Second derivation: warm, uses cached entry
+        let s2 = derive_stats(&state, &Default::default());
+        assert_eq!(s2.total_sessions, s1.total_sessions);
+        assert_eq!(s2.total_prompt_tokens, s1.total_prompt_tokens);
+        assert_eq!(s2.total_cached_tokens, s1.total_cached_tokens);
+        assert_eq!(s2.total_cache_eligible_prompt_tokens, s1.total_cache_eligible_prompt_tokens);
+        assert_eq!(s2.total_tasks_completed, s1.total_tasks_completed);
+
+        let _ = fs::remove_dir_all(&state);
     }
 }
