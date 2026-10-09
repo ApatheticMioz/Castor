@@ -16,6 +16,11 @@ on:
       - 'v*'
   workflow_dispatch:
 
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+
 permissions:
   contents: write
   id-token: write
@@ -100,5 +105,11 @@ jobs:
 
       - name: Publish to NPM via OIDC Trusted Publishing
         run: |
-          npm publish --access public --provenance --tag release
-          npm dist-tag add mcp-castor@${{ steps.meta.outputs.version }} latest
+          if npm view "mcp-castor@${{ steps.meta.outputs.version }}" >/dev/null 2>&1; then
+            echo "mcp-castor@${{ steps.meta.outputs.version }} is already published on npm, ensuring latest dist-tag..."
+            npm dist-tag add "mcp-castor@${{ steps.meta.outputs.version }}" latest || true
+          else
+            npm publish --access public --provenance --tag release
+            npm dist-tag add "mcp-castor@${{ steps.meta.outputs.version }}" latest
+          fi
+
