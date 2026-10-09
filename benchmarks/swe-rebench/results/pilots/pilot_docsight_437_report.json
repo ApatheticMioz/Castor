@@ -1,0 +1,21 @@
+{
+  "max_workers": 4,
+  "total": 1,
+  "all_ok": false,
+  "items": [
+    {
+      "instance_id": "itsdnns__docsight-437",
+      "from_fail_to_pass": [
+        "tests/test_comparison_module.py::TestAggregatePeriod::test_partially_supported_error_counters_do_not_invent_zeroes",
+        "tests/test_comparison_module.py::TestAggregatePeriod::test_unsupported_error_counters_remain_none",
+        "tests/test_comparison_module.py::TestAggregatePeriod::test_zero_error_counters_stay_supported_zeroes",
+        "tests/test_comparison_module.py::TestComputeDelta::test_delta_ignores_unsupported_error_counters"
+      ],
+      "failed_from_pass_to_pass": [],
+      "passed_match": false,
+      "exit_code": 1,
+      "log_path": "logs/itsdnns__docsight-437_log.txt",
+      "error": ""
+    }
+  ]
+}

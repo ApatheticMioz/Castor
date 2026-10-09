@@ -1,0 +1,18 @@
+{
+  "max_workers": 4,
+  "total": 1,
+  "all_ok": true,
+  "items": [
+    {
+      "instance_id": "alibaba__opensandbox-816",
+      "from_fail_to_pass": [
+        "server/tests/test_docker_service.py::TestDockerVolumeValidation::test_host_volume_symlink_bypass_rejected"
+      ],
+      "failed_from_pass_to_pass": [],
+      "passed_match": true,
+      "exit_code": 0,
+      "log_path": "logs/alibaba__opensandbox-816_log.txt",
+      "error": ""
+    }
+  ]
+}

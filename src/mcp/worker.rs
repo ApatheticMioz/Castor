@@ -276,6 +276,7 @@ notes or deleted legacy references are reference ledgers.\n\
     // tier (validated at dispatch) is threaded into the runner so every
     // engine call in the session carries it.
     let mut options = runner::SessionOptions::with_state(state.clone());
+    options.workspace = Some(workspace_root.clone());
     options.reasoning_effort = spec.reasoning_effort.clone();
     options.probe_budget = config.probe_budget;
 

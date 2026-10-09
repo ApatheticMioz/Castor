@@ -283,6 +283,80 @@ fn write_salvage_report(
     fs::write(path, report)
 }
 
+/// Maximum tool result bytes before overflowing to disk (32 KB observation limit).
+pub const TOOL_SPILL_BYTES: usize = 32 * 1024;
+
+/// Spill oversized tool outputs to `<scratch>/.scratch/tool_out_<id>.txt` and return
+/// a concise pointer block.
+pub fn spill_tool_output(
+    output: &str,
+    tool_call_id: &str,
+    scratch_root: Option<&Path>,
+) -> (String, Option<(usize, PathBuf)>) {
+    let bytes = output.len();
+    if bytes <= TOOL_SPILL_BYTES {
+        return (output.to_string(), None);
+    }
+
+    let safe_id: String = tool_call_id
+        .chars()
+        .map(|c| {
+            if c.is_ascii_alphanumeric() || c == '_' || c == '-' {
+                c
+            } else {
+                '_'
+            }
+        })
+        .take(64)
+        .collect();
+    let safe_id = if safe_id.is_empty() {
+        "out".to_string()
+    } else {
+        safe_id
+    };
+
+    let fallback_scratch = std::env::temp_dir().join("castor_scratch");
+    let base = scratch_root.unwrap_or(&fallback_scratch);
+    let scratch_dir = base.join(".scratch");
+    let _ = fs::create_dir_all(&scratch_dir);
+    let file_path = scratch_dir.join(format!("tool_out_{safe_id}.txt"));
+
+    match fs::write(&file_path, output) {
+        Ok(()) => {
+            let head: String = output.chars().take(1024).collect();
+            let tail: String = output
+                .chars()
+                .rev()
+                .take(1024)
+                .collect::<String>()
+                .chars()
+                .rev()
+                .collect();
+            let elided = bytes.saturating_sub(head.len() + tail.len());
+            let pointer = format!(
+                "[Tool output spilled to disk: {bytes} bytes > {TOOL_SPILL_BYTES}-byte threshold. \
+Full payload saved to: {}]\n\n\
+--- Head preview (first 1024 bytes) ---\n{head}\n\
+... [{elided} bytes elided] ...\n\
+--- Tail preview (last 1024 bytes) ---\n{tail}\n\n\
+Hint: use read_file with start_line/end_line or search_code to inspect specific regions of {}.",
+                file_path.display(),
+                file_path.display()
+            );
+            (pointer, Some((bytes, file_path)))
+        }
+        Err(e) => {
+            let head: String = output.chars().take(2048).collect();
+            let truncated = format!(
+                "[ToolOutputSpillError: could not write to {}: {e}. Payload truncated from {bytes} bytes]\n\n{head}\n\n... [remaining {elided} bytes truncated] ...",
+                file_path.display(),
+                elided = bytes.saturating_sub(head.len())
+            );
+            (truncated, None)
+        }
+    }
+}
+
 /// Run a multi-turn agent session.
 ///
 /// Builds the message list (tool schemas last, for the vLLM APC contract),
@@ -425,17 +499,30 @@ pub async fn run_session(
                                         text: format!("Error: {e}"),
                                     },
                                 };
+                                let scratch_root = options.and_then(|o| o.scratch_root());
+                                let (tool_content, spilled) =
+                                    spill_tool_output(&outcome.text, &tc.id, scratch_root.as_deref());
+                                if let Some((bytes, path)) = spilled {
+                                    let _ = logger.append(serde_json::json!({
+                                        "type": "tool_output_spilled",
+                                        "sessionId": session_id,
+                                        "toolCallId": tc.id,
+                                        "toolName": tc.name,
+                                        "bytes": bytes,
+                                        "path": path.to_string_lossy(),
+                                    }));
+                                }
                                 let _ = logger.append(serde_json::json!({
                                     "type": "tool_result",
                                     "turn": turns + 1,
                                     "tool_call_id": tc.id,
                                     "name": tc.name,
                                     "is_error": outcome.text.starts_with("Error:"),
-                                    "output": outcome.text,
+                                    "output": tool_content,
                                 }));
                                 messages.push(Message {
                                     role: "tool".into(),
-                                    content: outcome.text,
+                                    content: tool_content,
                                     tool_calls: vec![],
                                     tool_call_id: Some(tc.id.clone()),
                                 });
@@ -578,20 +665,34 @@ pub async fn run_session(
             };
             tool_activity = true;
 
-            let (tool_content, image_attachment) = if outcome.text.starts_with("[IMAGE_ATTACHMENT:")
-            {
-                if let Some(end_idx) = outcome.text.find(']') {
-                    let header = &outcome.text[..end_idx];
-                    let rest = outcome.text[end_idx + 1..].trim_start_matches(['\r', '\n']);
-                    let data_url = header.strip_prefix("[IMAGE_ATTACHMENT:").unwrap_or("");
-                    let data_url = data_url.split(":path:").next().unwrap_or("");
-                    (rest.to_string(), Some(data_url.to_string()))
+            let (raw_tool_content, image_attachment) =
+                if outcome.text.starts_with("[IMAGE_ATTACHMENT:") {
+                    if let Some(end_idx) = outcome.text.find(']') {
+                        let header = &outcome.text[..end_idx];
+                        let rest = outcome.text[end_idx + 1..].trim_start_matches(['\r', '\n']);
+                        let data_url = header.strip_prefix("[IMAGE_ATTACHMENT:").unwrap_or("");
+                        let data_url = data_url.split(":path:").next().unwrap_or("");
+                        (rest.to_string(), Some(data_url.to_string()))
+                    } else {
+                        (outcome.text.clone(), None)
+                    }
                 } else {
                     (outcome.text.clone(), None)
-                }
-            } else {
-                (outcome.text.clone(), None)
-            };
+                };
+
+            let scratch_root = options.and_then(|o| o.scratch_root());
+            let (tool_content, spilled) =
+                spill_tool_output(&raw_tool_content, &tc.id, scratch_root.as_deref());
+            if let Some((bytes, path)) = spilled {
+                let _ = logger.append(serde_json::json!({
+                    "type": "tool_output_spilled",
+                    "sessionId": session_id,
+                    "toolCallId": tc.id,
+                    "toolName": tc.name,
+                    "bytes": bytes,
+                    "path": path.to_string_lossy(),
+                }));
+            }
 
             // Append the tool result as a tool message.
             messages.push(Message {
@@ -1752,6 +1853,30 @@ mod tests {
             "loop advisory must be present before the hard stop"
         );
 
+        let _ = std::fs::remove_dir_all(state.root());
+    }
+
+    #[test]
+    fn tool_output_spill_below_threshold_returns_unchanged() {
+        let small = "a".repeat(100);
+        let (output, spilled) = spill_tool_output(&small, "c1", None);
+        assert_eq!(output, small);
+        assert!(spilled.is_none());
+    }
+
+    #[test]
+    fn tool_output_spill_above_threshold_spills_to_scratch() {
+        let state = tmp_state();
+        let large = "x".repeat(TOOL_SPILL_BYTES + 5000);
+        let (pointer, spilled) = spill_tool_output(&large, "call_99", Some(state.root()));
+        assert!(spilled.is_some());
+        let (bytes, path) = spilled.unwrap();
+        assert_eq!(bytes, large.len());
+        assert!(path.exists());
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), large);
+        assert!(pointer.contains("Tool output spilled to disk"));
+        assert!(pointer.contains("--- Head preview"));
+        assert!(pointer.contains("--- Tail preview"));
         let _ = std::fs::remove_dir_all(state.root());
     }
 }

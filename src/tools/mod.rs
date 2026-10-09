@@ -309,9 +309,21 @@ impl ToolExecutor for CompositeExecutor {
                                 text: "No matches found.".to_string(),
                             })
                         } else {
+                            const MAX_AST_MATCH_CHARS: usize = 1000;
                             let lines: Vec<String> = matches
                                 .into_iter()
-                                .map(|m| format!("{}:{}: {}", m.file, m.line, m.text.trim()))
+                                .map(|m| {
+                                    let text = m.text.trim();
+                                    let snippet = if text.chars().count() > MAX_AST_MATCH_CHARS {
+                                        let mut s: String =
+                                            text.chars().take(MAX_AST_MATCH_CHARS).collect();
+                                        s.push_str(" ... [truncated]");
+                                        s
+                                    } else {
+                                        text.to_string()
+                                    };
+                                    format!("{}:{}: {}", m.file, m.line, snippet)
+                                })
                                 .collect();
                             Ok(ToolOutcome {
                                 text: lines.join("\n"),

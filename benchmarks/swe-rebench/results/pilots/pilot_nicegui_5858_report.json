@@ -1,0 +1,19 @@
+{
+  "max_workers": 4,
+  "total": 1,
+  "all_ok": true,
+  "items": [
+    {
+      "instance_id": "zauberzeug__nicegui-5858",
+      "from_fail_to_pass": [
+        "tests/test_xterm.py::test_bell_and_data_events",
+        "tests/test_xterm.py::test_fit_and_resize_event"
+      ],
+      "failed_from_pass_to_pass": [],
+      "passed_match": true,
+      "exit_code": 0,
+      "log_path": "logs/zauberzeug__nicegui-5858_log.txt",
+      "error": ""
+    }
+  ]
+}

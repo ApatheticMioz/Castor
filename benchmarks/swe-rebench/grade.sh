@@ -12,15 +12,29 @@
 # container - no Docker image build step needed, just `docker pull` of the
 # already-built per-instance image.
 #
-# Usage: bash grade.sh predictions/castor_qwen_2026_03_50.jsonl
+# Usage: bash grade.sh predictions/archived_2026_03/castor_qwen_2026_03_50.jsonl [split]
 set -e
-PRED_FILE="${1:?usage: grade.sh <predictions.jsonl>}"
+PRED_FILE="${1:?usage: grade.sh <predictions.jsonl> [split]}"
+SPLIT="${2:-2026_03}"
 RUN_ID="$(basename "$PRED_FILE" .jsonl)"
+PRED_DIR="$(cd "$(dirname "$PRED_FILE")" && pwd)"
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 EVAL_REPO="$HOME/swe-rebench-eval/repo"
 VENV="$HOME/swe-rebench-eval/venv/bin/python"
 
-mkdir -p "$HERE/results"
+# Determine output report directory based on input directory
+if [[ "$PRED_DIR" == *"/pilots"* ]]; then
+    REPORT_DIR="$HERE/results/pilots"
+elif [[ "$PRED_DIR" == *"/corpus_b"* ]]; then
+    REPORT_DIR="$HERE/results/corpus_b"
+elif [[ "$PRED_DIR" == *"/archived_2026_03"* ]]; then
+    REPORT_DIR="$HERE/results/archived_2026_03"
+else
+    REPORT_DIR="$HERE/results"
+fi
+mkdir -p "$REPORT_DIR"
+
+PATCH_FILE="${PRED_DIR}/patches_${RUN_ID}.json"
 
 # Convert our {instance_id, model_patch, ...} JSONL to eval.py's expected
 # [{"instance_id":..., "patch":...}, ...] JSON list.
@@ -31,16 +45,12 @@ with open('$PRED_FILE', encoding='utf-8') as f:
     for line in f:
         r = json.loads(line)
         rows.append({'instance_id': r['instance_id'], 'patch': r['model_patch']})
-with open('$HERE/predictions/patches_${RUN_ID}.json', 'w', encoding='utf-8') as f:
+with open('$PATCH_FILE', 'w', encoding='utf-8') as f:
     json.dump(rows, f, ensure_ascii=False, indent=2)
-print(f'Wrote {len(rows)} patch entries')
+print(f'Wrote {len(rows)} patch entries to $PATCH_FILE')
 "
 
-# --instance-ids scopes eval.py to exactly the sampled instances - without it,
-# eval.py grades the WHOLE hf-split (110 tasks for 2026_03), wasting ~60 Docker
-# pulls/test runs on instances that were never sampled or solved (confirmed the
-# hard way: the first grading run graded all 110 and had to be filtered after
-# the fact in analysis instead of at the source).
+# --instance-ids scopes eval.py to exactly the sampled instances
 INSTANCE_IDS=$("$VENV" -c "
 import json
 with open('$PRED_FILE', encoding='utf-8') as f:
@@ -52,10 +62,11 @@ cd "$EVAL_REPO"
 "$VENV" scripts/eval.py \
     --hf-dataset nebius/SWE-rebench-leaderboard \
     --hf-config default \
-    --hf-split 2026_03 \
-    --patches "$HERE/predictions/patches_${RUN_ID}.json" \
+    --hf-split "$SPLIT" \
+    --patches "$PATCH_FILE" \
     --instance-ids "$INSTANCE_IDS" \
     --max-workers 4 \
-    --report-json "$HERE/results/${RUN_ID}_report.json"
+    --report-json "$REPORT_DIR/${RUN_ID}_report.json"
 
-echo "Report written to $HERE/results/${RUN_ID}_report.json"
+echo "Report written to $REPORT_DIR/${RUN_ID}_report.json"
+

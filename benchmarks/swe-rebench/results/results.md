@@ -82,6 +82,12 @@ number:
 
 ## Files
 
-- [`../predictions/sample_2026_03_50.jsonl`](../predictions/sample_2026_03_50.jsonl) — the 50 sampled tasks (no test data, solve-step input)
-- [`../predictions/castor_qwen_2026_03_50.jsonl`](../predictions/castor_qwen_2026_03_50.jsonl) — Castor+Qwen's raw predictions (patch + returncode + stderr tail per task)
-- [`castor_qwen_2026_03_50_report.json`](castor_qwen_2026_03_50_report.json) — the full per-instance grading report (FAIL_TO_PASS/PASS_TO_PASS results, exit codes, log paths)
+### Archived March 2026 (Historical)
+- [`../predictions/archived_2026_03/sample_2026_03_50.jsonl`](../predictions/archived_2026_03/sample_2026_03_50.jsonl) — the 50 sampled tasks (no test data, solve-step input)
+- [`../predictions/archived_2026_03/castor_qwen_2026_03_50.jsonl`](../predictions/archived_2026_03/castor_qwen_2026_03_50.jsonl) — Castor+Qwen's raw predictions (patch + returncode + stderr tail per task)
+- [`archived_2026_03/goose_qwen_2026_03_50_report.json`](archived_2026_03/goose_qwen_2026_03_50_report.json) — the full per-instance grading report
+
+### Pilots (October 2026 Hardened Microkernel)
+- [`../predictions/pilots/`](../predictions/pilots/) — Pilot tasks tested on previous failure classes (`nicegui-5858`, `sqlglot-7187`, `opensandbox-816`, `docsight-437`).
+- [`pilots/`](pilots/) — Graded Docker execution reports demonstrating 100% pass rate after truncation caps and disk-spillover engine.
+

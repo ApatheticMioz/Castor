@@ -171,7 +171,10 @@ impl FsExecutor {
         let numbered: Vec<String> = slice
             .iter()
             .enumerate()
-            .map(|(i, line)| format!("{}: {}", start + i + 1, line))
+            .map(|(i, line)| {
+                let content = truncate_line(line, MAX_READ_LINE_CHARS);
+                format!("{}: {}", start + i + 1, content)
+            })
             .collect();
         Ok(format!(
             "{} (total: {} lines, showing: {}-{})\n{}",
@@ -428,7 +431,7 @@ impl FsExecutor {
         let matches: Vec<String> = lines
             .iter()
             .take(max_results)
-            .map(|l| l.to_string())
+            .map(|l| truncate_line(l, MAX_SEARCH_LINE_CHARS))
             .collect();
 
         use std::fmt::Write;
@@ -523,7 +526,11 @@ impl FsExecutor {
                                 break;
                             }
                             if line.contains(query) {
-                                matches.push(format!("{rel_str}:{}:{}", i + 1, line));
+                                matches.push(format!(
+                                    "{rel_str}:{}:{}",
+                                    i + 1,
+                                    truncate_line(line, MAX_SEARCH_LINE_CHARS)
+                                ));
                             }
                         }
                     }
@@ -631,6 +638,19 @@ fn normalize_line_endings(text: &str, style: Option<&str>) -> String {
         Some("crlf") => text.replace("\r\n", "\n").replace('\n', "\r\n"),
         Some("lf") => text.replace("\r\n", "\n"),
         _ => text.to_string(),
+    }
+}
+
+const MAX_SEARCH_LINE_CHARS: usize = 300;
+const MAX_READ_LINE_CHARS: usize = 2000;
+
+fn truncate_line(line: &str, max_chars: usize) -> String {
+    if line.chars().count() > max_chars {
+        let mut t: String = line.chars().take(max_chars).collect();
+        t.push_str(" ... [line truncated]");
+        t
+    } else {
+        line.to_string()
     }
 }
 
@@ -920,5 +940,30 @@ mod tests {
         let out = ex.list_dir("files", 1).unwrap();
         assert!(out.contains("100 items"));
         assert!(out.contains("list truncated: maximum 100 items reached"));
+    }
+
+    #[test]
+    fn search_code_truncates_long_matched_lines() {
+        let root = test_root("search_long_line");
+        let file = root.join("bundle.js");
+        let long_line = format!("const x = 'hello'; {}", "a".repeat(1000));
+        fs::write(&file, &long_line).unwrap();
+        let ex = executor(&root);
+        let out = ex.search_code("hello", "bundle.js", 10).unwrap();
+        assert!(out.contains("match(es) for 'hello'"));
+        assert!(out.contains("... [line truncated]"));
+        assert!(out.len() < 500);
+    }
+
+    #[test]
+    fn read_file_truncates_oversized_single_line() {
+        let root = test_root("read_long_line");
+        let file = root.join("min.js");
+        let long_line = "b".repeat(5000);
+        fs::write(&file, &long_line).unwrap();
+        let ex = executor(&root);
+        let out = ex.read_file("min.js", 1, None).unwrap();
+        assert!(out.contains("... [line truncated]"));
+        assert!(out.len() < 3000);
     }
 }

@@ -1,0 +1,18 @@
+{
+  "max_workers": 4,
+  "total": 1,
+  "all_ok": true,
+  "items": [
+    {
+      "instance_id": "tobymao__sqlglot-7187",
+      "from_fail_to_pass": [
+        "tests/dialects/test_duckdb.py::TestDuckDB::test_duckdb"
+      ],
+      "failed_from_pass_to_pass": [],
+      "passed_match": true,
+      "exit_code": 0,
+      "log_path": "logs/tobymao__sqlglot-7187_log.txt",
+      "error": ""
+    }
+  ]
+}
