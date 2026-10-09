@@ -620,7 +620,30 @@ async fn capture_capped<R: tokio::io::AsyncRead + Unpin>(mut r: R, cap: usize) -
 }
 
 #[cfg(target_os = "linux")]
+fn is_unsupported_landlock_fs(path: &Path) -> bool {
+    use std::ffi::CString;
+    let Ok(c_path) = CString::new(path.to_string_lossy().as_bytes()) else {
+        return false;
+    };
+    let mut stat: libc::statfs = unsafe { std::mem::zeroed() };
+    if unsafe { libc::statfs(c_path.as_ptr(), &mut stat) } == 0 {
+        // Landlock PathBeneath rules are not supported on network/virtual filesystems:
+        // 0x01021997 = V9FS_MAGIC (9p/drvfs in WSL)
+        // 0x53465342 = SMB2 / DRVFS
+        // 0xfe534e51 = CIFS_MAGIC_NUMBER
+        // 0x6969     = NFS_SUPER_MAGIC
+        let ft = stat.f_type as u64;
+        ft == 0x01021997 || ft == 0x53465342 || ft == 0xfe534e51 || ft == 0x6969
+    } else {
+        false
+    }
+}
+
+#[cfg(target_os = "linux")]
 fn build_landlock_ruleset(cwd: &Path) -> Result<landlock::RulesetCreated, String> {
+    if is_unsupported_landlock_fs(cwd) {
+        return Err("virtual/network filesystem does not support Landlock".to_string());
+    }
     use landlock::{
         ABI, Access, AccessFs, PathBeneath, PathFd, Ruleset, RulesetAttr, RulesetCreatedAttr,
     };
