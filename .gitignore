@@ -62,5 +62,8 @@ mcp-qwen/.canary_tmp/
 
 evals-faq.pdf
 
+# Local-only research artifacts (never committed)
+research/
+
 # Rust build artifacts
 target/
