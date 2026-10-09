@@ -57,6 +57,34 @@ fn now_epoch_ms() -> u64 {
         .unwrap_or(0)
 }
 
+/// Canonicalize the workspace root by walking up from the provided path
+/// to find the repository boundary (.git, Cargo.toml, package.json).
+/// Falls back to the provided path if no root marker is found.
+pub fn find_workspace_root(p: &std::path::Path) -> std::path::PathBuf {
+    let mut cur = if p.is_file() {
+        p.parent().unwrap_or(p).to_path_buf()
+    } else {
+        p.to_path_buf()
+    };
+    loop {
+        if cur.join(".git").exists()
+            || cur.join("Cargo.toml").exists()
+            || cur.join("package.json").exists()
+        {
+            return cur;
+        }
+        if let Some(parent) = cur.parent() {
+            if parent == cur {
+                break;
+            }
+            cur = parent.to_path_buf();
+        } else {
+            break;
+        }
+    }
+    p.to_path_buf()
+}
+
 /// Execute a job specification against the real local engine.
 pub async fn run_job(spec: &JobSpec, state: &StateDir, config: &Config) -> Result<String, String> {
     let registry = TaskRegistry::new(state);
@@ -114,6 +142,56 @@ pub async fn run_job_with_engine(
         })
         .await;
 
+    // 2.5 Phase 1: DGI Gatekeeper (model-driven 1-forward pass logit probe via guided_choice).
+    if let (Some(base_url), Some(model)) = (&config.base_url, &config.model) {
+        let lc = crate::engine::EngineLifecycle::new(config, state);
+        let dgi = if !lc.canary().await {
+            crate::mcp::dgi::evaluate(&spec.prompt)
+        } else {
+            let probe_timeout_secs = std::env::var("CASTOR_DGI_TIMEOUT_SECS")
+                .ok()
+                .and_then(|v| v.parse::<u64>().ok())
+                .unwrap_or(30);
+            let http = reqwest::Client::builder()
+                .timeout(std::time::Duration::from_secs(probe_timeout_secs))
+                .build()
+                .unwrap_or_default();
+            match crate::mcp::dgi::evaluate_model_probe(base_url, model, &spec.prompt, &http).await {
+                Ok(v) => v,
+                Err(err) => {
+                    tracing::warn!(
+                        error = %err,
+                        "[dgi] warning: 1-forward pass model probe failed ({err}). \
+                         Falling back to soft heuristic."
+                    );
+                    let fallback = crate::mcp::dgi::evaluate(&spec.prompt);
+                    if matches!(fallback, crate::mcp::dgi::DgiVerdict::Admit) {
+                        crate::mcp::dgi::DgiVerdict::Review(0)
+                    } else {
+                        fallback
+                    }
+                }
+            }
+        };
+
+        if let crate::mcp::dgi::DgiVerdict::Reject(sigs) = &dgi {
+            let body = sigs
+                .iter()
+                .map(|s| format!("  - {s}"))
+                .collect::<Vec<_>>()
+                .join("\n");
+            let reject_msg = format!(
+                "DecompositionGateRejected: dispatch rejected by model decomposition gatekeeper:\n{body}\n\
+                 Decompose into a single-concern slice (one subsystem, one verification gate) and re-dispatch."
+            );
+            let _ = registry
+                .transition(&spec.task_id, TaskStatus::Failed, Some(reject_msg.clone()))
+                .await;
+            let _ = sem.release(&lease);
+            return Err(reject_msg);
+        }
+    }
+
     // 3. Initialize EventLogger and record session start.
     let logger = EventLogger::new(state, &spec.session_id);
     // The effective tier is recorded on session_start (null when unset) so
@@ -127,12 +205,13 @@ pub async fn run_job_with_engine(
         "reasoning_effort": spec.reasoning_effort,
     }));
 
-    let host_cwd = crate::platform::to_host_path(&spec.cwd);
+    let host_raw_path = crate::platform::to_host_path(&spec.cwd);
+    let workspace_root = find_workspace_root(&host_raw_path);
 
     // 4. Discover and index skills.
     let skill_dirs = [
-        host_cwd.join(".agents").join("skills"),
-        host_cwd.join("skills"),
+        workspace_root.join(".agents").join("skills"),
+        workspace_root.join("skills"),
         state.root().join("skills"),
     ];
     let all_skills = skills::load_skills(&skill_dirs);
@@ -159,7 +238,7 @@ cleaner architectural alternative.\n\
 - Ground-Truth Hierarchy: Active code and compiler diagnostics are ground truth; historical audit \
 notes or deleted legacy references are reference ledgers.\n\
 - Verification Discipline: Never mask unverified mutations; verify against active test gates.\n\n{}",
-        host_cwd.display(),
+        workspace_root.display(),
         skills_index
     );
 
@@ -171,7 +250,7 @@ notes or deleted legacy references are reference ledgers.\n\
     };
 
     let executor = match CompositeExecutor::with_config(
-        &host_cwd,
+        &workspace_root,
         config.searxng_url.clone(),
         config.brave_api_key.clone(),
         config.openalex_email.clone(),

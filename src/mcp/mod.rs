@@ -184,142 +184,6 @@ impl CastorMcpServer {
         Ok(params)
     }
 
-    /// Run the DGI Gatekeeper: 1-forward pass model probe (or soft heuristic
-    /// fallback) and return the verdict together with an optional advisory
-    /// note to append to the dispatch message.
-    ///
-    /// Queues on the 1-slot [`crate::task::semaphore::TaskSemaphore`] as a real task to guarantee exclusive,
-    /// uncontended GPU access. Because DGI is a 1-forward pass logit probe (CIVP gate),
-    /// it executes on the idle engine in <1s and immediately releases the semaphore.
-    async fn evaluate_dgi(
-        loaded: &crate::config::LoadedConfig,
-        prompt: &str,
-    ) -> (dgi::DgiVerdict, Option<String>) {
-        let dgi = if let (Some(base_url), Some(model)) =
-            (&loaded.config.base_url, &loaded.config.model)
-        {
-            let state = crate::state::StateDir::from_config(&loaded.config);
-            let _ = state.ensure();
-
-            let lc = crate::engine::EngineLifecycle::new(&loaded.config, &state);
-            if !lc.canary().await {
-                let fallback = dgi::evaluate(prompt);
-                let note = if loaded.config.launch_command.is_some() {
-                    Some("- **[DGI]**: Engine is currently offline (auto-boot will start it); 1-forward pass model probe bypassed with soft heuristic.".to_string())
-                } else {
-                    Some("- **[DGI]**: Engine is offline; 1-forward pass model probe bypassed with soft heuristic.".to_string())
-                };
-                return (fallback, note);
-            }
-
-            let max_slots = loaded.config.max_concurrent_tasks as usize;
-            let sem = crate::task::semaphore::TaskSemaphore::new(&state, max_slots);
-            let registry = crate::task::registry::TaskRegistry::new(&state);
-
-            let prompt_preview = if prompt.len() > 60 {
-                format!("[dgi] {}...", &prompt[..60])
-            } else {
-                format!("[dgi] {prompt}")
-            };
-            let dgi_task_id = registry
-                .create(&prompt_preview, "dgi", "dgi_gate")
-                .await
-                .unwrap_or_else(|_| format!("task_dgi_{}", now_epoch_ms()));
-
-            // Queue on the 1-slot semaphore as a real task slot lease.
-            // Guarantees exclusive engine access while executing the 1-forward pass probe.
-            let lease = sem.acquire(&dgi_task_id).await;
-            struct SlotGuard<'a> {
-                sem: &'a crate::task::semaphore::TaskSemaphore,
-                lease: Option<crate::task::semaphore::SlotLease>,
-            }
-            impl<'a> Drop for SlotGuard<'a> {
-                fn drop(&mut self) {
-                    if let Some(ref l) = self.lease.take() {
-                        let _ = self.sem.release(l);
-                    }
-                }
-            }
-            let guard = SlotGuard {
-                sem: &sem,
-                lease: Some(lease),
-            };
-
-            let _ = registry
-                .transition(
-                    &dgi_task_id,
-                    crate::task::registry::TaskStatus::Executing,
-                    None,
-                )
-                .await;
-
-            let probe_timeout_secs = std::env::var("CASTOR_DGI_TIMEOUT_SECS")
-                .ok()
-                .and_then(|v| v.parse::<u64>().ok())
-                .unwrap_or(30);
-            let http = reqwest::Client::builder()
-                .timeout(std::time::Duration::from_secs(probe_timeout_secs))
-                .build()
-                .unwrap_or_default();
-
-            let probe_res = dgi::evaluate_model_probe(base_url, model, prompt, &http).await;
-
-            // Immediately release the semaphore (<1s slot hold time).
-            drop(guard);
-
-            match probe_res {
-                Ok(v) => {
-                    let _ = registry
-                        .transition(
-                            &dgi_task_id,
-                            crate::task::registry::TaskStatus::Completed,
-                            Some(format!("DGI verdict: {v:?}")),
-                        )
-                        .await;
-                    v
-                }
-                Err(err) => {
-                    let _ = registry
-                        .transition(
-                            &dgi_task_id,
-                            crate::task::registry::TaskStatus::Failed,
-                            Some(format!("DGI probe error: {err}")),
-                        )
-                        .await;
-                    tracing::warn!(
-                        error = %err,
-                        "[dgi] warning: 1-forward pass model probe failed ({err}). \
-                         Engine offline, unreachable, or endpoint does not support guided_choice. \
-                         Falling back to soft heuristic."
-                    );
-                    let fallback = dgi::evaluate(prompt);
-                    if matches!(fallback, dgi::DgiVerdict::Admit) {
-                        dgi::DgiVerdict::Review(0) // Special loud warning sentinel
-                    } else {
-                        fallback
-                    }
-                }
-            }
-        } else {
-            tracing::warn!(
-                "[dgi] warning: DGI running without configured engine/model; 1-forward pass probe inactive."
-            );
-            dgi::DgiVerdict::Review(0)
-        };
-
-        let dgi_note = match &dgi {
-            dgi::DgiVerdict::Review(0) => Some(
-                "- **[DGI ADVISORY]**: 1-forward pass model probe was bypassed (engine offline, unreachable, or backend unsupported). Proceeding without model-verified CIVP gate."
-                    .to_string(),
-            ),
-            dgi::DgiVerdict::Review(s) => Some(format!(
-                "- **DGI**: advisory score {s} — flag for decomposition; dispatch proceeding."
-            )),
-            _ => None,
-        };
-
-        (dgi, dgi_note)
-    }
 
     /// Resolve the path to the castor worker binary, handling test-binary
     /// suffixes and debug/release fallbacks.
@@ -359,20 +223,6 @@ impl CastorMcpServer {
             }
         };
 
-        // DGI Gatekeeper: model-driven 1-forward pass logit probe via guided_choice.
-        let (dgi, dgi_note) = Self::evaluate_dgi(&loaded, &params.prompt).await;
-
-        if let dgi::DgiVerdict::Reject(sigs) = &dgi {
-            let body = sigs
-                .iter()
-                .map(|s| format!("  - {s}"))
-                .collect::<Vec<_>>()
-                .join("\n");
-            return CallToolResult::error(vec![ContentBlock::text(format!(
-                "DecompositionGateRejected: dispatch rejected by model decomposition gatekeeper:\n{body}\n\
-                 Decompose into a single-concern slice (one subsystem, one verification gate) and re-dispatch.",
-            ))]);
-        }
 
         let state = crate::state::StateDir::from_config(&loaded.config);
         if let Err(e) = state.ensure() {
@@ -511,7 +361,7 @@ impl CastorMcpServer {
             self.prefix
         );
 
-        let mut text = format!(
+        let text = format!(
             "### Castor Task Dispatched (Background Execution)\n\
              - **Task ID**: `{task_id}` | **Session**: `{session_id}` | **Status**: `queued`\n\
              - **Working Directory**: `{cwd}`\n\
@@ -521,10 +371,6 @@ impl CastorMcpServer {
              - **Wait Command**: `{wait_cmd_win}` (WSL: `{wait_cmd_wsl}`)\n\
              - **Status Command**: `{status_cmd}`"
         );
-
-        if let Some(note) = dgi_note {
-            text.push_str(&format!("\n{note}"));
-        }
 
         CallToolResult::success(vec![ContentBlock::text(text)])
     }
