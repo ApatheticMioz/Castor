@@ -23,9 +23,7 @@ use crate::engine::{EngineClient, EngineError, Message, Metrics, ToolSchema};
 use crate::state::StateDir;
 
 use events::EventLogger;
-use loop_detector::{
-    LoopDetector, LoopState, PROBE_ADVISORY, ProbeState, ProbeTracker, is_read_only_prompt,
-};
+use loop_detector::{LoopDetector, LoopState};
 
 /// Default turn budget (from the task record; extendable up to `MAX_ELASTIC_TURNS`).
 pub const DEFAULT_TURNS_BUDGET: u32 = 80;
@@ -144,10 +142,8 @@ pub struct SessionResult {
 pub enum RunnerError {
     #[error("engine error: {0}")]
     Engine(#[from] EngineError),
-    #[error("loop detected: repeated identical action '{name}'")]
+    #[error("loop detected: repeated action '{name}'")]
     LoopDetected { name: String },
-    #[error("verification impasse: {probes} consecutive exploratory probes without code mutations")]
-    ProbeImpasse { probes: usize },
     #[error("io error: {0}")]
     Io(#[from] std::io::Error),
 }
@@ -321,9 +317,6 @@ pub async fn run_session(
 
     let mut messages = vec![msg("system", system_prompt), msg("user", user_prompt)];
     let mut loop_detector = LoopDetector::new(LOOP_WINDOW, LOOP_THRESHOLD);
-    let probe_budget = options.map_or(DEFAULT_PROBE_BUDGET, |o| o.probe_budget);
-    let is_read_only = is_read_only_prompt(user_prompt);
-    let mut probe_tracker = ProbeTracker::new(probe_budget).with_read_only(is_read_only);
     let mut turns: u32 = 0;
     let mut final_text = String::new();
     let mut final_produced = false;
@@ -629,7 +622,7 @@ pub async fn run_session(
                 }))
                 .map_err(RunnerError::Io)?;
 
-            // Loop detection.
+            // Loop detection (catches single-action and multi-action periodic cycles).
             match loop_detector.record(&tc.name, &tc.arguments) {
                 LoopState::Ok => {}
                 LoopState::Advisory => {
@@ -639,33 +632,15 @@ multiple times. If you are facing contradictory requirements across files or an 
 impasse, state your findings and ask for alignment rather than continuing to re-read."
                             .to_string()
                     } else {
-                        format!(
-                            "[Loop Advisory] You have repeated the same action '{}' multiple times in a \
-                             row. Change your approach or synthesize your findings.",
-                            tc.name
-                        )
+                        "[Loop Advisory] You have repeated the same action sequence multiple times in a \
+                         row. Change your approach or synthesize your findings."
+                            .to_string()
                     };
                     messages.push(msg("user", advisory));
                 }
                 LoopState::LoopDetected => {
                     return Err(RunnerError::LoopDetected {
                         name: tc.name.clone(),
-                    });
-                }
-            }
-
-            // Probe budget tracking: consecutive non-mutating bash probes
-            // that do not target `.scratch/` are counted; at the budget
-            // threshold a one-shot advisory is injected. If the streak reaches
-            // the impasse ceiling (budget * 3), the session halts with an impasse.
-            match probe_tracker.record(&tc.name, &tc.arguments) {
-                ProbeState::Ok => {}
-                ProbeState::Advisory => {
-                    messages.push(msg("user", PROBE_ADVISORY));
-                }
-                ProbeState::Impasse => {
-                    return Err(RunnerError::ProbeImpasse {
-                        probes: probe_tracker.consecutive_probes(),
                     });
                 }
             }
@@ -1620,36 +1595,40 @@ mod tests {
         let _ = std::fs::remove_dir_all(state.root());
     }
 
-    // --- Probe budget integration tests -------------------------------------
+    // --- Multi-action loop integration tests --------------------------------
 
     #[tokio::test]
-    async fn non_scratch_bash_probes_trip_probe_budget_advisory() {
+    async fn alternating_command_cycle_trips_loop_detector() {
         let state = tmp_state();
         let logger = logger_for(&state);
         let recorder = std::sync::Arc::new(CallRecorder::default());
-        // Four distinct non-scratch bash commands: the probe budget (default 4)
-        // trips on the fourth.
+        let cmd1 = r#"{"command":"git status"}"#;
+        let cmd2 = r#"{"command":"git diff"}"#;
+        // Alternating cycle: (cmd1, cmd2) repeated 3 times = 6 actions total (trips advisory),
+        // then 7th action trips LoopDetected.
         let engine = RecordingEngine::new(
             vec![
-                comp("", vec![tc("c1", "bash", r#"{"command":"ls"}"#)]),
-                comp("", vec![tc("c2", "bash", r#"{"command":"pwd"}"#)]),
-                comp("", vec![tc("c3", "bash", r#"{"command":"cat file.txt"}"#)]),
-                comp(
-                    "",
-                    vec![tc("c4", "bash", r#"{"command":"head -1 other.txt"}"#)],
-                ),
-                comp("Done.", Vec::new()),
+                comp("", vec![tc("c1", "bash", cmd1)]),
+                comp("", vec![tc("c2", "bash", cmd2)]),
+                comp("", vec![tc("c3", "bash", cmd1)]),
+                comp("", vec![tc("c4", "bash", cmd2)]),
+                comp("", vec![tc("c5", "bash", cmd1)]),
+                comp("", vec![tc("c6", "bash", cmd2)]),
+                comp("", vec![tc("c7", "bash", cmd1)]),
             ],
             recorder.clone(),
         );
         let executor = MockExecutor::new(vec![
-            "file-list".into(),
-            "/workspace".into(),
-            "file content".into(),
-            "first line".into(),
+            "s1".into(),
+            "d1".into(),
+            "s2".into(),
+            "d2".into(),
+            "s3".into(),
+            "d3".into(),
+            "s4".into(),
         ]);
 
-        let res = run_session(
+        let err = run_session(
             &engine,
             &executor,
             &logger,
@@ -1660,225 +1639,52 @@ mod tests {
             None,
         )
         .await
-        .unwrap();
+        .unwrap_err();
 
-        assert_eq!(res.status, "completed");
+        assert!(
+            matches!(err, RunnerError::LoopDetected { .. }),
+            "alternating action cycles must trip LoopDetector: {err:?}"
+        );
 
-        // The probe advisory was injected into a subsequent call's messages.
         let calls = recorder.calls.lock().await;
-        let probe_advisory_injected = calls.iter().any(|c| {
+        let loop_advisory_injected = calls.iter().any(|c| {
             c.messages
                 .iter()
-                .any(|m| m.content.contains("[Probe Advisory]"))
+                .any(|m| m.content.contains("[Loop Advisory]"))
         });
         assert!(
-            probe_advisory_injected,
-            "probe advisory must be present after 4 consecutive non-scratch bash probes"
+            loop_advisory_injected,
+            "loop advisory must be injected after 3 cycles before hard stop"
         );
 
         let _ = std::fs::remove_dir_all(state.root());
     }
 
     #[tokio::test]
-    async fn probe_streak_triggers_impasse_error() {
+    async fn long_compiler_or_test_sequence_never_trips_false_impasse() {
         let state = tmp_state();
         let logger = logger_for(&state);
         let recorder = std::sync::Arc::new(CallRecorder::default());
-        // Probe budget of 2: advisory at 2, impasse at 2 * 3 = 6 probes.
-        let engine = RecordingEngine::new(
-            vec![
-                comp("", vec![tc("c1", "bash", r#"{"command":"ls"}"#)]),
-                comp("", vec![tc("c2", "bash", r#"{"command":"pwd"}"#)]),
-                comp("", vec![tc("c3", "bash", r#"{"command":"cat f1"}"#)]),
-                comp("", vec![tc("c4", "bash", r#"{"command":"cat f2"}"#)]),
-                comp("", vec![tc("c5", "bash", r#"{"command":"cat f3"}"#)]),
-                comp("", vec![tc("c6", "bash", r#"{"command":"cat f4"}"#)]),
-                comp("Done.", Vec::new()),
-            ],
-            recorder.clone(),
-        );
-        let executor = MockExecutor::new(vec![
-            "out1".into(),
-            "out2".into(),
-            "out3".into(),
-            "out4".into(),
-            "out5".into(),
-            "out6".into(),
-        ]);
+        // 14 distinct commands (compilation, diagnostics, testing).
+        // Without ProbeTracker, the session completes without any artificial impasse.
+        let mut responses = Vec::new();
+        let mut outputs = Vec::new();
+        for i in 0..14 {
+            let cmd = format!(r#"{{"command":"tectonic run --flag {i}"}}"#);
+            responses.push(comp("", vec![tc(&format!("c{i}"), "bash", &cmd)]));
+            outputs.push(format!("build pass {i}"));
+        }
+        responses.push(comp("Document built successfully.", Vec::new()));
 
-        let mut opts = SessionOptions::with_state(state.clone());
-        opts.probe_budget = 2;
+        let engine = RecordingEngine::new(responses, recorder.clone());
+        let executor = MockExecutor::new(outputs);
 
         let res = run_session(
             &engine,
             &executor,
             &logger,
             "sys",
-            "work",
-            &[tool_schema("bash")],
-            80,
-            Some(&opts),
-        )
-        .await;
-
-        assert!(matches!(res, Err(RunnerError::ProbeImpasse { probes: 6 })));
-        let _ = std::fs::remove_dir_all(state.root());
-    }
-
-    #[tokio::test]
-    async fn read_only_prompt_does_not_trip_probe_impasse() {
-        let state = tmp_state();
-        let logger = logger_for(&state);
-        let recorder = std::sync::Arc::new(CallRecorder::default());
-        let executor = MockExecutor::new(vec![
-            "out1".into(),
-            "out2".into(),
-            "out3".into(),
-            "out4".into(),
-            "out5".into(),
-            "out6".into(),
-            "out7".into(),
-        ]);
-
-        let engine = RecordingEngine::new(
-            vec![
-                comp("", vec![tc("c1", "bash", r#"{"command":"git log"}"#)]),
-                comp("", vec![tc("c2", "bash", r#"{"command":"git diff"}"#)]),
-                comp("", vec![tc("c3", "bash", r#"{"command":"git status"}"#)]),
-                comp("", vec![tc("c4", "bash", r#"{"command":"git tag"}"#)]),
-                comp("", vec![tc("c5", "bash", r#"{"command":"git rev-list"}"#)]),
-                comp("", vec![tc("c6", "bash", r#"{"command":"git shortlog"}"#)]),
-                comp("", vec![tc("c7", "bash", r#"{"command":"git show"}"#)]),
-                comp("Velocity report complete.", vec![]),
-            ],
-            recorder.clone(),
-        );
-
-        let mut opts = SessionOptions::with_state(state.clone());
-        opts.probe_budget = 2; // threshold 2, impasse ceiling 6
-
-        let res = run_session(
-            &engine,
-            &executor,
-            &logger,
-            "sys",
-            "RESEARCH SLICE A1 — strictly read-only: no file writes",
-            &[tool_schema("bash")],
-            80,
-            Some(&opts),
-        )
-        .await;
-
-        assert!(res.is_ok(), "read-only prompt must not trip probe impasse: {res:?}");
-        assert_eq!(res.unwrap().final_text, "Velocity report complete.");
-        let _ = std::fs::remove_dir_all(state.root());
-    }
-
-    #[tokio::test]
-    async fn mutating_tool_resets_probe_count() {
-        let state = tmp_state();
-        let logger = logger_for(&state);
-        let recorder = std::sync::Arc::new(CallRecorder::default());
-        // Three non-scratch probes, then a write_file (reset), then one more
-        // probe. The probe count goes 1→2→3→0→1, so the advisory never fires.
-        let engine = RecordingEngine::new(
-            vec![
-                comp("", vec![tc("c1", "bash", r#"{"command":"ls"}"#)]),
-                comp("", vec![tc("c2", "bash", r#"{"command":"pwd"}"#)]),
-                comp("", vec![tc("c3", "bash", r#"{"command":"cat a.txt"}"#)]),
-                comp(
-                    "",
-                    vec![tc(
-                        "c4",
-                        "write_file",
-                        r#"{"path":"out.txt","content":"data"}"#,
-                    )],
-                ),
-                comp("", vec![tc("c5", "bash", r#"{"command":"cat b.txt"}"#)]),
-                comp("Done.", Vec::new()),
-            ],
-            recorder.clone(),
-        );
-        let executor = MockExecutor::new(vec![
-            "file-list".into(),
-            "/workspace".into(),
-            "a content".into(),
-            "wrote out.txt".into(),
-            "b content".into(),
-        ]);
-
-        let res = run_session(
-            &engine,
-            &executor,
-            &logger,
-            "sys",
-            "work",
-            &[tool_schema("bash"), tool_schema("write_file")],
-            80,
-            None,
-        )
-        .await
-        .unwrap();
-
-        assert_eq!(res.status, "completed");
-
-        // No probe advisory should have been injected.
-        let calls = recorder.calls.lock().await;
-        let probe_advisory_injected = calls.iter().any(|c| {
-            c.messages
-                .iter()
-                .any(|m| m.content.contains("[Probe Advisory]"))
-        });
-        assert!(
-            !probe_advisory_injected,
-            "mutating tool must reset the probe count; no advisory should fire"
-        );
-
-        let _ = std::fs::remove_dir_all(state.root());
-    }
-
-    #[tokio::test]
-    async fn scratchpad_bash_commands_are_exempt_from_probe_budget() {
-        let state = tmp_state();
-        let logger = logger_for(&state);
-        let recorder = std::sync::Arc::new(CallRecorder::default());
-        // Four distinct .scratch/ commands: all exempt, no probe advisory.
-        let engine = RecordingEngine::new(
-            vec![
-                comp(
-                    "",
-                    vec![tc(
-                        "c1",
-                        "bash",
-                        r#"{"command":"python .scratch/repro.py"}"#,
-                    )],
-                ),
-                comp(
-                    "",
-                    vec![tc("c2", "bash", r#"{"command":"bash .scratch/run.sh"}"#)],
-                ),
-                comp(
-                    "",
-                    vec![tc("c3", "bash", r#"{"command":"cat .scratch/output.txt"}"#)],
-                ),
-                comp("", vec![tc("c4", "bash", r#"{"command":"ls .scratch/"}"#)]),
-                comp("Done.", Vec::new()),
-            ],
-            recorder.clone(),
-        );
-        let executor = MockExecutor::new(vec![
-            "python output".into(),
-            "bash output".into(),
-            "scratch output".into(),
-            "scratch listing".into(),
-        ]);
-
-        let res = run_session(
-            &engine,
-            &executor,
-            &logger,
-            "sys",
-            "work",
+            "compile the document to PDF using tectonic",
             &[tool_schema("bash")],
             80,
             None,
@@ -1887,18 +1693,7 @@ mod tests {
         .unwrap();
 
         assert_eq!(res.status, "completed");
-
-        // No probe advisory, no loop advisory (all commands are distinct).
-        let calls = recorder.calls.lock().await;
-        let any_advisory = calls.iter().any(|c| {
-            c.messages.iter().any(|m| {
-                m.content.contains("[Probe Advisory]") || m.content.contains("[Loop Advisory]")
-            })
-        });
-        assert!(
-            !any_advisory,
-            ".scratch/ commands must be exempt from both probe and loop advisories"
-        );
+        assert_eq!(res.final_text, "Document built successfully.");
 
         let _ = std::fs::remove_dir_all(state.root());
     }

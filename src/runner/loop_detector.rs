@@ -30,10 +30,11 @@ pub struct LoopDetector {
 
 impl LoopDetector {
     pub fn new(window: usize, threshold: usize) -> Self {
-        let window = window.max(1);
+        let threshold = threshold.max(1);
+        let window = window.max(threshold * 3);
         Self {
             window,
-            threshold: threshold.max(1),
+            threshold,
             history: VecDeque::with_capacity(window),
             advisory_injected: false,
         }
@@ -46,16 +47,7 @@ impl LoopDetector {
         if self.history.len() > self.window {
             self.history.pop_front();
         }
-        let last = *self.history.back().expect("history is non-empty");
-        let mut count = 0;
-        for h in self.history.iter().rev() {
-            if *h == last {
-                count += 1;
-            } else {
-                break;
-            }
-        }
-        if count >= self.threshold {
+        if self.detect_cycle() {
             if self.advisory_injected {
                 LoopState::LoopDetected
             } else {
@@ -66,6 +58,36 @@ impl LoopDetector {
             LoopState::Ok
         }
     }
+
+    /// Checks if the history ends with a periodic pattern of period p in 1..=3
+    /// repeating at least `threshold` times.
+    fn detect_cycle(&self) -> bool {
+        let n = self.history.len();
+        for p in 1..=3 {
+            let required = p * self.threshold;
+            if n < required {
+                continue;
+            }
+            let mut matches = true;
+            for k in 1..self.threshold {
+                for i in 0..p {
+                    let curr = self.history[n - 1 - i];
+                    let prev = self.history[n - 1 - i - k * p];
+                    if curr != prev {
+                        matches = false;
+                        break;
+                    }
+                }
+                if !matches {
+                    break;
+                }
+            }
+            if matches {
+                return true;
+            }
+        }
+        false
+    }
 }
 
 fn hash_action(name: &str, args: &str) -> u64 {
@@ -73,138 +95,6 @@ fn hash_action(name: &str, args: &str) -> u64 {
     name.hash(&mut hasher);
     args.hash(&mut hasher);
     hasher.finish()
-}
-
-// ---------------------------------------------------------------------------
-// ProbeTracker: consecutive non-mutating probe budget
-// ---------------------------------------------------------------------------
-
-/// Tool names that modify files (reset the probe counter).
-const MUTATING_TOOLS: &[&str] = &["write_file", "edit_file", "ast_replace", "apply_patch"];
-
-fn is_mutating_tool(name: &str) -> bool {
-    MUTATING_TOOLS.contains(&name)
-}
-
-/// The probe-budget advisory injected when the model has executed `budget`
-/// consecutive non-mutating, non-scratchpad bash commands without making
-/// any file changes.
-pub const PROBE_ADVISORY: &str = "[Probe Advisory] You have executed consecutive non-mutating \
-    exploratory probes without modifying files. Proceed with targeted AST edits or code mutations.";
-
-/// Tracks consecutive non-mutating exploratory probes (`bash` commands that
-/// do not target `.scratch/`) and signals when the probe budget is exhausted.
-///
-/// Mutating tools (`write_file`, `edit_file`, `ast_replace`, `apply_patch`)
-/// reset the counter.  Commands that reference a `.scratch/` path component
-/// are exempt — they are empirical diagnostics, not idle ping-pong.
-/// Outcome of recording an exploratory probe.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum ProbeState {
-    /// Probe count is within normal bounds.
-    Ok,
-    /// Probe budget reached: inject advisory to guide model toward mutations.
-    Advisory,
-    /// Probe streak exceeded impasse ceiling: halt exploratory loop and yield findings.
-    Impasse,
-}
-
-/// Tracks consecutive non-mutating exploratory probes (`bash` commands that
-/// do not target `.scratch/`) and signals when the probe budget is reached
-/// or when an impasse is encountered.
-/// Returns `true` when a prompt specifies a read-only or analysis task.
-pub fn is_read_only_prompt(prompt: &str) -> bool {
-    let p = prompt.to_lowercase();
-    p.contains("read-only")
-        || p.contains("read only")
-        || p.contains("readonly")
-        || p.contains("no file writes")
-        || p.contains("no mutations")
-        || p.contains("pure read")
-}
-
-/// Tracks consecutive non-mutating exploratory probes (`bash` commands that
-/// do not target `.scratch/`) and signals when the probe budget is reached
-/// or when an impasse is encountered.
-///
-/// Mutating tools (`write_file`, `edit_file`, `ast_replace`, `apply_patch`)
-/// reset the counter. Commands that reference a `.scratch/` path component
-/// are exempt — they are empirical diagnostics, not idle ping-pong.
-#[derive(Debug)]
-pub struct ProbeTracker {
-    budget: usize,
-    consecutive_probes: usize,
-    advisory_injected: bool,
-    read_only: bool,
-}
-
-impl ProbeTracker {
-    pub fn new(budget: usize) -> Self {
-        Self {
-            budget,
-            consecutive_probes: 0,
-            advisory_injected: false,
-            read_only: false,
-        }
-    }
-
-    pub fn with_read_only(mut self, read_only: bool) -> Self {
-        self.read_only = read_only;
-        self
-    }
-
-    /// Record a tool execution and evaluate probe state.
-    pub fn record(&mut self, name: &str, args: &str) -> ProbeState {
-        // Disabled when budget is 0 or when running in a read-only session.
-        if self.budget == 0 || self.read_only {
-            return ProbeState::Ok;
-        }
-        // Mutating tools reset the probe streak.
-        if is_mutating_tool(name) {
-            self.consecutive_probes = 0;
-            return ProbeState::Ok;
-        }
-        // Only `bash` commands are tracked as probes.
-        if name != "bash" {
-            return ProbeState::Ok;
-        }
-        // Scratchpad commands are exempt (empirical diagnostics).
-        if targets_scratchpad(args) {
-            return ProbeState::Ok;
-        }
-        // Non-scratchpad bash command: count it.
-        self.consecutive_probes += 1;
-        if self.consecutive_probes >= self.budget * 3 {
-            ProbeState::Impasse
-        } else if self.consecutive_probes >= self.budget && !self.advisory_injected {
-            self.advisory_injected = true;
-            ProbeState::Advisory
-        } else {
-            ProbeState::Ok
-        }
-    }
-
-    /// Number of consecutive exploratory probes currently recorded.
-    pub fn consecutive_probes(&self) -> usize {
-        self.consecutive_probes
-    }
-}
-
-/// Returns `true` when the command references a `.scratch/` path component.
-///
-/// Tokenises the command on whitespace and checks each token for a
-/// path component equal to `.scratch` (handles `.scratch/foo.py`,
-/// `/.abs/path/.scratch/x`, `cd .scratch && …`, etc.).
-fn targets_scratchpad(cmd: &str) -> bool {
-    for token in cmd.split_whitespace() {
-        let t = token.trim_matches(|c: char| c == '"' || c == '\'' || c == '/' || c == '\\');
-        for part in t.split(['/', '\\']) {
-            if part == ".scratch" {
-                return true;
-            }
-        }
-    }
-    false
 }
 
 #[cfg(test)]
@@ -250,143 +140,52 @@ mod tests {
         assert_eq!(d.record("bash", "ls"), LoopState::LoopDetected);
     }
 
-    // --- ProbeTracker --------------------------------------------------------
-
     #[test]
-    fn probe_budget_trips_at_threshold() {
-        let mut t = ProbeTracker::new(3);
-        // First two probes: below the budget.
-        assert_eq!(t.record("bash", "{\"command\":\"ls\"}"), ProbeState::Ok);
-        assert_eq!(t.record("bash", "{\"command\":\"pwd\"}"), ProbeState::Ok);
-        // Third probe: at the budget → advisory fires.
-        assert_eq!(
-            t.record("bash", "{\"command\":\"cat file.txt\"}"),
-            ProbeState::Advisory
-        );
-        // The advisory latches; subsequent probes return Ok until impasse.
-        assert_eq!(
-            t.record("bash", "{\"command\":\"head -1 file.txt\"}"),
-            ProbeState::Ok
-        );
+    fn alternating_actions_cycle_detected() {
+        let mut d = LoopDetector::new(6, 3);
+        // Period 2: A, B repeating 3 times (6 actions total)
+        assert_eq!(d.record("bash", "ls"), LoopState::Ok);
+        assert_eq!(d.record("read", "foo"), LoopState::Ok);
+        assert_eq!(d.record("bash", "ls"), LoopState::Ok);
+        assert_eq!(d.record("read", "foo"), LoopState::Ok);
+        assert_eq!(d.record("bash", "ls"), LoopState::Ok);
+        // 3rd period completes: advisory fires
+        assert_eq!(d.record("read", "foo"), LoopState::Advisory);
+        // Next repeat: loop detected
+        assert_eq!(d.record("bash", "ls"), LoopState::LoopDetected);
     }
 
     #[test]
-    fn probe_budget_trips_impasse_at_ceiling() {
-        let mut t = ProbeTracker::new(2);
-        assert_eq!(t.record("bash", "{\"command\":\"ls\"}"), ProbeState::Ok);
-        assert_eq!(
-            t.record("bash", "{\"command\":\"pwd\"}"),
-            ProbeState::Advisory
-        );
-        assert_eq!(t.record("bash", "{\"command\":\"p3\"}"), ProbeState::Ok);
-        assert_eq!(t.record("bash", "{\"command\":\"p4\"}"), ProbeState::Ok);
-        assert_eq!(t.record("bash", "{\"command\":\"p5\"}"), ProbeState::Ok);
-        // At budget * 3 (6 probes):
-        assert_eq!(
-            t.record("bash", "{\"command\":\"p6\"}"),
-            ProbeState::Impasse
-        );
+    fn three_step_cycle_detected() {
+        let mut d = LoopDetector::new(6, 3);
+        // Period 3: A, B, C repeating 3 times (9 actions total)
+        assert_eq!(d.record("bash", "ls"), LoopState::Ok);
+        assert_eq!(d.record("read", "foo"), LoopState::Ok);
+        assert_eq!(d.record("edit", "bar"), LoopState::Ok);
+
+        assert_eq!(d.record("bash", "ls"), LoopState::Ok);
+        assert_eq!(d.record("read", "foo"), LoopState::Ok);
+        assert_eq!(d.record("edit", "bar"), LoopState::Ok);
+
+        assert_eq!(d.record("bash", "ls"), LoopState::Ok);
+        assert_eq!(d.record("read", "foo"), LoopState::Ok);
+        // 3rd period completes: advisory fires
+        assert_eq!(d.record("edit", "bar"), LoopState::Advisory);
+        // Next action in cycle: loop detected
+        assert_eq!(d.record("bash", "ls"), LoopState::LoopDetected);
     }
 
     #[test]
-    fn mutating_tools_reset_probe_count() {
-        let mut t = ProbeTracker::new(2);
-        assert_eq!(t.record("bash", "{\"command\":\"ls\"}"), ProbeState::Ok);
-        // A write_file resets the streak.
-        assert_eq!(
-            t.record("write_file", "{\"path\":\"a.rs\"}"),
-            ProbeState::Ok
-        );
-        // After the reset, one more probe is still below budget.
-        assert_eq!(t.record("bash", "{\"command\":\"pwd\"}"), ProbeState::Ok);
-        // Second probe after reset → advisory.
-        assert_eq!(
-            t.record("bash", "{\"command\":\"cat b\"}"),
-            ProbeState::Advisory
-        );
-    }
-
-    #[test]
-    fn scratchpad_commands_are_exempt() {
-        let mut t = ProbeTracker::new(1);
-        // Budget of 1 would trip on the very first non-scratch probe,
-        // but scratchpad commands never count.
-        assert_eq!(
-            t.record("bash", "{\"command\":\"python .scratch/repro.py\"}"),
-            ProbeState::Ok
-        );
-        assert_eq!(
-            t.record("bash", "{\"command\":\"bash .scratch/run.sh\"}"),
-            ProbeState::Ok
-        );
-        assert_eq!(
-            t.record("bash", "{\"command\":\"cat /abs/path/.scratch/dump.txt\"}"),
-            ProbeState::Ok
-        );
-        assert_eq!(
-            t.record("bash", "{\"command\":\"ls .scratch/\"}"),
-            ProbeState::Ok
-        );
-    }
-
-    #[test]
-    fn non_scratch_bash_is_counted() {
-        let mut t = ProbeTracker::new(1);
-        // A regular bash command (no .scratch/) trips immediately.
-        assert_eq!(
-            t.record("bash", "{\"command\":\"ls -la\"}"),
-            ProbeState::Advisory
-        );
-    }
-
-    #[test]
-    fn non_bash_tools_do_not_count_as_probes() {
-        let mut t = ProbeTracker::new(1);
-        // read_file, search_code, etc. are non-mutating but not probes.
-        assert_eq!(t.record("read_file", "{\"path\":\"a.rs\"}"), ProbeState::Ok);
-        assert_eq!(
-            t.record("search_code", "{\"query\":\"foo\"}"),
-            ProbeState::Ok
-        );
-    }
-
-    #[test]
-    fn scratchpad_path_detection() {
-        assert!(targets_scratchpad("python .scratch/repro.py"));
-        assert!(targets_scratchpad("bash .scratch/run.sh"));
-        assert!(targets_scratchpad("cat /abs/path/.scratch/dump.txt"));
-        assert!(targets_scratchpad("ls .scratch/"));
-        assert!(targets_scratchpad("cd .scratch && ls"));
-        assert!(!targets_scratchpad("ls -la"));
-        assert!(!targets_scratchpad("cargo test"));
-        // `.scratch` as part of a longer name should NOT match.
-        assert!(!targets_scratchpad("cat .scratchpad/file.txt"));
-    }
-
-    #[test]
-    fn read_only_probe_tracker_never_trips_advisory_or_impasse() {
-        let mut t = ProbeTracker::new(1).with_read_only(true);
-        for _ in 0..20 {
-            assert_eq!(t.record("bash", "{\"command\":\"git log\"}"), ProbeState::Ok);
-        }
-        assert_eq!(t.consecutive_probes(), 0);
-    }
-
-    #[test]
-    fn zero_budget_disables_probe_tracker() {
-        let mut t = ProbeTracker::new(0);
-        for _ in 0..20 {
-            assert_eq!(t.record("bash", "{\"command\":\"ls\"}"), ProbeState::Ok);
-        }
-        assert_eq!(t.consecutive_probes(), 0);
-    }
-
-    #[test]
-    fn read_only_prompt_classification() {
-        assert!(is_read_only_prompt("RESEARCH SLICE A1 — strictly read-only: no file writes"));
-        assert!(is_read_only_prompt("READ-ONLY ANALYSIS TASK"));
-        assert!(is_read_only_prompt("Query git history, readonly, pure read"));
-        assert!(!is_read_only_prompt("Implement feature X in src/runner/mod.rs"));
+    fn cycle_interrupted_does_not_loop() {
+        let mut d = LoopDetector::new(6, 3);
+        assert_eq!(d.record("bash", "ls"), LoopState::Ok);
+        assert_eq!(d.record("read", "foo"), LoopState::Ok);
+        assert_eq!(d.record("bash", "ls"), LoopState::Ok);
+        assert_eq!(d.record("read", "foo"), LoopState::Ok);
+        // Interrupted by a different command
+        assert_eq!(d.record("bash", "pwd"), LoopState::Ok);
+        assert_eq!(d.record("bash", "ls"), LoopState::Ok);
+        assert_eq!(d.record("read", "foo"), LoopState::Ok);
     }
 }
 
