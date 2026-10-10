@@ -1,8 +1,7 @@
 //! DGI Gatekeeper — Decomposition Granularity Index.
 //!
-//! Classifies a dispatch prompt in one of two ways:
-//! 1. A 1-forward pass vLLM logit probe via guided_choice: ["ADMIT", "OVERLOADED"].
-//! 2. A non-blocking soft heuristic fallback when offline.
+//! Classifies dispatch prompts with a serving-engine probe (vLLM guided_choice
+//! or llama.cpp schema-constrained chat) and an advisory offline heuristic.
 //!
 //! Domain agnosticism: no repo-specific patterns, no hardcoded file extensions,
 //! and no hard regex or length limits.
@@ -16,7 +15,7 @@ pub enum DgiVerdict {
     Admit,
     /// Advisory DGI note: proceed, but flag for decomposition.
     Review(u32),
-    /// A hard monolith classification fired (via the 1-forward pass probe): fail fast.
+    /// The model classified an overloaded dispatch: fail fast.
     Reject(Vec<String>),
 }
 
@@ -35,8 +34,7 @@ impl DgiVerdict {
 
 /// Query the serving engine for a 2-token single forward pass logit probe.
 ///
-/// This evaluates semantic cognitive complexity in a single forward pass (~28ms on local GPU)
-/// with 2 tokens output (ADMIT vs OVERLOADED), bypassing multi-token autoregressive reasoning loops.
+/// Uses the vLLM guided_choice completion format with a two-token output budget.
 pub async fn evaluate_model_probe(
     base_url: &str,
     model: &str,
@@ -79,6 +77,76 @@ pub async fn evaluate_model_probe(
         ]))
     } else {
         Ok(DgiVerdict::Admit)
+    }
+}
+
+/// Probe using the configured backend's request format and authentication.
+pub async fn evaluate_configured_model_probe(
+    config: &crate::config::Config,
+    prompt: &str,
+    http: &reqwest::Client,
+) -> Result<DgiVerdict, String> {
+    use crate::engine::backend::{Backend, api_url};
+    let base = config
+        .base_url
+        .as_deref()
+        .ok_or("missing base_url in config")?;
+    let model = config.model.as_deref().ok_or("missing model in config")?;
+    if Backend::from_config(config) != Backend::LlamaCpp {
+        return evaluate_model_probe(base, model, prompt, http).await;
+    }
+    let url = api_url(config, "chat/completions")?;
+    let mut request = http.post(&url).json(&json!({
+        "model": model,
+        "messages": [
+            {"role": "system", "content": "Classify the user task as ADMIT for a cohesive bounded single-concern task or OVERLOADED for a monolithic multi-subsystem overhaul. Return only JSON with a verdict field."},
+            {"role": "user", "content": prompt}
+        ],
+        "stream": false,
+        "temperature": 0.0,
+        "max_tokens": 64,
+        "reasoning_effort": "none",
+        "response_format": {"type": "json_object", "schema": {
+            "type": "object", "properties": {"verdict": {"type": "string", "enum": ["ADMIT", "OVERLOADED"]}},
+            "required": ["verdict"], "additionalProperties": false
+        }}
+    }));
+    if let Some(key) = &config.api_key {
+        request = request.bearer_auth(key);
+    }
+    let response = request
+        .send()
+        .await
+        .map_err(|e| format!("connection to {url} failed: {e}"))?;
+    let status = response.status();
+    let body = response
+        .text()
+        .await
+        .map_err(|e| format!("reading upstream HTTP {status} body: {e}"))?;
+    if !status.is_success() {
+        return Err(format!("upstream HTTP {status}: {body}"));
+    }
+    let value: serde_json::Value =
+        serde_json::from_str(&body).map_err(|e| format!("malformed probe response: {e}"))?;
+    if value["choices"][0]["finish_reason"] == "length" {
+        return Err("dispatch gate response exceeded its token limit".into());
+    }
+    let content = value["choices"][0]["message"]["content"]
+        .as_str()
+        .ok_or("missing dispatch gate content")?;
+    #[derive(serde::Deserialize)]
+    #[serde(deny_unknown_fields)]
+    struct ProbeVerdict {
+        verdict: String,
+    }
+    let verdict: ProbeVerdict = serde_json::from_str(content)
+        .map_err(|e| format!("malformed dispatch gate verdict: {e}"))?;
+    match verdict.verdict.as_str() {
+        "ADMIT" => Ok(DgiVerdict::Admit),
+        "OVERLOADED" => Ok(DgiVerdict::Reject(vec![
+            "Model-classified monolithic multi-subsystem dispatch (OVERLOADED)".into(),
+        ])),
+        _ => Err("dispatch gate verdict must be ADMIT or OVERLOADED".into()),
     }
 }
 

@@ -1270,8 +1270,12 @@ pub fn format_stats_card_styled(stats: &Stats, color: bool) -> String {
         fmt_scaled(stats.total_prompt_tokens)
     ));
     if stats.total_cached_tokens > 0 {
-        let hit_rate =
-            (stats.total_cached_tokens as f64 / stats.total_prompt_tokens.max(1) as f64) * 100.0;
+        let denom = if stats.total_cache_eligible_prompt_tokens > 0 {
+            stats.total_cache_eligible_prompt_tokens
+        } else {
+            stats.total_prompt_tokens.max(1)
+        };
+        let hit_rate = (stats.total_cached_tokens as f64 / denom as f64) * 100.0;
         out.push_str(&format!(
             "  Cached Tokens          {:>10}  {}{:.1}% cache hit{}\n",
             fmt_scaled(stats.total_cached_tokens),
