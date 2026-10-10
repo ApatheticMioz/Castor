@@ -188,4 +188,3 @@ mod tests {
         assert_eq!(d.record("read", "foo"), LoopState::Ok);
     }
 }
-

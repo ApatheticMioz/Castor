@@ -54,7 +54,15 @@ export CASTOR_MODEL="qwen3.8-27b"
 # vLLM (default port 18020)
 export CASTOR_BASE_URL="http://127.0.0.1:18020/v1"
 export CASTOR_MODEL="Qwen3.8-27B"
+
+# llama.cpp (llama-server --alias castor-coder --port 18020 --jinja)
+export CASTOR_ENGINE_TYPE="llama.cpp"
+export CASTOR_BASE_URL="http://127.0.0.1:18020/v1"
+export CASTOR_MODEL="castor-coder"
 ```
+
+See the [llama.cpp guide](docs/llama-cpp.md) for managed startup/shutdown,
+Windows and Linux examples, GGUF models, tool calling, and optional live tests.
 
 Configuration persists in `~/.castor/config.json` and respects `CASTOR_*` environment variable overrides.
 

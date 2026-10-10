@@ -175,8 +175,9 @@ pub fn load_with(get_env: impl Fn(&str) -> Option<String>) -> Result<LoadedConfi
             path: file_path.clone(),
             source: e,
         })?;
+        let clean = raw.strip_prefix('\u{feff}').unwrap_or(&raw);
         Some(
-            serde_json::from_str::<FileConfig>(&raw).map_err(|e| ConfigError::Parse {
+            serde_json::from_str::<FileConfig>(clean).map_err(|e| ConfigError::Parse {
                 path: file_path.clone(),
                 source: e,
             })?,
@@ -1040,5 +1041,13 @@ mod tests {
     fn default_state_dir_under_home() {
         let d = default_state_dir();
         assert!(d.to_string_lossy().ends_with(".castor"), "got {d:?}");
+    }
+
+    #[test]
+    fn file_config_with_utf8_bom() {
+        let bom_json = format!("\u{feff}{}", r#"{"model":"bom-test"}"#);
+        let l = load_case(&[], Some(&bom_json));
+        assert_eq!(l.config.model.as_deref(), Some("bom-test"));
+        assert_eq!(l.sources.model, Source::File);
     }
 }

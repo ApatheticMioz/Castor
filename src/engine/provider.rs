@@ -167,6 +167,7 @@ pub struct EngineClient {
     base_url: String,
     model: String,
     api_key: Option<String>,
+    backend: super::backend::Backend,
 }
 
 impl EngineClient {
@@ -190,13 +191,13 @@ impl EngineClient {
             base_url,
             model,
             api_key: cfg.api_key.clone(),
+            backend: super::backend::Backend::from_config(cfg),
         })
     }
 
     /// Send one chat-completion request, consuming the response.
     ///
-    /// When `reasoning_effort` is provided, it is serialized directly as
-    /// `chat_template_kwargs: {"reasoning_effort": effort}` for local vLLM.
+    /// Reasoning effort uses the selected engine's request format.
     pub async fn chat(
         &self,
         messages: &[Message],
@@ -218,7 +219,11 @@ impl EngineClient {
             body["stream_options"] = json!({ "include_usage": true });
         }
         if let Some(effort) = reasoning_effort {
-            body["chat_template_kwargs"] = json!({ "reasoning_effort": effort });
+            if self.backend == super::backend::Backend::LlamaCpp {
+                body["reasoning_effort"] = json!(effort);
+            } else {
+                body["chat_template_kwargs"] = json!({ "reasoning_effort": effort });
+            }
         }
         let mut req = self.http.post(&url).json(&body);
         if let Some(key) = &self.api_key {
@@ -285,6 +290,9 @@ impl EngineClient {
                 }
                 let frame: Value =
                     serde_json::from_str(payload).map_err(|e| EngineError::Sse(e.to_string()))?;
+                if let Some(error) = frame.get("error") {
+                    return Err(EngineError::Sse(format!("upstream error: {error}")));
+                }
                 if let Some(usage) = frame.get("usage") {
                     // Engine-reported usage chunk: completion tokens take
                     // precedence over the local char estimate; prompt tokens
@@ -358,6 +366,11 @@ impl EngineClient {
                     }
                 }
             }
+        }
+        if self.backend == super::backend::Backend::LlamaCpp {
+            return Err(EngineError::Sse(
+                "llama.cpp stream ended without [DONE]".into(),
+            ));
         }
         Ok(assemble(
             &content,
