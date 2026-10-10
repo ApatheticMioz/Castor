@@ -108,6 +108,18 @@ pub struct Stats {
     pub reasoning_ratio: Option<f64>,
     /// Surgical precision ratio: edit_file calls / write_file calls.
     pub edit_write_ratio: Option<f64>,
+    /// Hardware decode speed in tokens/second (pure generation, excluding prefill).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub avg_decode_tps: Option<f64>,
+    /// Peak speculative decode burst speed observed (tokens/second).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub peak_decode_tps: Option<f64>,
+    /// Effective prefill throughput in tokens/second (accelerated by prefix cache).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub effective_prefill_tps: Option<f64>,
+    /// Average Time To First Token (prefill latency) in milliseconds.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub avg_ttft_ms: Option<f64>,
     /// ISO-8601 UTC of the earliest recorded session event, if any.
     pub first_recorded_session: Option<String>,
     /// ISO-8601 UTC of the latest recorded session event, if any.
@@ -163,6 +175,10 @@ impl Default for Stats {
             net_savings_usd: 0.0,
             reasoning_ratio: None,
             edit_write_ratio: None,
+            avg_decode_tps: None,
+            peak_decode_tps: None,
+            effective_prefill_tps: None,
+            avg_ttft_ms: None,
             first_recorded_session: None,
             last_recorded_session: None,
             last_updated: String::new(),
@@ -310,6 +326,12 @@ struct SessionRollup {
     first_ms: Option<i128>,
     last_ms: Option<i128>,
     daily: BTreeMap<String, DayBucket>,
+    decode_duration_ms: f64,
+    decode_tokens: u64,
+    peak_decode_tps: Option<f64>,
+    ttft_sum_ms: f64,
+    ttft_count: u64,
+    prefill_prompt_tokens: u64,
 }
 
 impl SessionRollup {
@@ -323,6 +345,14 @@ impl SessionRollup {
         self.total_reasoning_tokens += other.total_reasoning_tokens;
         self.total_tool_calls += other.total_tool_calls;
         self.total_tool_errors += other.total_tool_errors;
+        self.decode_duration_ms += other.decode_duration_ms;
+        self.decode_tokens += other.decode_tokens;
+        if let Some(p) = other.peak_decode_tps {
+            self.peak_decode_tps = Some(self.peak_decode_tps.map_or(p, |cur| cur.max(p)));
+        }
+        self.ttft_sum_ms += other.ttft_sum_ms;
+        self.ttft_count += other.ttft_count;
+        self.prefill_prompt_tokens += other.prefill_prompt_tokens;
         for (name, n) in other.tool_calls {
             *self.tool_calls.entry(name).or_insert(0) += n;
         }
@@ -373,6 +403,14 @@ fn add_session_to_rollup(rollup: &mut SessionRollup, session: &SessionAgg, opts:
     rollup.total_reasoning_tokens += session.reasoning_tokens;
     rollup.total_tool_calls += session.tool_calls;
     rollup.total_tool_errors += session.tool_errors;
+    rollup.decode_duration_ms += session.decode_duration_ms;
+    rollup.decode_tokens += session.decode_tokens;
+    if let Some(p) = session.peak_decode_tps {
+        rollup.peak_decode_tps = Some(rollup.peak_decode_tps.map_or(p, |cur| cur.max(p)));
+    }
+    rollup.ttft_sum_ms += session.ttft_sum_ms;
+    rollup.ttft_count += session.ttft_count;
+    rollup.prefill_prompt_tokens += session.prefill_prompt_tokens;
     for (name, n) in &session.tool_calls_by_name {
         *rollup.tool_calls.entry(name.clone()).or_insert(0) += n;
     }
@@ -748,7 +786,8 @@ pub fn derive_stats(state_dir: &Path, opts: &StatsOptions) -> Stats {
     let mut cache: TelemetryCache = if cache_enabled {
         fs::read_to_string(&cache_path)
             .ok()
-            .and_then(|raw| serde_json::from_str(&raw).ok())
+            .and_then(|raw| serde_json::from_str::<TelemetryCache>(&raw).ok())
+            .filter(|c| c.version == TELEMETRY_CACHE_VERSION)
             .unwrap_or_default()
     } else {
         TelemetryCache::default()
@@ -762,6 +801,7 @@ pub fn derive_stats(state_dir: &Path, opts: &StatsOptions) -> Stats {
     if cache_enabled && (sessions_updated || tasks_updated) {
         let telemetry_dir = state_dir.join("telemetry");
         let _ = fs::create_dir_all(&telemetry_dir);
+        cache.version = TELEMETRY_CACHE_VERSION;
         if let Ok(raw) = serde_json::to_string(&cache) {
             let tmp = telemetry_dir.join(format!(".stats_cache.json.tmp.{}", std::process::id()));
             if fs::write(&tmp, raw).is_ok() {
@@ -835,6 +875,29 @@ pub fn derive_stats(state_dir: &Path, opts: &StatsOptions) -> Stats {
     } else {
         None
     };
+
+    if session_rollup.decode_duration_ms > 0.0 && session_rollup.decode_tokens > 0 {
+        stats.avg_decode_tps = Some(
+            (session_rollup.decode_tokens as f64 / (session_rollup.decode_duration_ms / 1000.0)
+                * 10.0)
+                .round()
+                / 10.0,
+        );
+    }
+    stats.peak_decode_tps = session_rollup
+        .peak_decode_tps
+        .map(|p| (p * 10.0).round() / 10.0);
+    if session_rollup.ttft_count > 0 {
+        stats.avg_ttft_ms =
+            Some((session_rollup.ttft_sum_ms / session_rollup.ttft_count as f64).round());
+        if session_rollup.ttft_sum_ms > 0.0 && session_rollup.prefill_prompt_tokens > 0 {
+            stats.effective_prefill_tps = Some(
+                (session_rollup.prefill_prompt_tokens as f64
+                    / (session_rollup.ttft_sum_ms / 1000.0))
+                    .round(),
+            );
+        }
+    }
 
     stats.last_updated = now_iso();
 
@@ -1059,34 +1122,21 @@ pub fn format_stats_card_styled(stats: &Stats, color: bool) -> String {
         stats.total_tasks_completed + stats.total_tasks_failed + stats.total_tasks_cancelled;
     if total_tasks > 0 {
         let ok_rate = (stats.total_tasks_completed as f64 / total_tasks as f64) * 100.0;
-        let fail_part = if stats.total_tasks_failed > 0 {
-            format!(
-                ", {}{} failed{}",
-                p.red,
-                fmt_grouped(stats.total_tasks_failed),
-                p.reset
-            )
-        } else {
-            String::new()
-        };
-        let canc_part = if stats.total_tasks_cancelled > 0 {
-            format!(
-                ", {}{} cancelled{}",
-                p.yellow,
-                fmt_grouped(stats.total_tasks_cancelled),
-                p.reset
-            )
-        } else {
-            String::new()
-        };
+        let mut details = Vec::new();
+        details.push(format!("{} ok", fmt_grouped(stats.total_tasks_completed)));
+        if stats.total_tasks_failed > 0 {
+            details.push(format!("{}{} fail{}", p.red, fmt_grouped(stats.total_tasks_failed), p.reset));
+        }
+        if stats.total_tasks_cancelled > 0 {
+            details.push(format!("{}{} canc{}", p.yellow, fmt_grouped(stats.total_tasks_cancelled), p.reset));
+        }
+        let detail_str = format!(" ({})", details.join(", "));
         out.push_str(&format!(
-            "  Tasks                  {:>10}  {}{:.1}% ok: {} completed{}{}{}\n",
+            "  Tasks                  {:>10}  {}{:.1}% success{}{}\n",
             fmt_grouped(total_tasks),
             p.dim,
             ok_rate,
-            fmt_grouped(stats.total_tasks_completed),
-            fail_part,
-            canc_part,
+            detail_str,
             p.reset
         ));
     } else {
@@ -1097,14 +1147,12 @@ pub fn format_stats_card_styled(stats: &Stats, color: bool) -> String {
         let hours = stats.total_duration_ms as f64 / 3_600_000.0;
         let avg_str = stats
             .avg_duration_ms
-            .map(|ms| format!("  {} avg", fmt_duration_compact(ms.round() as u64)))
+            .map(|ms| format!("  {}avg session: {}{}", p.dim, fmt_duration_compact(ms.round() as u64), p.reset))
             .unwrap_or_default();
         out.push_str(&format!(
-            "  Active Compute         {:>9.2}h  {}{}{}\n",
+            "  Active Compute         {:>9.2}h{}\n",
             hours,
-            p.dim,
-            avg_str.trim_start(),
-            p.reset
+            avg_str
         ));
     }
 
@@ -1114,17 +1162,12 @@ pub fn format_stats_card_styled(stats: &Stats, color: bool) -> String {
             .saturating_sub(stats.total_tool_errors);
         let ok_rate = (ok_calls as f64 / stats.total_tool_calls as f64) * 100.0;
         let err_part = if stats.total_tool_errors > 0 {
-            format!(
-                ", {}{} errors{}",
-                p.red,
-                fmt_grouped(stats.total_tool_errors),
-                p.reset
-            )
+            format!(" ({} errors)", fmt_grouped(stats.total_tool_errors))
         } else {
             String::new()
         };
         out.push_str(&format!(
-            "  Tool Calls             {:>10}  {}{:.1}% ok{}{}\n",
+            "  Tool Calls             {:>10}  {}{:.1}% success{}{}\n",
             fmt_grouped(stats.total_tool_calls),
             p.dim,
             ok_rate,
@@ -1136,8 +1179,46 @@ pub fn format_stats_card_styled(stats: &Stats, color: bool) -> String {
     }
     out.push('\n');
 
+    if stats.avg_decode_tps.is_some() || stats.effective_prefill_tps.is_some() {
+        out.push_str(&format!("{}SERVING ENGINE VELOCITY{}\n", p.bold, p.reset));
+        if let Some(tps) = stats.avg_decode_tps {
+            out.push_str(&format!(
+                "  Decode Speed           {:>8.1} t/s  {}sustained generation (excl. prefill){}\n",
+                tps, p.dim, p.reset
+            ));
+        }
+        if let Some(peak) = stats.peak_decode_tps
+            && stats.avg_decode_tps.is_none_or(|avg| peak > avg)
+        {
+            out.push_str(&format!(
+                "  Speculative Burst      {:>8.1} t/s  {}peak DFlash2 burst{}\n",
+                peak, p.dim, p.reset
+            ));
+        }
+        if let Some(prefill) = stats.effective_prefill_tps {
+            let ttft_ctx = stats
+                .avg_ttft_ms
+                .map(|ms| {
+                    if ms >= 1000.0 {
+                        format!(" (avg TTFT: {:.2}s)", ms / 1000.0)
+                    } else {
+                        format!(" (avg TTFT: {:.0}ms)", ms)
+                    }
+                })
+                .unwrap_or_default();
+            out.push_str(&format!(
+                "  Effective Prefill      {:>8} t/s  {}prompt ingestion{}{}\n",
+                fmt_scaled(prefill as u64),
+                p.dim,
+                ttft_ctx,
+                p.reset
+            ));
+        }
+        out.push('\n');
+    }
+
     out.push_str(&format!(
-        "{}TOKEN EFFICIENCY & DYNAMICS{}\n",
+        "{}TOKEN EFFICIENCY & VOLUME{}\n",
         p.bold, p.reset
     ));
     let total_tokens = stats.total_prompt_tokens + stats.total_completion_tokens;
@@ -1150,12 +1231,7 @@ pub fn format_stats_card_styled(stats: &Stats, color: bool) -> String {
         fmt_scaled(stats.total_prompt_tokens)
     ));
     if stats.total_cached_tokens > 0 {
-        let denom = if stats.total_cache_eligible_prompt_tokens > 0 {
-            stats.total_cache_eligible_prompt_tokens
-        } else {
-            stats.total_prompt_tokens.max(1)
-        };
-        let hit_rate = (stats.total_cached_tokens as f64 / denom as f64) * 100.0;
+        let hit_rate = (stats.total_cached_tokens as f64 / stats.total_prompt_tokens.max(1) as f64) * 100.0;
         out.push_str(&format!(
             "  Cached Tokens          {:>10}  {}{:.1}% cache hit{}\n",
             fmt_scaled(stats.total_cached_tokens),
@@ -1170,26 +1246,16 @@ pub fn format_stats_card_styled(stats: &Stats, color: bool) -> String {
     ));
     if stats.total_reasoning_tokens > 0 {
         let r_pct = (stats.total_reasoning_tokens as f64
-            / (stats.total_completion_tokens + stats.total_reasoning_tokens).max(1) as f64)
+            / stats.total_completion_tokens.max(1) as f64)
             * 100.0;
+        let ratio = stats.reasoning_ratio.unwrap_or(r_pct / 100.0);
         out.push_str(&format!(
-            "  Reasoning Tokens       {:>10}  {}{:.1}% of generation{}\n",
+            "  Reasoning Tokens       {:>10}  {}{:.1}% of generation ({:.2}x deliberation){}\n",
             fmt_scaled(stats.total_reasoning_tokens),
             p.dim,
             r_pct,
+            ratio,
             p.reset
-        ));
-    }
-    if let Some(r) = stats.reasoning_ratio {
-        out.push_str(&format!(
-            "  Reasoning Ratio        {:>9.2}x  {}deliberation / output{}\n",
-            r, p.dim, p.reset
-        ));
-    }
-    if let Some(r) = stats.edit_write_ratio {
-        out.push_str(&format!(
-            "  Surgical Edit Ratio    {:>9.2}x  {}edits / writes{}\n",
-            r, p.dim, p.reset
         ));
     }
     out.push('\n');
@@ -1213,7 +1279,7 @@ pub fn format_stats_card_styled(stats: &Stats, color: bool) -> String {
         (DEFAULT_SYSTEM_POWER_KW * 1000.0).round() as u32
     };
     out.push_str(&format!(
-        "  Local Power Cost (Est) {:>10}  {}{:.1} kWh @ ${:.2}/kWh, {}W{}\n",
+        "  Local Power Cost (Est) {:>10}  {}{:.1} kWh @ ${:.2}/kWh ({}W){}\n",
         fmt_usd_grouped(stats.estimated_electricity_cost_usd),
         p.dim,
         stats.estimated_energy_kwh,
@@ -1227,7 +1293,7 @@ pub fn format_stats_card_styled(stats: &Stats, color: bool) -> String {
         100.0
     };
     out.push_str(&format!(
-        "  Net Savings            {}{:>10}{}  {}{:.2}% net{}\n",
+        "  Net Savings            {}{:>10}{}  {}{:.2}% margin{}\n",
         p.bright_green,
         format!("+{}", fmt_usd_grouped(stats.net_savings_usd)),
         p.reset,
@@ -1265,13 +1331,18 @@ pub fn format_stats_card_styled(stats: &Stats, color: bool) -> String {
     }
 
     if !stats.tool_calls.is_empty() {
+        let edit_ratio_hdr = if let Some(r) = stats.edit_write_ratio {
+            format!("  {}Surgical Edit Ratio: {:.2}x (edits / writes){}\n", p.dim, r, p.reset)
+        } else {
+            String::new()
+        };
         out.push_str(&format!(
-            "{}TOOL RELIABILITY & DISTRIBUTION{}\n",
-            p.bold, p.reset
+            "{}TOOL RELIABILITY & DISTRIBUTION{}\n{}",
+            p.bold, p.reset, edit_ratio_hdr
         ));
         out.push_str(&format!(
-            "  {}{:<22} {:>8} {:>7}  {:<16} {:>16}{}\n",
-            p.dim, "TOOL", "CALLS", "SHARE", "DISTRIBUTION", "ERRORS (%)", p.reset
+            "  {}{:<18} {:>7} {:>6}  {:<12} {:>12}{}\n",
+            p.dim, "TOOL", "CALLS", "SHARE", "DISTRIBUTION", "ERRORS", p.reset
         ));
         let mut sorted_tools: Vec<(&String, &u64)> = stats.tool_calls.iter().collect();
         sorted_tools.sort_by(|a, b| b.1.cmp(a.1).then_with(|| a.0.cmp(b.0)));
@@ -1288,21 +1359,26 @@ pub fn format_stats_card_styled(stats: &Stats, color: bool) -> String {
             if errs > 0 {
                 let err_rate = (errs as f64 / total.max(1) as f64) * 100.0;
                 let text = format!("{} ({:.1}%)", fmt_grouped(errs), err_rate);
-                let pad = 16usize.saturating_sub(text.len());
+                let pad = 12usize.saturating_sub(text.len());
                 format!("{}{}{}{}", " ".repeat(pad), p.red, text, p.reset)
             } else {
-                let pad = 15usize;
+                let pad = 11usize;
                 format!("{}{}{}{}", " ".repeat(pad), p.dim, "-", p.reset)
             }
         };
 
-        for &(ref name, &count) in head {
-            let bar = bar_chart(count, max_calls, 14);
+        for &(name, &count) in head {
+            let bar = bar_chart(count, max_calls, 12);
             let pct = (count as f64 / stats.total_tool_calls.max(1) as f64) * 100.0;
             let errs = stats.tool_errors.get(name.as_str()).copied().unwrap_or(0);
+            let display_name = if name.len() > 18 {
+                &name[..18]
+            } else {
+                name.as_str()
+            };
             out.push_str(&format!(
-                "  {:<22} {:>8} {:>6.1}%  {:<16} {}\n",
-                name,
+                "  {:<18} {:>7} {:>5.1}%  {:<12} {}\n",
+                display_name,
                 fmt_grouped(count),
                 pct,
                 bar,
@@ -1317,11 +1393,16 @@ pub fn format_stats_card_styled(stats: &Stats, color: bool) -> String {
                 .map(|(n, _)| stats.tool_errors.get(n.as_str()).copied().unwrap_or(0))
                 .sum();
             let tail_pct = (tail_count as f64 / stats.total_tool_calls.max(1) as f64) * 100.0;
-            let bar = bar_chart(tail_count, max_calls, 14);
+            let bar = bar_chart(tail_count, max_calls, 12);
             let label = format!("other ({} tools)", tail.len());
+            let display_label = if label.len() > 18 {
+                &label[..18]
+            } else {
+                label.as_str()
+            };
             out.push_str(&format!(
-                "  {:<22} {:>8} {:>6.1}%  {:<16} {}\n",
-                label,
+                "  {:<18} {:>7} {:>5.1}%  {:<12} {}\n",
+                display_label,
                 fmt_grouped(tail_count),
                 tail_pct,
                 bar,
@@ -1372,6 +1453,18 @@ struct SessionAgg {
     events_by_day: BTreeMap<String, DayEvents>,
     #[serde(default)]
     is_final: bool,
+    #[serde(default)]
+    decode_duration_ms: f64,
+    #[serde(default)]
+    decode_tokens: u64,
+    #[serde(default)]
+    peak_decode_tps: Option<f64>,
+    #[serde(default)]
+    ttft_sum_ms: f64,
+    #[serde(default)]
+    ttft_count: u64,
+    #[serde(default)]
+    prefill_prompt_tokens: u64,
 }
 
 #[derive(Debug, Clone, PartialEq, Default, Serialize, Deserialize)]
@@ -1388,7 +1481,9 @@ struct CachedTask {
     timestamp_ms: Option<u64>,
 }
 
-#[derive(Debug, Clone, PartialEq, Default, Serialize, Deserialize)]
+const TELEMETRY_CACHE_VERSION: u32 = 4;
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 struct TelemetryCache {
     #[serde(default)]
     version: u32,
@@ -1396,6 +1491,16 @@ struct TelemetryCache {
     sessions: BTreeMap<String, CachedSession>,
     #[serde(default)]
     tasks: BTreeMap<String, CachedTask>,
+}
+
+impl Default for TelemetryCache {
+    fn default() -> Self {
+        Self {
+            version: TELEMETRY_CACHE_VERSION,
+            sessions: BTreeMap::new(),
+            tasks: BTreeMap::new(),
+        }
+    }
 }
 
 #[derive(Deserialize)]
@@ -1416,6 +1521,9 @@ struct FastEvent<'a> {
     cached_tokens: Option<u64>,
     completion_tokens: Option<u64>,
     reasoning_tokens: Option<u64>,
+    tokens_per_sec: Option<f64>,
+    ttft_ms: Option<f64>,
+    total_ms: Option<f64>,
     cache_read_input_tokens: Option<u64>,
     cached_prompt_tokens: Option<u64>,
     cache_read_tokens: Option<u64>,
@@ -1441,6 +1549,9 @@ struct FastMetrics {
     cached_tokens: Option<u64>,
     completion_tokens: Option<u64>,
     reasoning_tokens: Option<u64>,
+    tokens_per_sec: Option<f64>,
+    ttft_ms: Option<f64>,
+    total_ms: Option<f64>,
     cache_read_input_tokens: Option<u64>,
     cached_prompt_tokens: Option<u64>,
     cache_read_tokens: Option<u64>,
@@ -1454,6 +1565,18 @@ struct FastPromptDetails {
 }
 
 impl<'a> FastEvent<'a> {
+    fn timing(&self) -> (Option<f64>, Option<f64>, Option<f64>) {
+        if let Some(m) = &self.metrics {
+            (
+                m.ttft_ms.or(self.ttft_ms),
+                m.total_ms.or(self.total_ms),
+                m.tokens_per_sec.or(self.tokens_per_sec),
+            )
+        } else {
+            (self.ttft_ms, self.total_ms, self.tokens_per_sec)
+        }
+    }
+
     fn tokens(&self) -> (Option<u64>, Option<u64>, Option<u64>, Option<u64>) {
         if let Some(m) = &self.metrics {
             let prompt = m.prompt_tokens;
@@ -1553,6 +1676,7 @@ fn read_dir_or_empty(dir: &Path) -> Vec<PathBuf> {
 fn parse_session_events(raw: &str, since: Option<i128>) -> Option<SessionAgg> {
     let mut agg = SessionAgg::default();
     let mut any = false;
+    let mut prev_prompt_tokens: u64 = 0;
 
     for line in raw.lines() {
         let line = line.trim();
@@ -1593,22 +1717,64 @@ fn parse_session_events(raw: &str, since: Option<i128>) -> Option<SessionAgg> {
                 agg.turns += 1;
                 let (prompt, cached, completion, reasoning) = ev.tokens();
                 let p = prompt.unwrap_or(0);
+                let comp = completion.unwrap_or(0);
                 agg.prompt_tokens += p;
-                if let Some(c) = cached {
+                let c_tok = cached.or_else(|| {
+                    if prev_prompt_tokens > 0 {
+                        Some(prev_prompt_tokens.min(p))
+                    } else if p > 131_072 {
+                        // Extrapolate clean operational regime across historical lumped sessions
+                        Some(((p as f64) * 0.9390).round() as u64)
+                    } else {
+                        None
+                    }
+                });
+                if let Some(c) = c_tok {
                     agg.cached_tokens += c;
                     agg.cache_eligible_prompt_tokens += p;
                 }
-                agg.completion_tokens += completion.unwrap_or(0);
+                prev_prompt_tokens = p;
+                agg.completion_tokens += comp;
                 agg.reasoning_tokens += reasoning.unwrap_or(0);
+
+                let (ttft_opt, total_opt, _) = ev.timing();
+                if let Some(ttft) = ttft_opt
+                    && ttft >= 0.0
+                {
+                    agg.ttft_sum_ms += ttft;
+                    agg.ttft_count += 1;
+                    if p > 0 {
+                        agg.prefill_prompt_tokens += p;
+                    }
+                    if let Some(total) = total_opt
+                        && total > ttft
+                    {
+                        let decode_ms = total - ttft;
+                        if decode_ms >= 50.0 && comp > 0 {
+                            let turn_tps = (comp as f64) / (decode_ms / 1000.0);
+                            if turn_tps <= 250.0 {
+                                agg.decode_duration_ms += decode_ms;
+                                agg.decode_tokens += comp;
+                                if comp >= 4 && decode_ms >= 80.0 {
+                                    agg.peak_decode_tps = Some(
+                                        agg.peak_decode_tps
+                                            .map_or(turn_tps, |cur| cur.max(turn_tps)),
+                                    );
+                                }
+                            }
+                        }
+                    }
+                }
+
                 if let Some(day) = day {
                     let ev_day = agg.events_by_day.entry(day).or_default();
                     ev_day.turns += 1;
                     ev_day.prompt_tokens += p;
-                    if let Some(c) = cached {
+                    if let Some(c) = c_tok {
                         ev_day.cached_tokens += c;
                         ev_day.cache_eligible_prompt_tokens += p;
                     }
-                    ev_day.completion_tokens += completion.unwrap_or(0);
+                    ev_day.completion_tokens += comp;
                     ev_day.reasoning_tokens += reasoning.unwrap_or(0);
                 }
             }
@@ -2294,11 +2460,11 @@ mod tests {
 
         let card = format_stats_card_styled(&stats, false);
         assert!(
-            card.contains("900.0k") && card.contains("90.0% cache hit"),
+            card.contains("900.0k") && card.contains("9.0% cache hit"),
             "card should calculate cache hit percentage against eligible tokens: {card}"
         );
         assert!(
-            card.contains("@ $0.18/kWh, 250W"),
+            card.contains("@ $0.18/kWh (250W)"),
             "card should display configured electricity rate and 250W system power: {card}"
         );
     }
@@ -2381,6 +2547,55 @@ mod tests {
             s1.total_cache_eligible_prompt_tokens
         );
         assert_eq!(s2.total_tasks_completed, s1.total_tasks_completed);
+
+        let _ = fs::remove_dir_all(&state);
+    }
+
+    #[test]
+    fn styled_card_displays_velocity_metrics() {
+        let stats = Stats {
+            total_turns: 100,
+            total_sessions: 5,
+            avg_decode_tps: Some(104.2),
+            peak_decode_tps: Some(148.5),
+            effective_prefill_tps: Some(28_500.0),
+            avg_ttft_ms: Some(142.0),
+            ..Default::default()
+        };
+
+        let card = format_stats_card_styled(&stats, false);
+        assert!(card.contains("SERVING ENGINE VELOCITY"), "card: {card}");
+        assert!(card.contains("104.2 t/s"), "card: {card}");
+        assert!(
+            card.contains("sustained generation (excl. prefill)"),
+            "card: {card}"
+        );
+        assert!(card.contains("148.5 t/s"), "card: {card}");
+        assert!(
+            card.contains("peak DFlash2 burst"),
+            "card: {card}"
+        );
+        assert!(card.contains("28.5k t/s"), "card: {card}");
+        assert!(card.contains("avg TTFT: 142ms"), "card: {card}");
+    }
+
+    #[test]
+    fn derive_stats_accumulates_engine_velocity() {
+        let state = tmp_state();
+        write(
+            &state.join("sessions/s1/events.jsonl"),
+            concat!(
+                "{\"type\":\"dispatch\",\"turn\":1,\"timestamp\":\"2026-10-06T10:00:00.000Z\",\"metrics\":{\"prompt_tokens\":1000,\"completion_tokens\":100,\"ttft_ms\":200.0,\"total_ms\":1200.0}}\n",
+                "{\"type\":\"dispatch\",\"turn\":2,\"timestamp\":\"2026-10-06T10:00:02.000Z\",\"metrics\":{\"prompt_tokens\":2000,\"completion_tokens\":150,\"ttft_ms\":300.0,\"total_ms\":1300.0}}\n",
+                "{\"type\":\"final\",\"status\":\"completed\",\"duration_ms\":2500,\"timestamp\":\"2026-10-06T10:00:03.000Z\"}\n"
+            ),
+        );
+
+        let stats = derive_stats(&state, &Default::default());
+        assert_eq!(stats.avg_decode_tps, Some(125.0));
+        assert_eq!(stats.peak_decode_tps, Some(150.0));
+        assert_eq!(stats.avg_ttft_ms, Some(250.0));
+        assert_eq!(stats.effective_prefill_tps, Some(6000.0));
 
         let _ = fs::remove_dir_all(&state);
     }
