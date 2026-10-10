@@ -44,7 +44,7 @@ chrono = "0.4"
 humantime = "2.1"
 path-clean = "1.0"
 dunce = "1.0"
-base64 = "0.22"
+base64 = "0.23"
 unicode-normalization = "0.1"
 infer = "0.16"
 # Pure-Rust PDF parsing (no C bindings). 0.42+ carries the RUSTSEC-2026-0187
@@ -61,7 +61,8 @@ windows-sys = { version = "0.61", features = ["Win32_System_Threading", "Win32_F
 
 [profile.release]
 opt-level = 3
-lto = "thin"
+lto = "fat"
 codegen-units = 1
 strip = true
+panic = "abort"
 

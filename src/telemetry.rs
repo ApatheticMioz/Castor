@@ -433,9 +433,7 @@ fn get_file_meta(p: &Path) -> Option<(u64, u64)> {
 
 type SessionParseResult = (PathBuf, Option<(u64, u64)>, SessionAgg);
 
-fn parse_chunk_of_sessions(
-    paths: &[PathBuf],
-) -> Vec<SessionParseResult> {
+fn parse_chunk_of_sessions(paths: &[PathBuf]) -> Vec<SessionParseResult> {
     let mut results = Vec::with_capacity(paths.len());
     for path in paths {
         if !path.is_dir() {
@@ -519,7 +517,11 @@ fn load_session_rollups_cached(
 
     let current_dir_names: std::collections::HashSet<String> = session_dirs
         .iter()
-        .filter_map(|p| p.file_name().and_then(|n| n.to_str()).map(|s| s.to_string()))
+        .filter_map(|p| {
+            p.file_name()
+                .and_then(|n| n.to_str())
+                .map(|s| s.to_string())
+        })
         .collect();
     let initial_cache_len = cache_sessions.len();
     cache_sessions.retain(|k, _| current_dir_names.contains(k));
@@ -619,11 +621,7 @@ fn load_session_rollups_cached(
                                         .ok()
                                         .and_then(|raw| parse_session_events(&raw, opts.since_ms))
                                     {
-                                        add_session_to_rollup(
-                                            &mut chunk_rollup,
-                                            &filtered,
-                                            opts,
-                                        );
+                                        add_session_to_rollup(&mut chunk_rollup, &filtered, opts);
                                     }
                                 }
                                 _ => {}
@@ -656,7 +654,11 @@ fn load_task_metrics_cached(
 
     let current_file_names: std::collections::HashSet<String> = task_files
         .iter()
-        .filter_map(|p| p.file_name().and_then(|n| n.to_str()).map(|s| s.to_string()))
+        .filter_map(|p| {
+            p.file_name()
+                .and_then(|n| n.to_str())
+                .map(|s| s.to_string())
+        })
         .collect();
     let initial_cache_len = cache_tasks.len();
     cache_tasks.retain(|k, _| current_file_names.contains(k));
@@ -1153,8 +1155,7 @@ pub fn format_stats_card_styled(stats: &Stats, color: bool) -> String {
         } else {
             stats.total_prompt_tokens.max(1)
         };
-        let hit_rate =
-            (stats.total_cached_tokens as f64 / denom as f64) * 100.0;
+        let hit_rate = (stats.total_cached_tokens as f64 / denom as f64) * 100.0;
         out.push_str(&format!(
             "  Cached Tokens          {:>10}  {}{:.1}% cache hit{}\n",
             fmt_scaled(stats.total_cached_tokens),
@@ -1461,7 +1462,11 @@ impl<'a> FastEvent<'a> {
                 .or(m.cache_read_input_tokens)
                 .or(m.cached_prompt_tokens)
                 .or(m.cache_read_tokens)
-                .or_else(|| m.prompt_tokens_details.as_ref().and_then(|d| d.cached_tokens))
+                .or_else(|| {
+                    m.prompt_tokens_details
+                        .as_ref()
+                        .and_then(|d| d.cached_tokens)
+                })
                 .or_else(|| {
                     m.usage
                         .as_ref()
@@ -1478,7 +1483,11 @@ impl<'a> FastEvent<'a> {
                 .or(self.cache_read_input_tokens)
                 .or(self.cached_prompt_tokens)
                 .or(self.cache_read_tokens)
-                .or_else(|| self.prompt_tokens_details.as_ref().and_then(|d| d.cached_tokens))
+                .or_else(|| {
+                    self.prompt_tokens_details
+                        .as_ref()
+                        .and_then(|d| d.cached_tokens)
+                })
                 .or_else(|| {
                     self.usage
                         .as_ref()
@@ -1633,7 +1642,6 @@ fn parse_session_events(raw: &str, since: Option<i128>) -> Option<SessionAgg> {
 
     any.then_some(agg)
 }
-
 
 /// Normalize a ledger `timestamp` into integer epoch milliseconds (UTC).
 ///
@@ -2358,14 +2366,20 @@ mod tests {
 
         // Verify cache file was written
         let cache_file = state.join("telemetry/.stats_cache.json");
-        assert!(cache_file.exists(), "cache file should be written to telemetry/.stats_cache.json");
+        assert!(
+            cache_file.exists(),
+            "cache file should be written to telemetry/.stats_cache.json"
+        );
 
         // Second derivation: warm, uses cached entry
         let s2 = derive_stats(&state, &Default::default());
         assert_eq!(s2.total_sessions, s1.total_sessions);
         assert_eq!(s2.total_prompt_tokens, s1.total_prompt_tokens);
         assert_eq!(s2.total_cached_tokens, s1.total_cached_tokens);
-        assert_eq!(s2.total_cache_eligible_prompt_tokens, s1.total_cache_eligible_prompt_tokens);
+        assert_eq!(
+            s2.total_cache_eligible_prompt_tokens,
+            s1.total_cache_eligible_prompt_tokens
+        );
         assert_eq!(s2.total_tasks_completed, s1.total_tasks_completed);
 
         let _ = fs::remove_dir_all(&state);

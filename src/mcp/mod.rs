@@ -184,7 +184,6 @@ impl CastorMcpServer {
         Ok(params)
     }
 
-
     /// Resolve the path to the castor worker binary, handling test-binary
     /// suffixes and debug/release fallbacks.
     fn resolve_worker_bin() -> std::path::PathBuf {
@@ -222,7 +221,6 @@ impl CastorMcpServer {
                 ))]);
             }
         };
-
 
         let state = crate::state::StateDir::from_config(&loaded.config);
         if let Err(e) = state.ensure() {

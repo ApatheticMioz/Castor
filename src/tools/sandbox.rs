@@ -318,8 +318,8 @@ fn home_dir() -> Option<PathBuf> {
 /// refusal, lexical normalization, binary sniff) remain intact as free
 /// functions above; this policy *generalizes* the single-root model to a
 /// read/write split and adds tilde expansion, while delegating lexical
-/// normalization to [`normalize_lexical`] and device-name refusal to
-/// [`is_reserved_device`] so those invariants are preserved.
+/// normalization to `normalize_lexical` and device-name refusal to
+/// `is_reserved_device` so those invariants are preserved.
 #[derive(Debug, Clone)]
 pub struct SandboxPolicy {
     write_roots: Vec<PathBuf>,

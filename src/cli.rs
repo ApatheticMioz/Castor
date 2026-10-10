@@ -176,10 +176,13 @@ pub fn run_clean(state_dir: &std::path::Path, yes: bool) -> Result<String, Strin
     }
     let cwd_scratch = std::path::Path::new(".scratch");
     if cwd_scratch.is_dir()
-        && let Ok(ws_deleted) = pruner::prune_scratch_dir(cwd_scratch, pruner::DEFAULT_SCRATCH_TTL_MS, None)
+        && let Ok(ws_deleted) =
+            pruner::prune_scratch_dir(cwd_scratch, pruner::DEFAULT_SCRATCH_TTL_MS, None)
         && ws_deleted > 0
     {
-        out.push_str(&format!("deleted {ws_deleted} workspace .scratch item(s)\n"));
+        out.push_str(&format!(
+            "deleted {ws_deleted} workspace .scratch item(s)\n"
+        ));
     }
     out.push_str(&format!("deleted {deleted} item(s)\n"));
     Ok(out)

@@ -143,14 +143,7 @@ pub fn plan(state_dir: &Path, policy: &PrunePolicy) -> PrunePlan {
     let evo = plan_evo(state_dir, policy, now);
     let scratch = plan_scratch(&state_dir.join(".scratch"), policy.scratch_ttl_ms, now);
 
-    let fingerprint = compute_fingerprint(
-        state_dir,
-        &sessions,
-        &tasks,
-        &telemetry,
-        &evo,
-        &scratch,
-    );
+    let fingerprint = compute_fingerprint(state_dir, &sessions, &tasks, &telemetry, &evo, &scratch);
 
     PrunePlan {
         state_dir: state_dir.to_path_buf(),
@@ -1234,4 +1227,3 @@ mod tests {
         let _ = fs::remove_dir_all(&root);
     }
 }
-

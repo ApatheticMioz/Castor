@@ -198,8 +198,8 @@ impl ExtensionBridge {
     /// Call a tool by its namespaced `<ext>__<tool>` name.
     ///
     /// `args_json` is a JSON object string of tool arguments. Returns the
-    /// concatenated text content of the result, truncated to [`RESULT_CAP_BYTES`]
-    /// with [`TRUNCATION_MARKER`] appended if it exceeds the cap.
+    /// concatenated text content of the result, truncated to `RESULT_CAP_BYTES`
+    /// with `TRUNCATION_MARKER` appended if it exceeds the cap.
     pub async fn call(&self, full_name: &str, args_json: &str) -> Result<String, ExtError> {
         let (server, frozen) = self
             .servers

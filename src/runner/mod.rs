@@ -319,7 +319,8 @@ pub fn spill_tool_output(
     let base = scratch_root.unwrap_or(&fallback_scratch);
     let scratch_dir = base.join(".scratch");
     let _ = fs::create_dir_all(&scratch_dir);
-    let _ = crate::pruner::prune_scratch_dir(&scratch_dir, crate::pruner::DEFAULT_SCRATCH_TTL_MS, None);
+    let _ =
+        crate::pruner::prune_scratch_dir(&scratch_dir, crate::pruner::DEFAULT_SCRATCH_TTL_MS, None);
     let file_path = scratch_dir.join(format!("tool_out_{safe_id}.txt"));
 
     match fs::write(&file_path, output) {
@@ -501,8 +502,11 @@ pub async fn run_session(
                                     },
                                 };
                                 let scratch_root = options.and_then(|o| o.scratch_root());
-                                let (tool_content, spilled) =
-                                    spill_tool_output(&outcome.text, &tc.id, scratch_root.as_deref());
+                                let (tool_content, spilled) = spill_tool_output(
+                                    &outcome.text,
+                                    &tc.id,
+                                    scratch_root.as_deref(),
+                                );
                                 if let Some((bytes, path)) = spilled {
                                     let _ = logger.append(serde_json::json!({
                                         "type": "tool_output_spilled",

@@ -156,7 +156,8 @@ pub async fn run_job_with_engine(
                 .timeout(std::time::Duration::from_secs(probe_timeout_secs))
                 .build()
                 .unwrap_or_default();
-            match crate::mcp::dgi::evaluate_model_probe(base_url, model, &spec.prompt, &http).await {
+            match crate::mcp::dgi::evaluate_model_probe(base_url, model, &spec.prompt, &http).await
+            {
                 Ok(v) => v,
                 Err(err) => {
                     tracing::warn!(
