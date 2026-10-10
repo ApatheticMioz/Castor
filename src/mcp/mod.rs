@@ -690,10 +690,10 @@ pub async fn serve(prefix: &str) -> Result<(), Box<dyn std::error::Error>> {
 /// believe the task finished early.
 pub fn wait_commands(status_port: u16, task_id: &str) -> (String, String) {
     let win = format!(
-        "curl.exe -fsS --max-time 3600 --retry 5 --retry-delay 2 --retry-connrefused http://127.0.0.1:{status_port}/task/{task_id}/wait?timeout_s=3600"
+        "curl.exe -fsS --max-time 3600 --retry 10 --retry-delay 2 --retry-connrefused --retry-all-errors --keepalive-time 30 http://127.0.0.1:{status_port}/task/{task_id}/wait?timeout_s=3600"
     );
     let wsl = format!(
-        "curl -fsS --max-time 3600 --retry 5 --retry-delay 2 --retry-connrefused http://127.0.0.1:{status_port}/task/{task_id}/wait?timeout_s=3600"
+        "curl -fsS --max-time 3600 --retry 10 --retry-delay 2 --retry-connrefused --retry-all-errors --keepalive-time 30 http://127.0.0.1:{status_port}/task/{task_id}/wait?timeout_s=3600"
     );
     (win, wsl)
 }
@@ -792,8 +792,11 @@ mod tests {
                  still-running task is not misreported as done via the 30 s default: {cmd}"
             );
             assert!(
-                cmd.contains("--retry 5") && cmd.contains("--retry-connrefused"),
-                "{name} wait command must retry connection refusals: {cmd}"
+                cmd.contains("--retry 10")
+                    && cmd.contains("--retry-connrefused")
+                    && cmd.contains("--retry-all-errors")
+                    && cmd.contains("--keepalive-time 30"),
+                "{name} wait command must retry all errors and send keepalive probes: {cmd}"
             );
         }
         // Windows flavor uses the .exe binary; WSL uses the bare curl.
