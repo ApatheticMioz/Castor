@@ -16,6 +16,7 @@ use tokio::io::{AsyncBufReadExt, BufReader};
 use tokio::process::Command;
 use tokio::sync::Mutex;
 
+use super::backend::{Backend, api_url};
 use crate::config::Config;
 use crate::state::{AcquireResult, Locks, StateDir, WedgeCounter};
 
@@ -40,6 +41,8 @@ pub enum LifecycleError {
     BootTimeout { secs: u64, detail: String },
     #[error("no launch_command configured")]
     NoLaunchCommand,
+    #[error("engine readiness failed: {0}")]
+    Readiness(String),
     #[error("stop failed: {0}")]
     Stop(String),
     #[error("io: {0}")]
@@ -53,6 +56,7 @@ pub struct EngineLifecycle {
     client: reqwest::Client,
     child: Mutex<Option<tokio::process::Child>>,
     boot_timeout: Duration,
+    state: StateDir,
 }
 
 impl EngineLifecycle {
@@ -68,6 +72,7 @@ impl EngineLifecycle {
             client,
             child: Mutex::new(None),
             boot_timeout: Duration::from_secs(config.boot_timeout_secs),
+            state: state.clone(),
         }
     }
 
@@ -76,8 +81,15 @@ impl EngineLifecycle {
         self
     }
 
-    /// GET /v1/models; healthy iff 200 and the configured model id is listed.
+    /// Check engine health and the configured model identity.
     pub async fn canary(&self) -> bool {
+        if Backend::from_config(&self.config) == Backend::LlamaCpp {
+            return self.readiness().await.is_ok();
+        }
+        self.legacy_canary().await
+    }
+
+    async fn legacy_canary(&self) -> bool {
         let Some(model) = &self.config.model else {
             return false;
         };
@@ -100,6 +112,22 @@ impl EngineLifecycle {
             .any(|m| m.get("id").and_then(|i| i.as_str()) == Some(model.as_str()))
     }
 
+    /// Check readiness with diagnostics for the configured llama.cpp endpoint.
+    pub async fn readiness(&self) -> Result<(), LifecycleError> {
+        if Backend::from_config(&self.config) != Backend::LlamaCpp {
+            return if self.legacy_canary().await {
+                Ok(())
+            } else {
+                Err(LifecycleError::Readiness(
+                    "canary failed (engine not healthy)".into(),
+                ))
+            };
+        }
+        llama_readiness(&self.config, &self.client)
+            .await
+            .map_err(LifecycleError::Readiness)
+    }
+
     /// Ensure the engine is running and healthy.
     ///
     /// Fast path: if the canary already passes, returns `Ok(())` immediately.
@@ -110,6 +138,9 @@ impl EngineLifecycle {
             return Ok(());
         }
         if self.config.launch_command.is_none() {
+            if Backend::from_config(&self.config) == Backend::LlamaCpp {
+                return self.readiness().await;
+            }
             return Err(LifecycleError::NoLaunchCommand);
         }
         match self.boot().await {
@@ -122,15 +153,23 @@ impl EngineLifecycle {
 
     async fn wait_for_healthy(&self) -> Result<(), LifecycleError> {
         let deadline = tokio::time::Instant::now() + self.boot_timeout;
+        let mut detail = "timed out waiting for concurrent engine boot".to_string();
         while tokio::time::Instant::now() < deadline {
-            if self.canary().await {
-                return Ok(());
+            if Backend::from_config(&self.config) == Backend::LlamaCpp {
+                match self.readiness().await {
+                    Ok(()) => return Ok(()),
+                    Err(error) => detail = error.to_string(),
+                }
+            } else {
+                if self.canary().await {
+                    return Ok(());
+                }
             }
             tokio::time::sleep(BOOT_POLL).await;
         }
         Err(LifecycleError::BootTimeout {
             secs: self.boot_timeout.as_secs(),
-            detail: "timed out waiting for concurrent engine boot".into(),
+            detail,
         })
     }
 
@@ -141,13 +180,48 @@ impl EngineLifecycle {
     /// configured `launch_command` is spawned in its own process group and the
     /// canary is polled until healthy or the boot timeout elapses.
     pub async fn boot(&self) -> Result<(), LifecycleError> {
-        match self.locks.acquire(BOOT_LOCK, BOOT_LOCK_TTL_MS)? {
+        match self.acquire_boot_lock().await? {
             AcquireResult::HeldBy { pid } => return Err(LifecycleError::BootLockHeld { pid }),
             AcquireResult::Acquired => {}
         }
         let result = self.boot_inner().await;
-        let _ = self.locks.release(BOOT_LOCK);
+        if Backend::from_config(&self.config) == Backend::LlamaCpp {
+            self.locks
+                .release(BOOT_LOCK)
+                .map_err(|e| LifecycleError::Stop(e.to_string()))?;
+        } else {
+            let _ = self.locks.release(BOOT_LOCK);
+        }
         result
+    }
+
+    async fn acquire_boot_lock(&self) -> Result<AcquireResult, LifecycleError> {
+        if Backend::from_config(&self.config) != Backend::LlamaCpp {
+            return Ok(self.locks.acquire(BOOT_LOCK, BOOT_LOCK_TTL_MS)?);
+        }
+        let publication_deadline = tokio::time::Instant::now() + Duration::from_secs(1);
+        let ttl = BOOT_LOCK_TTL_MS.max(
+            self.boot_timeout
+                .saturating_add(Duration::from_secs(20))
+                .as_millis()
+                .min(u64::MAX as u128) as u64,
+        );
+        loop {
+            match self.locks.acquire(BOOT_LOCK, ttl) {
+                Err(error)
+                    if error.kind() == std::io::ErrorKind::InvalidData
+                        && error
+                            .get_ref()
+                            .and_then(|source| source.downcast_ref::<serde_json::Error>())
+                            .is_some_and(serde_json::Error::is_eof)
+                        && tokio::time::Instant::now() < publication_deadline =>
+                {
+                    // O_EXCL publishes the lock before its writer finishes the payload.
+                    tokio::time::sleep(Duration::from_millis(10)).await;
+                }
+                result => return result.map_err(LifecycleError::Io),
+            }
+        }
     }
 
     async fn boot_inner(&self) -> Result<(), LifecycleError> {
@@ -160,6 +234,16 @@ impl EngineLifecycle {
             .launch_command
             .clone()
             .ok_or(LifecycleError::NoLaunchCommand)?;
+
+        if Backend::from_config(&self.config) == Backend::LlamaCpp {
+            return super::supervisor::start(
+                &self.config,
+                &self.state,
+                self.boot_timeout,
+                &self.client,
+            )
+            .await;
+        }
 
         let err_buf: Arc<std::sync::Mutex<VecDeque<String>>> =
             Arc::new(std::sync::Mutex::new(VecDeque::new()));
@@ -247,11 +331,12 @@ impl EngineLifecycle {
         self.boot().await
     }
 
-    fn shell_command(cmd: &str) -> Command {
+    pub(crate) fn shell_command(cmd: &str) -> Command {
         #[cfg(windows)]
         {
             let mut c = Command::new("cmd");
-            c.raw_arg(format!("/c {cmd}"));
+            c.raw_arg(format!("/d /s /c \"{cmd}\""));
+            c.creation_flags(0x08000000);
             c
         }
         #[cfg(not(windows))]
@@ -265,6 +350,21 @@ impl EngineLifecycle {
     /// Stop the engine: run the configured `stop_command` if present, else
     /// kill the spawned child's process group.
     pub async fn stop(&self) -> Result<(), LifecycleError> {
+        if Backend::from_config(&self.config) == Backend::LlamaCpp {
+            match self.acquire_boot_lock().await? {
+                AcquireResult::HeldBy { pid } => return Err(LifecycleError::BootLockHeld { pid }),
+                AcquireResult::Acquired => {}
+            }
+            let result = self.stop_inner().await;
+            self.locks
+                .release(BOOT_LOCK)
+                .map_err(|e| LifecycleError::Stop(e.to_string()))?;
+            return result;
+        }
+        self.stop_inner().await
+    }
+
+    async fn stop_inner(&self) -> Result<(), LifecycleError> {
         if let Some(cmd) = &self.config.stop_command {
             let out = Self::shell_command(cmd).output().await?;
             if !out.status.success() {
@@ -275,6 +375,9 @@ impl EngineLifecycle {
                 )));
             }
             return Ok(());
+        }
+        if Backend::from_config(&self.config) == Backend::LlamaCpp {
+            return super::supervisor::stop(&self.config, &self.state).await;
         }
         self.kill_child().await
     }
@@ -296,6 +399,56 @@ impl EngineLifecycle {
         }
         Ok(())
     }
+}
+
+pub(crate) async fn llama_readiness(
+    config: &Config,
+    client: &reqwest::Client,
+) -> Result<(), String> {
+    let model = config
+        .model
+        .as_deref()
+        .filter(|s| !s.is_empty())
+        .ok_or("missing model in config")?;
+    for endpoint in ["health", "models"] {
+        let url = api_url(config, endpoint)?;
+        let mut request = client.get(&url);
+        if let Some(key) = &config.api_key {
+            request = request.bearer_auth(key);
+        }
+        let response = request
+            .send()
+            .await
+            .map_err(|e| format!("connection to {url} failed: {e}"))?;
+        let status = response.status();
+        let body = response
+            .text()
+            .await
+            .map_err(|e| format!("reading upstream HTTP {status} body from {url}: {e}"))?;
+        if !status.is_success() {
+            return Err(format!("upstream HTTP {status} from {url}: {body}"));
+        }
+        let value: Value = serde_json::from_str(&body)
+            .map_err(|e| format!("malformed response from {url}: {e}"))?;
+        if endpoint == "health" {
+            if value["status"] != "ok" {
+                return Err(format!("engine not ready at {url}: {body}"));
+            }
+        } else {
+            let models = value["data"]
+                .as_array()
+                .ok_or_else(|| format!("missing model list from {url}: {body}"))?;
+            if !models
+                .iter()
+                .any(|entry| entry["id"].as_str() == Some(model))
+            {
+                return Err(format!(
+                    "configured model {model:?} not listed at {url}: {body}; set llama-server --alias to match CASTOR_MODEL"
+                ));
+            }
+        }
+    }
+    Ok(())
 }
 
 #[cfg(test)]

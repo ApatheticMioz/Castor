@@ -117,6 +117,20 @@ pub enum Command {
         /// Path to the JSON JobSpec file
         spec_path: String,
     },
+    /// (internal) persistent owner of a managed llama.cpp server
+    #[command(name = "__engine_supervisor", hide = true)]
+    __EngineSupervisor {
+        #[arg(long)]
+        state_dir: String,
+        #[arg(long)]
+        endpoint: String,
+        #[arg(long)]
+        model: String,
+        #[arg(long)]
+        launch_command: String,
+        #[arg(long)]
+        boot_timeout_ms: u64,
+    },
 }
 
 /// Build a human-readable plan listing what *would* be deleted.
@@ -176,10 +190,13 @@ pub fn run_clean(state_dir: &std::path::Path, yes: bool) -> Result<String, Strin
     }
     let cwd_scratch = std::path::Path::new(".scratch");
     if cwd_scratch.is_dir()
-        && let Ok(ws_deleted) = pruner::prune_scratch_dir(cwd_scratch, pruner::DEFAULT_SCRATCH_TTL_MS, None)
+        && let Ok(ws_deleted) =
+            pruner::prune_scratch_dir(cwd_scratch, pruner::DEFAULT_SCRATCH_TTL_MS, None)
         && ws_deleted > 0
     {
-        out.push_str(&format!("deleted {ws_deleted} workspace .scratch item(s)\n"));
+        out.push_str(&format!(
+            "deleted {ws_deleted} workspace .scratch item(s)\n"
+        ));
     }
     out.push_str(&format!("deleted {deleted} item(s)\n"));
     Ok(out)
@@ -328,6 +345,15 @@ pub async fn run_server(
     let lc = engine::EngineLifecycle::new(config, state);
     match action {
         "status" => {
+            if engine::backend::Backend::from_config(config) == engine::backend::Backend::LlamaCpp {
+                return match lc.readiness().await {
+                    Ok(()) => Ok((
+                        format!("healthy: model {} listed", config.model.as_deref().unwrap()),
+                        true,
+                    )),
+                    Err(e) => Ok((format!("unhealthy: {e}"), false)),
+                };
+            }
             let healthy = match &config.model {
                 Some(_) => lc.canary().await,
                 None => false,
@@ -668,6 +694,24 @@ pub async fn run_with(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
             println!("HELD");
             tokio::time::sleep(std::time::Duration::from_secs(3)).await;
             let _ = sem.release(&lease);
+        }
+        Command::__EngineSupervisor {
+            state_dir,
+            endpoint,
+            model,
+            launch_command,
+            boot_timeout_ms,
+        } => {
+            engine::supervisor::run(
+                state::StateDir::new(state_dir),
+                endpoint,
+                model,
+                launch_command,
+                std::env::var("CASTOR_SUPERVISOR_TOKEN")
+                    .map_err(|e| format!("missing supervisor control token: {e}"))?,
+                boot_timeout_ms,
+            )
+            .await?;
         }
         Command::__Worker { spec_path } => {
             let loaded = config::load().map_err(|e| format!("config: {e}"))?;

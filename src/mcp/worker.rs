@@ -142,8 +142,8 @@ pub async fn run_job_with_engine(
         })
         .await;
 
-    // 2.5 Phase 1: DGI Gatekeeper (model-driven 1-forward pass logit probe via guided_choice).
-    if let (Some(base_url), Some(model)) = (&config.base_url, &config.model) {
+    // Classify the dispatch using the serving engine or an advisory offline heuristic.
+    if config.base_url.is_some() && config.model.is_some() {
         let lc = crate::engine::EngineLifecycle::new(config, state);
         let dgi = if !lc.canary().await {
             crate::mcp::dgi::evaluate(&spec.prompt)
@@ -156,12 +156,14 @@ pub async fn run_job_with_engine(
                 .timeout(std::time::Duration::from_secs(probe_timeout_secs))
                 .build()
                 .unwrap_or_default();
-            match crate::mcp::dgi::evaluate_model_probe(base_url, model, &spec.prompt, &http).await {
+            match crate::mcp::dgi::evaluate_configured_model_probe(config, &spec.prompt, &http)
+                .await
+            {
                 Ok(v) => v,
                 Err(err) => {
                     tracing::warn!(
                         error = %err,
-                        "[dgi] warning: 1-forward pass model probe failed ({err}). \
+                        "[dgi] warning: dispatch classification probe failed ({err}). \
                          Falling back to soft heuristic."
                     );
                     let fallback = crate::mcp::dgi::evaluate(&spec.prompt);
