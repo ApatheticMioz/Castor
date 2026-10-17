@@ -548,6 +548,7 @@ impl CastorMcpServer {
                      - total_tasks_completed: {}\n\
                      - total_tasks_failed: {}\n\
                      - total_tasks_cancelled: {}\n\
+                     - total_task_execution_ms: {}\n\
                      - total_tool_calls: {}\n\
                      - total_tool_errors: {}\n\
                      - estimated_cost_saved_usd: {:.2}\n\
@@ -562,6 +563,7 @@ impl CastorMcpServer {
                     stats.total_tasks_completed,
                     stats.total_tasks_failed,
                     stats.total_tasks_cancelled,
+                    stats.total_task_execution_ms,
                     stats.total_tool_calls,
                     stats.total_tool_errors,
                     stats.estimated_cost_saved_usd,

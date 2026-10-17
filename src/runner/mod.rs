@@ -391,6 +391,10 @@ pub async fn run_session(
     };
     let session_id = logger.session_id();
 
+    // Wall-clock start: the `final` event reports `duration_ms` (the total
+    // session runtime) so the telemetry duration series has a source.
+    let started = std::time::Instant::now();
+
     let mut messages = vec![msg("system", system_prompt), msg("user", user_prompt)];
     let mut loop_detector = LoopDetector::new(LOOP_WINDOW, LOOP_THRESHOLD);
     let mut turns: u32 = 0;
@@ -708,6 +712,16 @@ pub async fn run_session(
             });
 
             if let Some(data_url) = image_attachment {
+                // The engine carries a 1-image limit: clear any prior visual
+                // attachment user messages so multi-turn visual tasks never
+                // exceed it, then append the fresh attachment.
+                for m in &mut messages {
+                    if m.role == "user" && m.content.starts_with("[Visual Inspection Attachment:") {
+                        m.content =
+                            "[Prior visual attachment cleared to stay within the 1-image limit]"
+                                .to_string();
+                    }
+                }
                 messages.push(Message {
                     role: "user".into(),
                     content: format!("[Visual Inspection Attachment: {data_url}]"),
@@ -783,12 +797,14 @@ impasse, state your findings and ask for alignment rather than continuing to re-
     }
 
     // Record the final event.
+    let elapsed_ms = started.elapsed().as_millis().min(u64::MAX as u128) as u64;
     logger
         .append(serde_json::json!({
             "type": "final",
             "turn": turns,
             "status": status,
             "final_text": final_text,
+            "duration_ms": elapsed_ms,
         }))
         .map_err(RunnerError::Io)?;
 
@@ -1007,10 +1023,18 @@ mod tests {
 
         // The final event was recorded.
         let events = logger.read_all();
+        let final_ev = events
+            .iter()
+            .find(|e| e["type"] == "final" && e["status"] == "completed")
+            .expect("final event recorded");
+        // The final event reports the session wall-clock runtime (always
+        // present, even if zero for an instant run).
         assert!(
-            events
-                .iter()
-                .any(|e| e["type"] == "final" && e["status"] == "completed")
+            final_ev
+                .get("duration_ms")
+                .and_then(|v| v.as_u64())
+                .is_some(),
+            "final event must carry duration_ms: {final_ev}"
         );
     }
 

@@ -78,6 +78,10 @@ pub struct Stats {
     pub total_tasks_completed: u64,
     pub total_tasks_failed: u64,
     pub total_tasks_cancelled: u64,
+    /// Total task execution time in ms (sum of `ended_at - started_at` over
+    /// task records that reported both bounds; wall-clock runtime while a
+    /// task was actually executing).
+    pub total_task_execution_ms: u64,
     /// Mean session duration in ms (over sessions that reported one).
     pub avg_duration_ms: Option<f64>,
     /// Total duration sum in ms over sessions that reported one.
@@ -160,6 +164,7 @@ impl Default for Stats {
             total_tasks_completed: 0,
             total_tasks_failed: 0,
             total_tasks_cancelled: 0,
+            total_task_execution_ms: 0,
             avg_duration_ms: None,
             total_duration_ms: 0,
             total_tool_calls: 0,
@@ -709,8 +714,12 @@ fn load_task_metrics_cached(
             .file_name()
             .and_then(|n| n.to_str())
             .unwrap_or_default();
-        let (status, ts) = if let Some(cached) = cache_tasks.get(name) {
-            (cached.status.clone(), cached.timestamp_ms)
+        let (status, ts, exec) = if let Some(cached) = cache_tasks.get(name) {
+            (
+                cached.status.clone(),
+                cached.timestamp_ms,
+                cached.execution_ms,
+            )
         } else {
             let Ok(raw) = fs::read_to_string(path) else {
                 continue;
@@ -720,15 +729,17 @@ fn load_task_metrics_cached(
             };
             let status = v.status.unwrap_or_default().to_string();
             let ts = v.ended_at.or(v.started_at).or(v.created_at);
+            let exec = v.execution_ms();
             cache_tasks.insert(
                 name.to_string(),
                 CachedTask {
                     status: status.clone(),
                     timestamp_ms: ts,
+                    execution_ms: exec,
                 },
             );
             cache_dirty = true;
-            (status, ts)
+            (status, ts, exec)
         };
 
         if let Some(cutoff) = since_ms {
@@ -737,6 +748,10 @@ fn load_task_metrics_cached(
                 None => continue,
                 _ => {}
             }
+        }
+
+        if let Some(ms) = exec {
+            metrics.total_execution_ms += ms;
         }
 
         match status.as_str() {
@@ -755,6 +770,9 @@ struct TaskMetrics {
     completed: u64,
     failed: u64,
     cancelled: u64,
+    /// Sum of task execution durations in ms (`ended_at - started_at`) over
+    /// tasks that reported both bounds.
+    total_execution_ms: u64,
 }
 
 /// Derive the cumulative [`Stats`] by walking the existing ledgers:
@@ -816,6 +834,7 @@ pub fn derive_stats(state_dir: &Path, opts: &StatsOptions) -> Stats {
         total_tasks_completed: task_metrics.completed,
         total_tasks_failed: task_metrics.failed,
         total_tasks_cancelled: task_metrics.cancelled,
+        total_task_execution_ms: task_metrics.total_execution_ms,
         total_prompt_tokens: session_rollup.total_prompt_tokens,
         total_cached_tokens: session_rollup.total_cached_tokens,
         total_cache_eligible_prompt_tokens: session_rollup.total_cache_eligible_prompt_tokens,
@@ -1125,10 +1144,20 @@ pub fn format_stats_card_styled(stats: &Stats, color: bool) -> String {
         let mut details = Vec::new();
         details.push(format!("{} ok", fmt_grouped(stats.total_tasks_completed)));
         if stats.total_tasks_failed > 0 {
-            details.push(format!("{}{} fail{}", p.red, fmt_grouped(stats.total_tasks_failed), p.reset));
+            details.push(format!(
+                "{}{} fail{}",
+                p.red,
+                fmt_grouped(stats.total_tasks_failed),
+                p.reset
+            ));
         }
         if stats.total_tasks_cancelled > 0 {
-            details.push(format!("{}{} canc{}", p.yellow, fmt_grouped(stats.total_tasks_cancelled), p.reset));
+            details.push(format!(
+                "{}{} canc{}",
+                p.yellow,
+                fmt_grouped(stats.total_tasks_cancelled),
+                p.reset
+            ));
         }
         let detail_str = format!(" ({})", details.join(", "));
         out.push_str(&format!(
@@ -1147,12 +1176,25 @@ pub fn format_stats_card_styled(stats: &Stats, color: bool) -> String {
         let hours = stats.total_duration_ms as f64 / 3_600_000.0;
         let avg_str = stats
             .avg_duration_ms
-            .map(|ms| format!("  {}avg session: {}{}", p.dim, fmt_duration_compact(ms.round() as u64), p.reset))
+            .map(|ms| {
+                format!(
+                    "  {}avg session: {}{}",
+                    p.dim,
+                    fmt_duration_compact(ms.round() as u64),
+                    p.reset
+                )
+            })
             .unwrap_or_default();
         out.push_str(&format!(
             "  Active Compute         {:>9.2}h{}\n",
-            hours,
-            avg_str
+            hours, avg_str
+        ));
+    }
+
+    if stats.total_task_execution_ms > 0 {
+        out.push_str(&format!(
+            "  Task Execution Time    {:>16}\n",
+            fmt_duration_compact(stats.total_task_execution_ms)
         ));
     }
 
@@ -1217,10 +1259,7 @@ pub fn format_stats_card_styled(stats: &Stats, color: bool) -> String {
         out.push('\n');
     }
 
-    out.push_str(&format!(
-        "{}TOKEN EFFICIENCY & VOLUME{}\n",
-        p.bold, p.reset
-    ));
+    out.push_str(&format!("{}TOKEN EFFICIENCY & VOLUME{}\n", p.bold, p.reset));
     let total_tokens = stats.total_prompt_tokens + stats.total_completion_tokens;
     out.push_str(&format!(
         "  Total Processed        {:>10}\n",
@@ -1231,7 +1270,8 @@ pub fn format_stats_card_styled(stats: &Stats, color: bool) -> String {
         fmt_scaled(stats.total_prompt_tokens)
     ));
     if stats.total_cached_tokens > 0 {
-        let hit_rate = (stats.total_cached_tokens as f64 / stats.total_prompt_tokens.max(1) as f64) * 100.0;
+        let hit_rate =
+            (stats.total_cached_tokens as f64 / stats.total_prompt_tokens.max(1) as f64) * 100.0;
         out.push_str(&format!(
             "  Cached Tokens          {:>10}  {}{:.1}% cache hit{}\n",
             fmt_scaled(stats.total_cached_tokens),
@@ -1332,7 +1372,10 @@ pub fn format_stats_card_styled(stats: &Stats, color: bool) -> String {
 
     if !stats.tool_calls.is_empty() {
         let edit_ratio_hdr = if let Some(r) = stats.edit_write_ratio {
-            format!("  {}Surgical Edit Ratio: {:.2}x (edits / writes){}\n", p.dim, r, p.reset)
+            format!(
+                "  {}Surgical Edit Ratio: {:.2}x (edits / writes){}\n",
+                p.dim, r, p.reset
+            )
         } else {
             String::new()
         };
@@ -1479,9 +1522,12 @@ struct CachedSession {
 struct CachedTask {
     status: String,
     timestamp_ms: Option<u64>,
+    execution_ms: Option<u64>,
 }
 
-const TELEMETRY_CACHE_VERSION: u32 = 4;
+/// Bumped when the cached value shape changes (v5 adds the per-task
+/// `execution_ms` field).
+const TELEMETRY_CACHE_VERSION: u32 = 5;
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 struct TelemetryCache {
@@ -1631,6 +1677,16 @@ struct FastTask<'a> {
     ended_at: Option<u64>,
     started_at: Option<u64>,
     created_at: Option<u64>,
+}
+
+impl FastTask<'_> {
+    /// Task execution duration in ms (`ended_at - started_at`), `None` when
+    /// either bound is missing or the interval is degenerate.
+    fn execution_ms(&self) -> Option<u64> {
+        let start = self.started_at?;
+        let end = self.ended_at?;
+        end.checked_sub(start)
+    }
 }
 
 /// Format an epoch-millisecond instant as a UTC civil date string
@@ -2552,6 +2608,76 @@ mod tests {
     }
 
     #[test]
+    fn derive_stats_aggregates_task_execution_time() {
+        let state = tmp_state();
+        // Task with both bounds: 300ms execution window.
+        write(
+            &state.join("tasks/task_a.json"),
+            "{\"id\":\"task_a\",\"status\":\"completed\",\"started_at\":1760000000000,\"ended_at\":1760000000300}",
+        );
+        // Task with both bounds: 1h 30m execution window.
+        write(
+            &state.join("tasks/task_b.json"),
+            "{\"id\":\"task_b\",\"status\":\"failed\",\"started_at\":1760000000000,\"ended_at\":1760005400000}",
+        );
+        // Task with only `ended_at`: no `started_at` → excluded from the sum.
+        write(
+            &state.join("tasks/task_c.json"),
+            "{\"id\":\"task_c\",\"status\":\"completed\",\"ended_at\":1760000000000}",
+        );
+
+        let s = derive_stats(&state, &Default::default());
+        assert_eq!(s.total_tasks_completed, 2);
+        assert_eq!(s.total_tasks_failed, 1);
+        // 300 + 5_400_000 ms; task_c contributes nothing.
+        assert_eq!(s.total_task_execution_ms, 5_400_300);
+
+        let _ = fs::remove_dir_all(&state);
+    }
+
+    #[test]
+    fn derive_stats_task_execution_time_is_cached_stably() {
+        let state = tmp_state();
+        write(
+            &state.join("tasks/task_a.json"),
+            "{\"id\":\"task_a\",\"status\":\"completed\",\"started_at\":1000,\"ended_at\":4000}",
+        );
+
+        // Cold, then warm: the cached `execution_ms` must round-trip.
+        let s1 = derive_stats(&state, &Default::default());
+        assert_eq!(s1.total_task_execution_ms, 3000);
+        let s2 = derive_stats(&state, &Default::default());
+        assert_eq!(s2.total_task_execution_ms, s1.total_task_execution_ms);
+
+        let _ = fs::remove_dir_all(&state);
+    }
+
+    #[test]
+    fn format_stats_card_displays_task_execution_time() {
+        let stats = Stats {
+            total_tasks_completed: 2,
+            total_tasks_failed: 1,
+            total_task_execution_ms: 3_661_000,
+            ..Default::default()
+        };
+        let card = format_stats_card(&stats);
+        assert!(
+            card.contains("Task Execution Time") && card.contains("1h 01m 01s"),
+            "card should render the task execution time line: {card}"
+        );
+    }
+
+    #[test]
+    fn format_stats_card_omits_task_execution_time_when_zero() {
+        let stats = Stats {
+            total_tasks_completed: 1,
+            ..Default::default()
+        };
+        let card = format_stats_card(&stats);
+        assert!(!card.contains("Task Execution Time"));
+    }
+
+    #[test]
     fn styled_card_displays_velocity_metrics() {
         let stats = Stats {
             total_turns: 100,
@@ -2571,10 +2697,7 @@ mod tests {
             "card: {card}"
         );
         assert!(card.contains("148.5 t/s"), "card: {card}");
-        assert!(
-            card.contains("peak DFlash2 burst"),
-            "card: {card}"
-        );
+        assert!(card.contains("peak DFlash2 burst"), "card: {card}");
         assert!(card.contains("28.5k t/s"), "card: {card}");
         assert!(card.contains("avg TTFT: 142ms"), "card: {card}");
     }
