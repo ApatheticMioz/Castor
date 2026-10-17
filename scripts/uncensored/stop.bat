@@ -1,3 +1,3 @@
 @echo off
-taskkill /IM llama-server.exe /F 2>nul
-echo stopped
+echo Stopping any running vLLM / uncensored server in WSL...
+wsl -d Ubuntu -- bash ~/qwen-serving/launchers/stop_server.sh

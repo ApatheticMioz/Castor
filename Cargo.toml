@@ -47,6 +47,9 @@ dunce = "1.0"
 base64 = "0.23"
 unicode-normalization = "0.1"
 infer = "0.16"
+content_inspector = "0.2.4"
+walkdir = "2.5"
+similar = "2.6"
 # Pure-Rust PDF parsing (no C bindings). 0.42+ carries the RUSTSEC-2026-0187
 # recursion-depth fix. Default features disabled to keep the dep lightweight.
 lopdf = { version = "0.42", default-features = false }
@@ -64,5 +67,4 @@ opt-level = 3
 lto = "fat"
 codegen-units = 1
 strip = true
-panic = "abort"
 

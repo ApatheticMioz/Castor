@@ -37,15 +37,6 @@ pub struct FsExecutor {
     policy: SandboxPolicy,
 }
 
-struct WalkContext<'a> {
-    base: &'a Path,
-    max_depth: usize,
-    items: Vec<(String, String)>,
-    partial: bool,
-    truncated: bool,
-    max_items: usize,
-}
-
 impl FsExecutor {
     /// Construct with the tight single-root policy (workspace only). This is
     /// what the eval replay runner uses, where only the workspace may be
@@ -215,24 +206,26 @@ impl FsExecutor {
     }
 
     fn render_diff_snippet(target: &str, replacement: &str) -> String {
+        use similar::{ChangeTag, TextDiff};
         use std::fmt::Write;
-        let mut diff = String::from("\n```diff\n");
-        let target_lines: Vec<&str> = target.lines().collect();
-        for line in target_lines.iter().take(6) {
-            let _ = writeln!(diff, "- {line}");
+
+        let diff = TextDiff::from_lines(target, replacement);
+        let mut out = String::from("\n```diff\n");
+        for (count, change) in diff.iter_all_changes().enumerate() {
+            if count >= 12 {
+                out.push_str("  ...\n");
+                break;
+            }
+            let sign = match change.tag() {
+                ChangeTag::Delete => "-",
+                ChangeTag::Insert => "+",
+                ChangeTag::Equal => " ",
+            };
+            let line = change.value().trim_end_matches(['\r', '\n']);
+            let _ = writeln!(out, "{sign} {line}");
         }
-        if target_lines.len() > 6 {
-            diff.push_str("  ...\n");
-        }
-        let repl_lines: Vec<&str> = replacement.lines().collect();
-        for line in repl_lines.iter().take(6) {
-            let _ = writeln!(diff, "+ {line}");
-        }
-        if repl_lines.len() > 6 {
-            diff.push_str("  ...\n");
-        }
-        diff.push_str("```");
-        diff
+        out.push_str("```");
+        out
     }
 
     fn edit_file(
@@ -256,6 +249,13 @@ impl FsExecutor {
         let crlf_target = target.replace("\r\n", "\n").replace('\n', "\r\n");
         let lf_target = target.replace("\r\n", "\n");
 
+        let not_found_msg = |path: &str| {
+            format!(
+                "Target content not found in file: {path}. \
+                 Re-read the file with read_file around the target lines to refresh content before retrying."
+            )
+        };
+
         let (effective_target, local_style) = if original.contains(target) {
             (target.to_string(), line_ending_style(target))
         } else if crlf_target != target && original.contains(&crlf_target) {
@@ -263,16 +263,12 @@ impl FsExecutor {
         } else if lf_target != target && original.contains(&lf_target) {
             (lf_target, Some("lf"))
         } else {
-            return Err(FsError::EditError(format!(
-                "Target content not found in file: {path}. No write performed."
-            )));
+            return Err(FsError::EditError(not_found_msg(path)));
         };
 
         let count = original.matches(&effective_target).count();
         if count == 0 {
-            return Err(FsError::EditError(format!(
-                "Target content not found in file: {path}. No write performed."
-            )));
+            return Err(FsError::EditError(not_found_msg(path)));
         }
         if count > 1 && !replace_all {
             return Err(FsError::EditError(format!(
@@ -309,63 +305,61 @@ impl FsExecutor {
             )));
         }
 
-        let mut ctx = WalkContext {
-            base: &resolved,
-            max_depth,
-            items: Vec::new(),
-            partial: false,
-            truncated: false,
-            max_items: 100,
-        };
-        self.walk(&resolved, 1, &mut ctx)?;
+        let mut items = Vec::new();
+        let mut truncated = false;
+        let mut partial = false;
+        let max_items = 100;
+
+        let walker = walkdir::WalkDir::new(&resolved)
+            .min_depth(1)
+            .max_depth(max_depth)
+            .sort_by(|a, b| a.file_name().cmp(b.file_name()))
+            .into_iter()
+            .filter_entry(|e| {
+                if e.depth() == 0 {
+                    return true;
+                }
+                let name = e.file_name().to_string_lossy();
+                !IGNORED_DIRS.contains(&name.as_ref())
+            });
+
+        for entry in walker {
+            match entry {
+                Ok(e) => {
+                    if items.len() >= max_items {
+                        truncated = true;
+                        break;
+                    }
+                    let rel = e
+                        .path()
+                        .strip_prefix(&resolved)
+                        .unwrap_or_else(|_| e.path());
+                    let rel_str = rel.to_string_lossy().to_string();
+                    let kind = if e.file_type().is_dir() {
+                        "dir"
+                    } else {
+                        "file"
+                    };
+                    items.push((kind.to_string(), rel_str));
+                }
+                Err(_) => {
+                    partial = true;
+                }
+            }
+        }
 
         use std::fmt::Write;
-        let mut out = format!("{} ({} items):\n", resolved.display(), ctx.items.len());
-        for (kind, rel) in &ctx.items {
+        let mut out = format!("{} ({} items):\n", resolved.display(), items.len());
+        for (kind, rel) in &items {
             let _ = writeln!(out, "  [{kind}] {rel}");
         }
-        if ctx.truncated {
+        if truncated {
             out.push_str("  ... [list truncated: maximum 100 items reached; specify deeper path or lower max_depth]\n");
         }
-        if ctx.partial {
+        if partial {
             out.push_str("  [partial: some directories were unreadable]\n");
         }
         Ok(out)
-    }
-
-    fn walk(&self, current: &Path, depth: usize, ctx: &mut WalkContext<'_>) -> Result<(), FsError> {
-        if depth > ctx.max_depth || ctx.truncated {
-            return Ok(());
-        }
-        let entries = match fs::read_dir(current) {
-            Ok(e) => e,
-            Err(_) => {
-                ctx.partial = true;
-                return Ok(());
-            }
-        };
-        for entry in entries {
-            if ctx.items.len() >= ctx.max_items {
-                ctx.truncated = true;
-                break;
-            }
-            let entry = entry?;
-            let name = entry.file_name().to_string_lossy().to_string();
-            if IGNORED_DIRS.contains(&name.as_str()) {
-                continue;
-            }
-            let full = entry.path();
-            let rel = full.strip_prefix(ctx.base).unwrap_or(&full);
-            let rel_str = rel.to_string_lossy().to_string();
-            let ft = entry.file_type()?;
-            if ft.is_dir() {
-                ctx.items.push(("dir".into(), rel_str));
-                self.walk(&full, depth + 1, ctx)?;
-            } else {
-                ctx.items.push(("file".into(), rel_str));
-            }
-        }
-        Ok(())
     }
 
     fn search_code(&self, query: &str, path: &str, max_results: usize) -> Result<String, FsError> {
@@ -380,9 +374,29 @@ impl FsExecutor {
         };
 
         if self.is_inside_git_repo(&search_dir) {
-            return self.git_grep(query, &search_dir, max_results);
+            // `git grep` only sees tracked files plus explicitly `--untracked` ones.
+            // If the search root lives inside a gitignored directory (e.g. a temp
+            // workspace nested under `.scratch/`), git would silently return no
+            // results even though the files exist on disk. Fall back to the
+            // filesystem walk, which reads them directly.
+            if !self.is_git_ignored(&search_dir) {
+                return self.git_grep(query, &search_dir, max_results);
+            }
         }
         self.fallback_search(query, &search_dir, max_results)
+    }
+
+    fn is_git_ignored(&self, dir: &Path) -> bool {
+        let abs = dir.canonicalize().unwrap_or_else(|_| dir.to_path_buf());
+        let output = match std::process::Command::new("git")
+            .args(["check-ignore", "-q", "--", abs.to_str().unwrap_or_default()])
+            .current_dir(self.root())
+            .output()
+        {
+            Ok(o) => o,
+            Err(_) => return false,
+        };
+        output.status.success()
     }
 
     fn is_inside_git_repo(&self, dir: &Path) -> bool {

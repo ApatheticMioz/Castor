@@ -6,7 +6,7 @@
 [![npm](https://img.shields.io/npm/v/mcp-castor.svg?color=CB3837&logo=npm)](https://www.npmjs.com/package/mcp-castor)
 [![Rust](https://img.shields.io/badge/Rust-2024%20Edition-DEA584?logo=rust&logoColor=white)](https://www.rust-lang.org/)
 [![License: AGPL-3.0](https://img.shields.io/badge/License-AGPL--3.0-blue.svg)](LICENSE)
-[![Test Gate: 327/327](https://img.shields.io/badge/Test%20Gate-327%2F327%20Green-brightgreen.svg)](#testing--verification)
+[![Test Gate: 349/349](https://img.shields.io/badge/Test%20Gate-349%2F349%20Green-brightgreen.svg)](#testing--verification)
 
 ---
 
@@ -64,14 +64,37 @@ Configuration persists in `~/.castor/config.json` and respects `CASTOR_*` enviro
 
 Cloud coding agents (Claude Code, Gemini 3.8 Flash, Cursor) excel at system-level reasoning and planning, but reading thousands of lines of repository context or executing repetitive edit-and-test loops inflates cloud token costs and latency.
 
-Castor provides an **in-process Rust microkernel** as a Model Context Protocol (MCP) server. It splits work between cloud planning and local hands-on execution:
+Castor provides an **in-process Rust execution server** as a Model Context Protocol (MCP) server. It splits work between cloud planning and local hands-on execution:
+
+```text
+  Developer
+      │
+      ▼
+  Cloud Architect (Claude / Gemini / Antigravity)
+      │
+      │  MCP tool dispatch: castor_coworker(prompt, cwd)
+      ▼
+  Castor Server (Local Rust Execution Server over stdio)
+      │
+      ├─── In-tree tools: read_file, edit_file, ast_replace, bash
+      │    └── Validated against sandbox boundaries & AST syntax gates
+      │
+      ▼  Inference requests over HTTP (:18020)
+  Local Serving Engine (vLLM / Ollama / LM Studio)
+      │
+      ▼  Grounded diffs & test results returned
+  Cloud Architect synthesizes final output
+```
+
+<details>
+<summary><b>Mermaid Diagram Source (for supported viewers)</b></summary>
 
 ```mermaid
 sequenceDiagram
     autonumber
     actor Dev as Developer
     participant Cloud as Cloud Architect (Claude / Gemini)
-    participant Castor as Castor Microkernel (Rust)
+    participant Castor as Castor Server (Rust)
     participant Local as Local Model (Ollama / vLLM / LM Studio)
 
     Dev->>Cloud: High-level architectural task
@@ -87,17 +110,44 @@ sequenceDiagram
     Cloud-->>Dev: Verified changes & synthesis
 ```
 
+</details>
+
 ### Key Principles
 
 - **Zero Cloud Token Hoarding**: The Lead Architect (cloud) directs tasks and reviews diffs without loading thousands of source lines into expensive prompt context.
-- **In-Process Microkernel Speed**: Filesystem operations and structural AST mutations execute in-process (<0.1 ms dispatch) without subprocess spawning overhead.
+- **In-Process Tool Dispatch Speed**: Filesystem operations and structural AST mutations execute in-process (<0.1 ms dispatch) without subprocess spawning overhead.
 - **Zero-Turn Reactive Wait**: Long-running background jobs yield an OS-level wait hook (`curl :18021/task/<id>/wait`). Cloud supervisors block at **$0 token cost** and resume immediately upon task completion.
 
 ---
 
-## Zero-Trust Sandboxed Execution
+## Sandboxed Workspace Confinement
 
 Castor enforces a **5-layer defense-in-depth boundary** ensuring neither coworker models nor external agents can escape the workspace root:
+
+```text
+  Tool Request (fs / shell / ast)
+     │
+     ▼
+  [ Layer 1: Path Normalizer ] ─────── (escape traversal) ──► REFUSED
+     │ (valid path)
+     ▼
+  [ Layer 2: Symlink Realpath ] ────── (out-of-tree link) ──► REFUSED
+     │ (inside workspace)
+     ▼
+  [ Layer 3: Root-Overwrite Guard ] ── (root deletion) ────► REFUSED
+     │ (target protected)
+     ▼
+  [ Layer 4: Shell Command Filter ] ── (dangerous cmd) ────► REFUSED
+     │ (safe command)
+     ▼
+  [ Layer 5: In-Memory Syntax Gate ] ─ (syntax parse error) ► ROLLBACK
+     │ (valid AST parse)
+     ▼
+  Disk Commit & Tool Output
+```
+
+<details>
+<summary><b>Mermaid Flowchart Source (for supported viewers)</b></summary>
 
 ```mermaid
 flowchart TD
@@ -114,6 +164,8 @@ flowchart TD
     L4 -.->|Dangerous Pattern| Refuse
     L5 -.->|Syntax Parse Error| Rollback[In-Memory Rollback]
 ```
+
+</details>
 
 1. **PathEscape Normalizer**: Neutralizes directory traversal (`../../`), drive escapes (`C:\`), and device namespaces (`NUL`, `CON`).
 2. **Symlink Realpath Containment**: Resolves canonical symlink targets to prevent out-of-tree escapes.
@@ -194,7 +246,7 @@ cd Castor
 # Build binary
 cargo build --release
 
-# Run verification suite (327 tests)
+# Run verification suite (349 tests)
 cargo test
 
 # Register local release build with clients
@@ -208,7 +260,7 @@ cargo test
 Castor maintains a strict zero-warning and offline verification gate:
 
 ```bash
-# Fast offline test gate (327 tests, ~5s)
+# Fast offline test gate (349 tests, ~7s)
 cargo test
 
 # Strict clippy lint gate (zero warnings enforced)

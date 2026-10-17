@@ -679,9 +679,19 @@ fn build_landlock_ruleset(cwd: &Path) -> Result<landlock::RulesetCreated, String
         }
     }
 
-    // Read-Only for user toolchains and state directories (~/.castor, ~/.cargo, ~/.rustup, ~/.local)
+    // Read-Only for user toolchains, state, and config directories. Includes
+    // ~/.gitconfig and ~/.config so git and CLI tools (e.g. cargo, ripgrep,
+    // editors) can read their user-level configuration without Permission
+    // denied (EACCES) failures from Landlock confinement.
     if let Some(home) = std::env::var_os("HOME").map(PathBuf::from) {
-        for sub in [".castor", ".cargo", ".rustup", ".local"] {
+        for sub in [
+            ".castor",
+            ".cargo",
+            ".rustup",
+            ".local",
+            ".gitconfig",
+            ".config",
+        ] {
             let p = home.join(sub);
             if let Ok(fd) = PathFd::new(&p) {
                 ruleset = ruleset
