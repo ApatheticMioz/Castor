@@ -109,12 +109,17 @@ pub struct ToolCall {
 impl ToolCall {
     /// Serialize to the OpenAI tool-call shape (for assistant messages).
     pub fn to_json(&self) -> Value {
+        let args = if self.arguments.trim().is_empty() {
+            "{}".to_string()
+        } else {
+            self.arguments.clone()
+        };
         json!({
             "id": self.id,
             "type": "function",
             "function": {
                 "name": self.name,
-                "arguments": self.arguments,
+                "arguments": args,
             },
         })
     }
@@ -130,12 +135,17 @@ pub struct ToolSchema {
 
 impl ToolSchema {
     pub fn to_json(&self) -> Value {
+        let params = if self.parameters.is_null() || self.parameters == json!({}) {
+            json!({ "type": "object", "properties": {} })
+        } else {
+            self.parameters.clone()
+        };
         json!({
             "type": "function",
             "function": {
                 "name": self.name,
                 "description": self.description,
-                "parameters": self.parameters,
+                "parameters": params,
             },
         })
     }
@@ -220,7 +230,16 @@ impl EngineClient {
         }
         if let Some(effort) = reasoning_effort {
             if self.backend == super::backend::Backend::LlamaCpp {
-                body["reasoning_effort"] = json!(effort);
+                let normalized = match effort.trim().to_ascii_lowercase().as_str() {
+                    "high" | "xhigh" => Some("xhigh"),
+                    "medium" | "med" => Some("medium"),
+                    "low" => Some("low"),
+                    "none" | "off" | "false" | "0" | "" => None,
+                    _ => Some("medium"),
+                };
+                if let Some(tier) = normalized {
+                    body["reasoning_effort"] = json!(tier);
+                }
             } else {
                 body["chat_template_kwargs"] = json!({ "reasoning_effort": effort });
             }

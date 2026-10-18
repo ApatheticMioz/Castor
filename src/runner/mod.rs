@@ -157,6 +157,22 @@ fn msg(role: &str, content: impl Into<String>) -> Message {
     }
 }
 
+/// Strip <think>...</think> reasoning traces from an assistant message before
+/// persisting it in multi-turn conversation history, preventing context bloat
+/// and prompt-cache invalidation.
+fn strip_think_tags(content: &str) -> String {
+    let mut result = content.to_string();
+    while let Some(start) = result.find("<think>") {
+        if let Some(end) = result[start..].find("</think>") {
+            result.replace_range(start..start + end + "</think>".len(), "");
+        } else {
+            result.truncate(start);
+            break;
+        }
+    }
+    result.trim().to_string()
+}
+
 /// The per-turn `metrics` object embedded in a `dispatch` event, in the same
 /// camelCase shape the telemetry projection (`parse_session_events`) reads
 /// (`prompt_tokens` / `completion_tokens` / `reasoning_tokens`).
@@ -452,10 +468,16 @@ pub async fn run_session(
             }))
             .map_err(RunnerError::Io)?;
 
-        // Append the assistant message.
+        // Append the assistant message. Strip <think>...</think> traces if tool_calls
+        // were made, to prevent context inflation and prompt-cache invalidation.
+        let sanitized_content = if !completion.tool_calls.is_empty() {
+            strip_think_tags(&completion.content)
+        } else {
+            completion.content.clone()
+        };
         messages.push(Message {
             role: "assistant".into(),
-            content: completion.content.clone(),
+            content: sanitized_content,
             tool_calls: completion.tool_calls.clone(),
             tool_call_id: None,
         });

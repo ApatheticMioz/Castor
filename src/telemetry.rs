@@ -2520,7 +2520,7 @@ mod tests {
 
         let card = format_stats_card_styled(&stats, false);
         assert!(
-            card.contains("900.0k") && card.contains("9.0% cache hit"),
+            card.contains("900.0k") && card.contains("90.0% cache hit"),
             "card should calculate cache hit percentage against eligible tokens: {card}"
         );
         assert!(

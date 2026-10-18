@@ -108,8 +108,12 @@ impl EngineLifecycle {
         let Some(ids) = v.get("data").and_then(|d| d.as_array()) else {
             return false;
         };
-        ids.iter()
-            .any(|m| m.get("id").and_then(|i| i.as_str()) == Some(model.as_str()))
+        ids.iter().any(|m| {
+            m.get("id")
+                .and_then(|i| i.as_str())
+                .map(|s| s.eq_ignore_ascii_case(model))
+                .unwrap_or(false)
+        })
     }
 
     /// Check readiness with diagnostics for the configured llama.cpp endpoint.
@@ -438,10 +442,12 @@ pub(crate) async fn llama_readiness(
             let models = value["data"]
                 .as_array()
                 .ok_or_else(|| format!("missing model list from {url}: {body}"))?;
-            if !models
-                .iter()
-                .any(|entry| entry["id"].as_str() == Some(model))
-            {
+            if !models.iter().any(|entry| {
+                entry["id"]
+                    .as_str()
+                    .map(|s| s.eq_ignore_ascii_case(model))
+                    .unwrap_or(false)
+            }) {
                 return Err(format!(
                     "configured model {model:?} not listed at {url}: {body}; set llama-server --alias to match CASTOR_MODEL"
                 ));
