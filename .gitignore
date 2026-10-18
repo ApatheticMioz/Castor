@@ -21,8 +21,9 @@ api_key.txt
 .env.*
 .git-credentials
 
-# Large binaries & pre-compiled distributions
+# Large binaries, models & pre-compiled distributions
 llama-cpp/
+models/
 *.gguf
 *.safetensors
 *.bin
@@ -31,7 +32,6 @@ llama-cpp/
 
 # Node.js dependencies & debug logs
 node_modules/
-mcp-qwen/node_modules/
 npm-debug.log*
 yarn-debug.log*
 yarn-error.log*
@@ -49,6 +49,9 @@ benchmarks/swe-rebench/__pycache__/
 .vscode/
 *.swp
 *~
+*.bak
+*.tmp
+*.orig
 
 # Evo candidate lineage & runtime scratch
 .scratch/
@@ -59,12 +62,24 @@ benchmarks/swe-rebench/__pycache__/
 .test_live_tmp/
 .benchmark_tmp/
 .canary_tmp/
-mcp-qwen/.canary_tmp/
+.wsl-tmp/
 
+# Document & LaTeX build artifacts
+*.aux
+*.out
+*.toc
+*.fls
+*.fdb_latexmk
+*.synctex.gz
 evals-faq.pdf
 
 # Local-only research artifacts (never committed)
 research/
+
+# OS-generated files
+.DS_Store
+Thumbs.db
+desktop.ini
 
 # Rust build artifacts
 target/
