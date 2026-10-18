@@ -501,14 +501,15 @@ fn cap_output(text: &str, full_len: usize) -> String {
     if text.len() <= MAX_OUTPUT_BYTES {
         return text.to_string();
     }
-    let window = &text[..MAX_OUTPUT_BYTES];
-    let search_start = MAX_OUTPUT_BYTES.saturating_sub(500);
+    let max_safe = text.floor_char_boundary(MAX_OUTPUT_BYTES);
+    let window = &text[..max_safe];
+    let search_start = max_safe.saturating_sub(500);
     let mut cut = window.rfind("\n\n").unwrap_or(0);
     if cut < search_start {
         cut = window.rfind('\n').unwrap_or(0);
     }
     if cut < search_start {
-        cut = MAX_OUTPUT_BYTES;
+        cut = max_safe;
     }
     let shown = &text[..cut];
     let mut out = shown.to_string();
@@ -650,15 +651,16 @@ fn cap_output_pdf(text: &str, start: usize, end: usize, total_pages: usize) -> (
         return (text.to_string(), false);
     }
 
-    let window = &text[..MAX_OUTPUT_BYTES];
+    let max_safe = text.floor_char_boundary(MAX_OUTPUT_BYTES);
+    let window = &text[..max_safe];
     // Prefer cutting at a double-newline (paragraph) near the cap.
-    let search_start = MAX_OUTPUT_BYTES.saturating_sub(500);
+    let search_start = max_safe.saturating_sub(500);
     let mut cut = window.rfind("\n\n").unwrap_or(0);
     if cut < search_start {
         cut = window.rfind('\n').unwrap_or(0);
     }
     if cut < search_start {
-        cut = MAX_OUTPUT_BYTES;
+        cut = max_safe;
     }
 
     let shown = &text[..cut];
@@ -1164,5 +1166,19 @@ pub(crate) mod tests {
         assert_eq!(parse_page_range(Some("11"), 10), None);
         // Single page in 1-page doc
         assert_eq!(parse_page_range(Some("1"), 1), Some((1, 1)));
+    }
+    #[test]
+    fn cap_output_multibyte_boundary_safety() {
+        // Byte 20000 falls inside multi-byte character (en-dash '–', 3 bytes: 19998..20001).
+        let mut s = "a".repeat(19998);
+        s.push('–');
+        s.push_str(&"a".repeat(500));
+
+        let capped = cap_output(&s, s.len());
+        assert!(!capped.is_empty());
+
+        let (pdf_capped, truncated) = cap_output_pdf(&s, 1, 1, 1);
+        assert!(truncated);
+        assert!(!pdf_capped.is_empty());
     }
 }
