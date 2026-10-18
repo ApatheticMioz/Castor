@@ -1,8 +1,6 @@
 //! Detached llama.cpp process owner with authenticated loopback control.
 
 use std::collections::VecDeque;
-#[cfg(unix)]
-use std::io::Read;
 use std::io::{self, Write};
 use std::path::Path;
 use std::process::Stdio;
@@ -147,33 +145,7 @@ fn process_identity(pid: u32) -> io::Result<String> {
 
 fn token() -> io::Result<String> {
     let mut bytes = [0u8; 32];
-    #[cfg(unix)]
-    std::fs::File::open("/dev/urandom")?.read_exact(&mut bytes)?;
-    #[cfg(windows)]
-    {
-        #[link(name = "bcrypt")]
-        unsafe extern "system" {
-            fn BCryptGenRandom(
-                handle: *mut std::ffi::c_void,
-                buffer: *mut u8,
-                size: u32,
-                flags: u32,
-            ) -> i32;
-        }
-        let status = unsafe {
-            BCryptGenRandom(
-                std::ptr::null_mut(),
-                bytes.as_mut_ptr(),
-                bytes.len() as u32,
-                2,
-            )
-        };
-        if status < 0 {
-            return Err(io::Error::other(format!(
-                "BCryptGenRandom failed: {status}"
-            )));
-        }
-    }
+    getrandom::getrandom(&mut bytes)?;
     Ok(bytes.iter().map(|b| format!("{b:02x}")).collect())
 }
 
@@ -342,31 +314,7 @@ async fn terminate(child: &mut Child) -> io::Result<()> {
         return Ok(());
     }
     if let Some(pid) = child.id() {
-        #[cfg(unix)]
-        {
-            let result = unsafe { libc::kill(-(pid as i32), libc::SIGKILL) };
-            if result != 0 {
-                let error = io::Error::last_os_error();
-                if error.raw_os_error() != Some(libc::ESRCH) {
-                    return Err(error);
-                }
-            }
-        }
-        #[cfg(windows)]
-        {
-            let result = Command::new("taskkill")
-                .args(["/F", "/T", "/PID", &pid.to_string()])
-                .creation_flags(0x08000000)
-                .output()
-                .await?;
-            if !result.status.success() && child.try_wait()?.is_none() {
-                return Err(io::Error::other(format!(
-                    "taskkill exited {}: {}",
-                    result.status,
-                    String::from_utf8_lossy(&result.stderr)
-                )));
-            }
-        }
+        crate::platform::kill_process_tree(pid);
     }
     child.wait().await?;
     Ok(())

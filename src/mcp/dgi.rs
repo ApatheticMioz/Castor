@@ -1,7 +1,12 @@
 //! DGI Gatekeeper — Decomposition Granularity Index.
 //!
-//! Classifies dispatch prompts with a serving-engine probe (vLLM guided_choice
-//! or llama.cpp schema-constrained chat) and an advisory offline heuristic.
+//! Classifies dispatch prompts with a serving-engine probe and an advisory
+//! offline heuristic.
+//!
+//! The probe comes in two shapes, and they are intentionally not comparable in
+//! latency: the vLLM path is a 2-token guided_choice single forward pass,
+//! while the llama.cpp path is a schema-constrained JSON chat decode of up to
+//! 64 tokens, whose duration scales with decode speed on CPU models.
 //!
 //! Domain agnosticism: no repo-specific patterns, no hardcoded file extensions,
 //! and no hard regex or length limits.

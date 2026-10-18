@@ -45,6 +45,7 @@ humantime = "2.1"
 path-clean = "1.0"
 dunce = "1.0"
 base64 = "0.23"
+getrandom = { version = "0.2", features = ["std"] }
 unicode-normalization = "0.1"
 infer = "0.16"
 content_inspector = "0.2.4"
@@ -60,7 +61,7 @@ lopdf = { version = "0.42", default-features = false }
 landlock = "0.4"
 
 [target.'cfg(windows)'.dependencies]
-windows-sys = { version = "0.61", features = ["Win32_System_Threading", "Win32_Foundation", "Win32_Security"] }
+windows-sys = { version = "0.61", features = ["Win32_System_Threading", "Win32_Foundation"] }
 
 [profile.release]
 opt-level = 3
