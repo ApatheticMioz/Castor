@@ -27,6 +27,7 @@ fn get_client() -> (Config, EngineClient) {
 }
 
 #[tokio::test]
+#[ignore = "requires live Bonsai model on :18020 and ALLOW_ENGINE_INTERRUPT=1"]
 async fn test_1_chat_and_thinking_trace() {
     let (_config, client) = get_client();
     let messages = vec![Message {
@@ -58,6 +59,7 @@ async fn test_1_chat_and_thinking_trace() {
 }
 
 #[tokio::test]
+#[ignore = "requires live Bonsai model on :18020 and ALLOW_ENGINE_INTERRUPT=1"]
 async fn test_2_reasoning_effort_tiers() {
     let (_config, client) = get_client();
     println!("\n=== TEST 2: REASONING EFFORT TIERS ===");
@@ -95,6 +97,7 @@ async fn test_2_reasoning_effort_tiers() {
 }
 
 #[tokio::test]
+#[ignore = "requires live Bonsai model on :18020 and ALLOW_ENGINE_INTERRUPT=1"]
 async fn test_3_tool_call_with_arguments() {
     let (_config, client) = get_client();
     let messages = vec![Message {
@@ -146,6 +149,7 @@ async fn test_3_tool_call_with_arguments() {
 }
 
 #[tokio::test]
+#[ignore = "requires live Bonsai model on :18020 and ALLOW_ENGINE_INTERRUPT=1"]
 async fn test_4_multi_turn_tool_loop() {
     let (_config, client) = get_client();
     let mut messages = vec![Message {
@@ -204,6 +208,7 @@ async fn test_4_multi_turn_tool_loop() {
 }
 
 #[tokio::test]
+#[ignore = "requires live Bonsai model on :18020 and ALLOW_ENGINE_INTERRUPT=1"]
 async fn test_5_dgi_constrained_probe() {
     let (config, _client) = get_client();
     let http = reqwest::Client::new();
