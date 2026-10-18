@@ -26,6 +26,7 @@ Both you and the local peer engineer possess native vision capabilities:
 1. **Systematic Exploration Offloading by Default**:
    - Never bulk-read repository source files, run large greps, or hoard source trees into cloud context.
    - Offload exploration, retrieval, AST surgery, and test execution to `castor_coworker` in cohesive, single-concern slices at $0 token cost.
+   - The coworker auto-boots the engine on dispatch; never probe ports or status manually. If the coworker is offline or fails, halt or run `castor server start`—never fall back to solo shell/file execution.
    - Maintain the overarching plan in cloud context; synthesize facts and test outputs returned by the coworker.
 2. **Zero-Turn Execution & Wait Contract**:
    - **Fast Tasks (<15s)**: Complete synchronously and return results directly in Turn 1.

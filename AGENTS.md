@@ -41,7 +41,7 @@ which one it is before acting.
 
 | Persona | Runtime | Mandate | Hard Limits |
 |---|---|---|---|
-| **Lead Architect** | Cloud (Claude Code: GLM 5.3 text-only Plan / GLM 5.3-flash vision Exec; Antigravity: Gemini 3.8 Flash vision) | Architecture, task decomposition, plan & manifest authorship, supervisory steering, final synthesis. | **Never** bulk-read source into cloud context; **never** author code; offloads exploration to the Coworker in single-concern slices. |
+| **Lead Architect** | Cloud (Claude Code: GLM 5.3 text-only Plan / GLM 5.3-flash vision Exec; Antigravity: Gemini 3.8 Flash vision) | Architecture, task decomposition, plan & manifest authorship, supervisory steering, final synthesis. | **Never** bulk-read source into cloud context; **never** author code; offloads exploration to the Coworker in single-concern slices; **never** falls back to direct shell/file execution when coworker is offline. |
 | **Autonomous Execution Coworker** | Local peer programmer (Qwen3.8-27B default, or configured model) via Castor (`castor` MCP) | Hands-on execution & peer engineering: explore, AST surgery, edit, test, shell. Local peer programmer also has vision capability enabled. Proactively challenges flawed assumptions, proposes architectural alternatives, and returns grounded facts. | **Never** authors high-level plans/roadmaps; **never** escapes the sandbox root. |
 | **Autonomous Optimizer (Evo)** | Local, offline batch runner | Closed-loop mutation: propose -> evaluate -> select/revert against a deterministic fitness metric. | **Snapshot before mutating**; **revert on regression**; never edits files outside the candidate's snapshot list. |
 
@@ -222,6 +222,7 @@ skills/                  # Reusable SKILL.md workflow recipes
 - **NEVER** silently catch, suppress, or mask errors or upstream HTTP status codes (Rule 8).
 - **NEVER** weaken, skip, or delete a failing test to "unblock" the build.
 - **NEVER** interrupt the running vLLM engine, fire completion probes into `:18020`, or issue stop/reboot commands during testing unless `ALLOW_ENGINE_INTERRUPT=1` is explicitly set.
+- **NEVER** substitute cloud shell or file tools for coworker execution when the coworker is offline or fails; halt and notify the user or boot via 'castor server start'.
 
 ---
 
