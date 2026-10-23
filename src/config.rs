@@ -78,6 +78,7 @@ pub struct Config {
 pub struct LoadedConfig {
     pub config: Config,
     pub sources: Sources,
+    pub profile_name: Option<String>,
 }
 
 /// Per-field provenance for the effective config.
@@ -128,7 +129,7 @@ pub enum ConfigError {
 
 /// On-disk config file. Every field optional so partial files merge over
 /// defaults; unknown keys are rejected (no aliases, no migration).
-#[derive(Debug, Default, Deserialize)]
+#[derive(Debug, Clone, Default, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct FileConfig {
     model: Option<String>,
@@ -147,14 +148,39 @@ struct FileConfig {
     openalex_api_key: Option<String>,
     boot_timeout_secs: Option<u64>,
     probe_budget: Option<usize>,
+    profile: Option<String>,
+    #[serde(default)]
+    profiles: std::collections::HashMap<String, PartialProfile>,
 }
 
-#[derive(Debug, Default, Deserialize)]
+/// One named profile: same shape as FileConfig minus selector/nesting keys.
+#[derive(Debug, Clone, Default, Deserialize)]
 #[serde(deny_unknown_fields)]
-struct PartialPorts {
-    engine: Option<u16>,
-    status: Option<u16>,
-    proxy: Option<u16>,
+pub struct PartialProfile {
+    pub model: Option<String>,
+    pub base_url: Option<String>,
+    pub api_key: Option<String>,
+    pub engine_type: Option<String>,
+    pub launch_command: Option<String>,
+    pub stop_command: Option<String>,
+    pub max_context: Option<u32>,
+    pub ports: Option<PartialPorts>,
+    pub max_concurrent_tasks: Option<u32>,
+    pub tool_prefix: Option<String>,
+    pub searxng_url: Option<String>,
+    pub brave_api_key: Option<String>,
+    pub openalex_email: Option<String>,
+    pub openalex_api_key: Option<String>,
+    pub boot_timeout_secs: Option<u64>,
+    pub probe_budget: Option<usize>,
+}
+
+#[derive(Debug, Clone, Default, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct PartialPorts {
+    pub engine: Option<u16>,
+    pub status: Option<u16>,
+    pub proxy: Option<u16>,
 }
 
 /// Load the effective configuration from the real environment.
@@ -185,7 +211,39 @@ pub fn load_with(get_env: impl Fn(&str) -> Option<String>) -> Result<LoadedConfi
     } else {
         None
     };
-    let file = file.as_ref();
+
+    let (file_synthetic, profile_name) = match file {
+        Some(f) => {
+            let selected = get_env("CASTOR_PROFILE")
+                .filter(|s| !s.is_empty())
+                .or_else(|| f.profile.clone());
+            if let Some(ref name) = selected {
+                let prof = f.profiles.get(name).ok_or_else(|| {
+                    let mut names: Vec<&str> = f.profiles.keys().map(String::as_str).collect();
+                    names.sort_unstable();
+                    ConfigError::InvalidValue {
+                        key: "profile".into(),
+                        value: name.clone(),
+                        reason: format!("unknown profile (defined: [{}])", names.join(", ")),
+                    }
+                })?;
+                (Some(file_with_profile(&f, Some(prof))), selected)
+            } else {
+                (Some(f.clone()), None)
+            }
+        }
+        None => {
+            if let Some(name) = get_env("CASTOR_PROFILE").filter(|s| !s.is_empty()) {
+                return Err(ConfigError::InvalidValue {
+                    key: "CASTOR_PROFILE".into(),
+                    value: name,
+                    reason: "no config.json file found to resolve profile from".into(),
+                });
+            }
+            (None, None)
+        }
+    };
+    let file = file_synthetic.as_ref();
 
     let env_str = |key: &str| -> Option<String> { get_env(key).filter(|v| !v.is_empty()) };
     let env_u32 = |key: &str| -> Result<Option<u32>, ConfigError> {
@@ -359,7 +417,46 @@ pub fn load_with(get_env: impl Fn(&str) -> Option<String>) -> Result<LoadedConfi
             probe_budget: src_probe_budget,
             state_dir: state_dir_src,
         },
+        profile_name,
     })
+}
+
+fn file_with_profile(file: &FileConfig, profile: Option<&PartialProfile>) -> FileConfig {
+    match profile {
+        Some(p) => FileConfig {
+            model: file.model.clone().or_else(|| p.model.clone()),
+            base_url: file.base_url.clone().or_else(|| p.base_url.clone()),
+            api_key: file.api_key.clone().or_else(|| p.api_key.clone()),
+            engine_type: file.engine_type.clone().or_else(|| p.engine_type.clone()),
+            launch_command: file.launch_command.clone().or_else(|| p.launch_command.clone()),
+            stop_command: file.stop_command.clone().or_else(|| p.stop_command.clone()),
+            max_context: file.max_context.or(p.max_context),
+            ports: merge_partial_ports(file.ports.as_ref(), p.ports.as_ref()),
+            max_concurrent_tasks: file.max_concurrent_tasks.or(p.max_concurrent_tasks),
+            tool_prefix: file.tool_prefix.clone().or_else(|| p.tool_prefix.clone()),
+            searxng_url: file.searxng_url.clone().or_else(|| p.searxng_url.clone()),
+            brave_api_key: file.brave_api_key.clone().or_else(|| p.brave_api_key.clone()),
+            openalex_email: file.openalex_email.clone().or_else(|| p.openalex_email.clone()),
+            openalex_api_key: file.openalex_api_key.clone().or_else(|| p.openalex_api_key.clone()),
+            boot_timeout_secs: file.boot_timeout_secs.or(p.boot_timeout_secs),
+            probe_budget: file.probe_budget.or(p.probe_budget),
+            profile: file.profile.clone(),
+            profiles: file.profiles.clone(),
+        },
+        None => file.clone(),
+    }
+}
+
+fn merge_partial_ports(a: Option<&PartialPorts>, b: Option<&PartialPorts>) -> Option<PartialPorts> {
+    match (a, b) {
+        (Some(p1), Some(p2)) => Some(PartialPorts {
+            engine: p1.engine.or(p2.engine),
+            status: p1.status.or(p2.status),
+            proxy: p1.proxy.or(p2.proxy),
+        }),
+        (Some(p), None) | (None, Some(p)) => Some(p.clone()),
+        (None, None) => None,
+    }
 }
 
 /// Render the effective config with per-field source annotations.
@@ -1049,5 +1146,63 @@ mod tests {
         let l = load_case(&[], Some(&bom_json));
         assert_eq!(l.config.model.as_deref(), Some("bom-test"));
         assert_eq!(l.sources.model, Source::File);
+    }
+
+    #[test]
+    fn profile_resolution_precedence() {
+        let json = r#"{
+            "profile": "bonsai",
+            "model": "top-level-model",
+            "profiles": {
+                "bonsai": {
+                    "model": "bonsai-model",
+                    "engine_type": "llama.cpp",
+                    "max_concurrent_tasks": 4,
+                    "max_context": 524288
+                },
+                "hyperqwen": {
+                    "model": "hyperqwen-model",
+                    "engine_type": "vllm"
+                }
+            }
+        }"#;
+
+        // Top-level field beats profile; profile beats built-in defaults
+        let l = load_case(&[], Some(json));
+        assert_eq!(l.profile_name.as_deref(), Some("bonsai"));
+        assert_eq!(l.config.model.as_deref(), Some("top-level-model"));
+        assert_eq!(l.config.engine_type.as_deref(), Some("llama.cpp"));
+        assert_eq!(l.config.max_concurrent_tasks, 4);
+        assert_eq!(l.config.max_context, Some(524288));
+
+        // CASTOR_PROFILE env var overrides file profile selector
+        let l = load_case(&[("CASTOR_PROFILE", "hyperqwen")], Some(json));
+        assert_eq!(l.profile_name.as_deref(), Some("hyperqwen"));
+        assert_eq!(l.config.engine_type.as_deref(), Some("vllm"));
+        assert_eq!(l.config.max_concurrent_tasks, 1); // default when unspecified in profile
+
+        // Env var overrides both top-level and profile
+        let l = load_case(
+            &[("CASTOR_MODEL", "env-model"), ("CASTOR_PROFILE", "bonsai")],
+            Some(json),
+        );
+        assert_eq!(l.config.model.as_deref(), Some("env-model"));
+        assert_eq!(l.sources.model, Source::Env);
+    }
+
+    #[test]
+    fn unknown_profile_rejected() {
+        let json = r#"{"profile":"nonexistent","profiles":{"bonsai":{"model":"b"}}}"#;
+        let dir = tmp_dir();
+        let config_file = dir.join("config.json");
+        std::fs::write(&config_file, json).unwrap();
+
+        let res = load_with(|key| match key {
+            "CASTOR_STATE_DIR" => Some(dir.to_string_lossy().into()),
+            _ => None,
+        });
+        assert!(res.is_err());
+        let err = res.err().unwrap().to_string();
+        assert!(err.contains("unknown profile"), "{err}");
     }
 }

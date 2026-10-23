@@ -540,6 +540,7 @@ mod tests {
         config.state_dir = dir.clone();
         config.launch_command = None;
         config.ports.engine = 0;
+        config.base_url = None;
 
         let res = run_job(&spec, &state, &config).await;
         assert!(res.is_err());
