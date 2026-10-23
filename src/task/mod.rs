@@ -8,4 +8,5 @@
 
 pub mod registry;
 pub mod semaphore;
+pub mod trace;
 pub mod wait;

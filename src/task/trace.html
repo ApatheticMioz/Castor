@@ -1,0 +1,1123 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Castor Trace</title>
+  
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;500;600;700&family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet">
+  
+  <script src="https://cdn.tailwindcss.com"></script>
+  <script>
+    tailwind.config = {
+      theme: {
+        extend: {
+          fontFamily: {
+            sans: ['Inter', '-apple-system', 'BlinkMacSystemFont', 'sans-serif'],
+            mono: ['JetBrains Mono', 'ui-monospace', 'monospace'],
+          },
+          colors: {
+            panel: '#09090b',
+            sidebar: '#000000',
+            card: '#121215',
+            'card-active': '#1c1c21',
+            border: '#27272a',
+            'border-subtle': '#18181b',
+            accent: '#3b82f6',
+          }
+        }
+      }
+    }
+  </script>
+
+  <!-- Lucide Icons -->
+  <script src="https://unpkg.com/lucide@latest"></script>
+
+  <!-- Prism Syntax Highlighting -->
+  <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/prism/1.29.0/themes/prism-tomorrow.min.css">
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/prism/1.29.0/prism.min.js"></script>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/prism/1.29.0/components/prism-json.min.js"></script>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/prism/1.29.0/components/prism-bash.min.js"></script>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/prism/1.29.0/components/prism-diff.min.js"></script>
+
+  <style>
+    ::-webkit-scrollbar { width: 5px; height: 5px; }
+    ::-webkit-scrollbar-track { background: #000000; }
+    ::-webkit-scrollbar-thumb { background: #27272a; border-radius: 2px; }
+    ::-webkit-scrollbar-thumb:hover { background: #3f3f46; }
+    
+    pre[class*="language-"] {
+      margin: 0 !important;
+      padding: 0.75rem 1rem !important;
+      background: #000000 !important;
+      font-size: 12px !important;
+      line-height: 1.5 !important;
+      border: 1px solid #1f1f23;
+    }
+    code[class*="language-"] {
+      font-family: 'JetBrains Mono', monospace !important;
+    }
+    .tool-pill.active {
+      box-shadow: 0 0 0 2px #ffffff !important;
+      font-weight: 800 !important;
+      color: #ffffff !important;
+      filter: brightness(1.5) !important;
+    }
+  </style>
+</head>
+<body class="bg-black text-zinc-100 font-sans h-screen w-screen flex flex-col overflow-hidden select-none antialiased">
+
+  <!-- WORKBENCH HEADER -->
+  <header class="h-12 bg-black border-b border-border px-4 flex items-center justify-between shrink-0 z-20">
+    <div class="flex items-center gap-3">
+      <div class="flex items-center gap-2">
+        <span class="font-bold text-sm tracking-tight text-white font-mono">CASTOR TRACE</span>
+        <span class="px-1.5 py-0.5 rounded text-[10px] font-mono font-medium bg-zinc-900 text-zinc-400 border border-zinc-800">
+          v1.3.0
+        </span>
+      </div>
+      <div class="h-3 w-px bg-border"></div>
+      <span class="text-xs font-mono text-zinc-400 truncate max-w-xs md:max-w-md" id="headerCwd">cwd: --</span>
+    </div>
+
+    <!-- Active Task Meta -->
+    <div class="hidden lg:flex items-center gap-4 text-xs font-mono">
+      <div class="flex items-center gap-1.5">
+        <span class="text-zinc-500">TASK</span>
+        <span class="text-zinc-200 font-medium truncate max-w-[200px]" id="headerTaskId">--</span>
+      </div>
+      <div class="flex items-center gap-1.5">
+        <span class="text-zinc-500">STATE</span>
+        <span id="headerStatusBadge" class="px-1.5 py-0.5 rounded text-[10px] font-semibold uppercase bg-zinc-900 text-zinc-300 border border-zinc-800">IDLE</span>
+      </div>
+      <div class="flex items-center gap-1.5">
+        <span class="text-zinc-500">TURNS</span>
+        <span class="text-white font-semibold" id="headerTurnsCount">0</span>
+      </div>
+      <div class="flex items-center gap-1.5">
+        <span class="text-zinc-500">DECODE</span>
+        <span class="text-emerald-400 font-semibold" id="headerDecodeSpeed">-- tok/s</span>
+      </div>
+      <div class="flex items-center gap-1.5">
+        <span class="text-zinc-500">PREFILL</span>
+        <span class="text-cyan-400 font-semibold" id="headerPrefillSpeed">-- tok/s</span>
+      </div>
+      <div class="flex items-center gap-1.5">
+        <span class="text-zinc-500">COST</span>
+        <span class="text-emerald-400 font-semibold">$0.00</span>
+      </div>
+    </div>
+
+    <!-- Controls -->
+    <div class="flex items-center gap-2">
+      <button id="btnPrevTurn" class="px-2 py-1 rounded bg-zinc-900 hover:bg-zinc-800 text-zinc-300 text-xs font-mono border border-zinc-800 transition flex items-center gap-1" title="Previous Turn (Up Arrow / k)">
+        <i data-lucide="arrow-up" class="w-3.5 h-3.5"></i>
+        <span class="hidden sm:inline">Prev</span>
+      </button>
+      <button id="btnNextTurn" class="px-2 py-1 rounded bg-zinc-900 hover:bg-zinc-800 text-zinc-300 text-xs font-mono border border-zinc-800 transition flex items-center gap-1" title="Next Turn (Down Arrow / j)">
+        <span class="hidden sm:inline">Next</span>
+        <i data-lucide="arrow-down" class="w-3.5 h-3.5"></i>
+      </button>
+
+      <div class="h-4 w-px bg-border mx-1"></div>
+
+      <button id="btnLiveSync" class="flex items-center gap-1.5 px-2.5 py-1 rounded text-xs font-mono font-medium bg-zinc-900 text-zinc-300 border border-zinc-800 hover:border-zinc-700 transition" title="Toggle Auto-Sync">
+        <span class="w-2 h-2 rounded-full bg-emerald-500" id="syncDot"></span>
+        <span id="syncText">Sync Active</span>
+      </button>
+
+      <button id="btnRefresh" class="p-1.5 rounded bg-zinc-900 hover:bg-zinc-800 text-zinc-300 border border-zinc-800 transition" title="Refresh Now (r)">
+        <i data-lucide="refresh-cw" class="w-3.5 h-3.5"></i>
+      </button>
+    </div>
+  </header>
+
+  <!-- 3-PANE WORKBENCH -->
+  <div class="flex-1 flex overflow-hidden">
+
+    <!-- PANE 1: TASKS (Left) -->
+    <aside class="w-64 bg-sidebar border-r border-border flex flex-col shrink-0">
+      <div class="p-2.5 border-b border-border flex flex-col gap-2">
+        <div class="flex items-center justify-between text-xs font-semibold text-zinc-400 px-1 font-mono">
+          <span>DISPATCHED TASKS</span>
+          <span id="taskCountBadge" class="text-[10px] px-1.5 py-0.2 rounded bg-zinc-900 text-zinc-400 border border-zinc-800">0</span>
+        </div>
+        <div class="relative flex items-center">
+          <i data-lucide="search" class="w-3.5 h-3.5 text-zinc-500 absolute left-2.5 top-2.5 pointer-events-none"></i>
+          <input type="text" id="taskSearchInput" placeholder="Filter tasks... (/)" class="w-full pl-8 pr-7 py-1 text-xs bg-panel border border-border rounded focus:outline-none focus:border-zinc-500 text-zinc-200 placeholder-zinc-600 font-mono">
+          <button id="taskSearchClearBtn" class="absolute right-2 text-zinc-500 hover:text-zinc-200 hidden text-xs font-mono" title="Clear Search (Esc)">✕</button>
+        </div>
+      </div>
+
+      <div class="flex-1 overflow-y-auto p-1.5 flex flex-col gap-1" id="tasksListContainer">
+        <!-- Rendered task cards -->
+      </div>
+    </aside>
+
+    <!-- PANE 2: TIMELINE WATERFALL (Center) -->
+    <section class="w-80 lg:w-96 border-r border-border flex flex-col bg-panel shrink-0">
+      <div class="p-2.5 border-b border-border bg-black/40 flex flex-col gap-2">
+        <div class="flex items-center justify-between">
+          <span class="text-xs font-bold text-zinc-200 font-mono tracking-wide">EXECUTION TIMELINE</span>
+          <span class="text-xs font-mono text-zinc-500" id="turnsSummaryCount">0 turns</span>
+        </div>
+
+        <!-- Filter Chips with exact counts -->
+        <div class="flex items-center gap-1 overflow-x-auto text-[11px] font-mono pb-0.5" id="spanFilters">
+          <button class="filter-btn active px-2 py-0.5 rounded bg-zinc-200 text-black font-semibold flex items-center gap-1" data-filter="all">
+            <span>All</span>
+            <span class="filter-count text-[10px] opacity-75">(0)</span>
+          </button>
+          <button class="filter-btn px-2 py-0.5 rounded bg-zinc-900 text-zinc-400 hover:text-white border border-zinc-800 flex items-center gap-1" data-filter="edit">
+            <span>Edits</span>
+            <span class="filter-count text-[10px] opacity-75">(0)</span>
+          </button>
+          <button class="filter-btn px-2 py-0.5 rounded bg-zinc-900 text-zinc-400 hover:text-white border border-zinc-800 flex items-center gap-1" data-filter="bash">
+            <span>Terminal</span>
+            <span class="filter-count text-[10px] opacity-75">(0)</span>
+          </button>
+          <button class="filter-btn px-2 py-0.5 rounded bg-zinc-900 text-zinc-400 hover:text-white border border-zinc-800 flex items-center gap-1" data-filter="search">
+            <span>Search</span>
+            <span class="filter-count text-[10px] opacity-75">(0)</span>
+          </button>
+          <button class="filter-btn px-2 py-0.5 rounded bg-zinc-900 text-zinc-400 hover:text-white border border-zinc-800 flex items-center gap-1" data-filter="read">
+            <span>Read</span>
+            <span class="filter-count text-[10px] opacity-75">(0)</span>
+          </button>
+        </div>
+      </div>
+
+      <div class="flex-1 overflow-y-auto p-1.5 flex flex-col gap-1" id="spansListContainer">
+        <!-- Rendered timeline rows -->
+      </div>
+    </section>
+
+    <!-- PANE 3: DETAIL INSPECTOR (Right) -->
+    <main class="flex-1 flex flex-col bg-black overflow-hidden">
+      <!-- Consolidated 4 Tabs Bar -->
+      <div class="h-9 bg-panel border-b border-border px-3 flex items-center justify-between shrink-0">
+        <div class="flex items-center gap-1 h-full text-xs font-mono" id="inspectorTabs">
+          <!-- 1. UNIFIED EXECUTION VIEW (Rationale + Action + Output) -->
+          <button class="tab-btn active h-full px-3 border-b-2 border-white text-white font-medium flex items-center gap-1.5" data-tab="execution" title="Press 1">
+            <i data-lucide="play" class="w-3.5 h-3.5 text-emerald-400"></i>
+            <span>Execution Flow</span>
+          </button>
+          <!-- 2. DIFF (Full screen dedicated AST file modifications) -->
+          <button class="tab-btn h-full px-3 border-b-2 border-transparent text-zinc-400 hover:text-zinc-200 flex items-center gap-1.5" data-tab="diff" title="Press 2">
+            <i data-lucide="git-pull-request" class="w-3.5 h-3.5 text-blue-400"></i>
+            <span>Diff</span>
+          </button>
+          <!-- 3. TELEMETRY (Rust decode/prefill TPS + token audit) -->
+          <button class="tab-btn h-full px-3 border-b-2 border-transparent text-zinc-400 hover:text-zinc-200 flex items-center gap-1.5" data-tab="telemetry" title="Press 3">
+            <i data-lucide="activity" class="w-3.5 h-3.5 text-purple-400"></i>
+            <span>Telemetry</span>
+          </button>
+          <!-- 4. RAW LOG (Unadulterated JSONL event) -->
+          <button class="tab-btn h-full px-3 border-b-2 border-transparent text-zinc-400 hover:text-zinc-200 flex items-center gap-1.5" data-tab="raw" title="Press 4">
+            <i data-lucide="file-json" class="w-3.5 h-3.5 text-zinc-400"></i>
+            <span>Raw Log</span>
+          </button>
+        </div>
+
+        <div class="flex items-center gap-3 text-xs font-mono">
+          <span class="text-zinc-500" id="inspectorTurnIndicator">Turn --</span>
+          <button id="btnCopyInspector" class="px-2 py-0.5 rounded bg-zinc-900 hover:bg-zinc-800 text-zinc-300 border border-zinc-800 transition flex items-center gap-1" title="Copy Active View Content (c)">
+            <i data-lucide="copy" class="w-3 h-3"></i>
+            <span id="copyBtnLabel">Copy</span>
+          </button>
+        </div>
+      </div>
+
+      <!-- Tab Content Area -->
+      <div class="flex-1 overflow-y-auto p-4 flex flex-col gap-4 font-mono text-xs" id="inspectorContent">
+
+        <!-- TAB 1: UNIFIED EXECUTION (Rationale -> Action -> Output) -->
+        <div id="panel-execution" class="tab-panel flex flex-col gap-4">
+          
+          <!-- Section A: Model Rationale / Deliberation Trace -->
+          <div class="p-3.5 rounded bg-panel border border-border flex flex-col gap-2">
+            <div class="flex items-center justify-between pb-2 border-b border-border/70 text-xs">
+              <span class="font-bold text-zinc-300 uppercase tracking-wide flex items-center gap-1.5">
+                <i data-lucide="message-square" class="w-3.5 h-3.5 text-amber-400"></i>
+                Model Rationale & Intent
+              </span>
+              <span class="text-zinc-500 text-[11px]" id="execReasoningTokens">0 reasoning tokens</span>
+            </div>
+            <div class="text-zinc-200 text-xs leading-relaxed whitespace-pre-wrap font-sans" id="execRationaleText">
+              (No model text generated before action)
+            </div>
+          </div>
+
+          <!-- Section B: Action Tool Invocation (with Multi-Tool Switcher) -->
+          <div class="flex flex-col gap-2">
+            <div id="toolSwitcherBar" class="flex items-center gap-1.5 pb-1 hidden">
+              <span class="text-zinc-500 text-[11px] uppercase font-bold mr-1">Tool Invocations:</span>
+              <div id="toolButtonsList" class="flex items-center gap-1"></div>
+            </div>
+
+            <div class="p-2.5 rounded bg-panel border border-border flex items-center justify-between">
+              <div class="flex items-center gap-2 truncate">
+                <span class="px-1.5 py-0.5 rounded text-[11px] font-bold" id="actionToolBadge">TOOL</span>
+                <span class="font-medium text-zinc-200 truncate" id="actionTargetLabel">--</span>
+              </div>
+              <span class="text-[11px] px-1.5 py-0.5 rounded font-bold" id="actionStatusBadge">SUCCESS</span>
+            </div>
+
+            <!-- Arguments -->
+            <div class="flex flex-col gap-1">
+              <div class="flex items-center justify-between text-[11px] text-zinc-500 uppercase font-bold">
+                <span>Arguments</span>
+                <span id="argsMetaLabel">--</span>
+              </div>
+              <pre><code class="language-json" id="actionArgsCode">--</code></pre>
+            </div>
+          </div>
+
+          <!-- Section C: Execution Output / Terminal Return -->
+          <div class="flex flex-col gap-1">
+            <div class="flex items-center justify-between text-[11px] text-zinc-500 uppercase font-bold">
+              <span>Execution Output</span>
+              <span id="outputMetaLabel">--</span>
+            </div>
+            <pre><code class="language-bash" id="actionOutputCode">--</code></pre>
+          </div>
+        </div>
+
+        <!-- TAB 2: DIFF -->
+        <div id="panel-diff" class="tab-panel hidden flex flex-col gap-3">
+          <div class="p-2.5 rounded bg-panel border border-border flex items-center justify-between">
+            <span class="text-zinc-300 font-medium truncate" id="diffFileLabel">Target: --</span>
+            <span class="text-[11px] text-zinc-500" id="diffModeLabel">In-Memory AST Surgery</span>
+          </div>
+          <pre><code class="language-diff" id="diffCodeBlock">No file edits in this turn.</code></pre>
+        </div>
+
+        <!-- TAB 3: TELEMETRY (Rust Telemetry Matching src/telemetry.rs) -->
+        <div id="panel-telemetry" class="tab-panel hidden flex flex-col gap-3">
+          <div class="grid grid-cols-2 md:grid-cols-4 gap-2">
+            <div class="p-2.5 rounded bg-panel border border-border flex flex-col gap-0.5">
+              <span class="text-[10px] text-zinc-500 uppercase font-bold">Decode Rate (vLLM)</span>
+              <span class="text-base font-bold text-emerald-400" id="telDecodeSpeed">-- tok/s</span>
+            </div>
+            <div class="p-2.5 rounded bg-panel border border-border flex flex-col gap-0.5">
+              <span class="text-[10px] text-zinc-500 uppercase font-bold">Prefill Rate</span>
+              <span class="text-base font-bold text-cyan-400" id="telPrefillSpeed">-- tok/s</span>
+            </div>
+            <div class="p-2.5 rounded bg-panel border border-border flex flex-col gap-0.5">
+              <span class="text-[10px] text-zinc-500 uppercase font-bold">TTFT Latency</span>
+              <span class="text-base font-bold text-zinc-100" id="telTtft">-- s</span>
+            </div>
+            <div class="p-2.5 rounded bg-panel border border-border flex flex-col gap-0.5">
+              <span class="text-[10px] text-zinc-500 uppercase font-bold">Pure Decode Time</span>
+              <span class="text-base font-bold text-zinc-100" id="telDecodeTime">-- s</span>
+            </div>
+          </div>
+
+          <!-- Token Composition Table -->
+          <div class="p-3 rounded bg-panel border border-border flex flex-col gap-2">
+            <span class="text-zinc-400 text-xs font-bold uppercase">Token Ledger Audit (src/telemetry.rs)</span>
+            <div class="flex flex-col gap-1 text-xs">
+              <div class="flex justify-between py-1 border-b border-border/40">
+                <span class="text-zinc-500">Prompt Tokens (Input Context):</span>
+                <span class="text-zinc-200" id="telPromptTok">0</span>
+              </div>
+              <div class="flex justify-between py-1 border-b border-border/40">
+                <span class="text-zinc-500">Cached Prompt Tokens (Prefix Cache):</span>
+                <span class="text-emerald-400" id="telCachedTok">0</span>
+              </div>
+              <div class="flex justify-between py-1 border-b border-border/40">
+                <span class="text-zinc-500">Reasoning Tokens (Model Thinking):</span>
+                <span class="text-amber-400" id="telReasonTok">0</span>
+              </div>
+              <div class="flex justify-between py-1 border-b border-border/40">
+                <span class="text-zinc-500">Completion Tokens (Generated Response):</span>
+                <span class="text-blue-400" id="telCompTok">0</span>
+              </div>
+              <div class="flex justify-between py-1 font-bold">
+                <span class="text-zinc-400">Total Turn Latency:</span>
+                <span class="text-zinc-100" id="telTotalMs">0 ms</span>
+              </div>
+            </div>
+          </div>
+
+          <!-- Original Prompt Objective -->
+          <div class="p-3 rounded bg-panel border border-border flex flex-col gap-1.5">
+            <span class="text-zinc-500 text-[11px] uppercase font-bold">Task Objective Prompt</span>
+            <div class="text-zinc-300 text-xs whitespace-pre-wrap max-h-40 overflow-y-auto p-2 bg-black rounded border border-zinc-800" id="taskPromptText">
+              --
+            </div>
+          </div>
+        </div>
+
+        <!-- TAB 4: RAW LOG -->
+        <div id="panel-raw" class="tab-panel hidden flex flex-col gap-2">
+          <pre><code class="language-json" id="rawEventJson">{}</code></pre>
+        </div>
+
+      </div>
+    </main>
+
+  </div>
+
+  <script>
+    const state = {
+      tasks: [],
+      activeTaskId: null,
+      activeTaskData: null,
+      activeTurnIndex: 0,
+      activeToolIndex: 0,
+      activeFilter: 'all',
+      activeTab: 'execution',
+      lastMtime: 0,
+      autoSync: true,
+      followLive: false,
+    };
+
+    // DOM Elements
+    const headerCwd = document.getElementById('headerCwd');
+    const headerTaskId = document.getElementById('headerTaskId');
+    const headerStatusBadge = document.getElementById('headerStatusBadge');
+    const headerTurnsCount = document.getElementById('headerTurnsCount');
+    const headerDecodeSpeed = document.getElementById('headerDecodeSpeed');
+    const headerPrefillSpeed = document.getElementById('headerPrefillSpeed');
+    const tasksListContainer = document.getElementById('tasksListContainer');
+    const spansListContainer = document.getElementById('spansListContainer');
+    const turnsSummaryCount = document.getElementById('turnsSummaryCount');
+    const taskCountBadge = document.getElementById('taskCountBadge');
+    const taskSearchInput = document.getElementById('taskSearchInput');
+    const taskSearchClearBtn = document.getElementById('taskSearchClearBtn');
+    const btnRefresh = document.getElementById('btnRefresh');
+    const btnLiveSync = document.getElementById('btnLiveSync');
+    const syncDot = document.getElementById('syncDot');
+    const syncText = document.getElementById('syncText');
+    const btnPrevTurn = document.getElementById('btnPrevTurn');
+    const btnNextTurn = document.getElementById('btnNextTurn');
+    const inspectorTurnIndicator = document.getElementById('inspectorTurnIndicator');
+    const btnCopyInspector = document.getElementById('btnCopyInspector');
+    const copyBtnLabel = document.getElementById('copyBtnLabel');
+
+    // Telemetry algorithm matching src/telemetry.rs exactly
+    function computeRustTps(metrics) {
+      if (!metrics) return { decodeTps: '--', prefillTps: '--', decodeMs: 0 };
+      const totalMs = metrics.total_ms || 0;
+      const ttftMs = metrics.ttft_ms || 0;
+      const compTokens = metrics.completion_tokens || 0;
+      const promptTokens = metrics.prompt_tokens || 0;
+
+      // Pure decode duration = total_ms - ttft_ms
+      const decodeMs = Math.max(0, totalMs - ttftMs);
+      
+      let decodeTps = '--';
+      if (decodeMs >= 50 && compTokens > 0) {
+        const tps = compTokens / (decodeMs / 1000.0);
+        decodeTps = `${tps.toFixed(1)} tok/s`;
+      } else if (metrics.tokens_per_sec) {
+        decodeTps = `${metrics.tokens_per_sec.toFixed(1)} tok/s`;
+      }
+
+      let prefillTps = '--';
+      if (ttftMs > 0 && promptTokens > 0) {
+        const ptps = promptTokens / (ttftMs / 1000.0);
+        prefillTps = `${ptps.toFixed(0)} tok/s`;
+      }
+
+      return { decodeTps, prefillTps, decodeMs };
+    }
+
+    function matchesFilter(turn, filter) {
+      if (!filter || filter === 'all') return true;
+      const toolCalls = turn.dispatch?.tool_calls || [];
+      const names = toolCalls.map(t => t.name);
+      if (filter === 'edit') return names.includes('edit_file') || names.includes('write_file');
+      if (filter === 'bash') return names.includes('bash');
+      if (filter === 'search') return names.includes('search_code') || names.includes('ast_search');
+      if (filter === 'read') return names.includes('read_file') || names.includes('list_dir');
+      return true;
+    }
+
+    function getVisibleTurnIndices() {
+      const turns = state.activeTaskData?.turns || [];
+      const indices = [];
+      turns.forEach((turn, idx) => {
+        if (matchesFilter(turn, state.activeFilter)) {
+          indices.push(idx);
+        }
+      });
+      return indices;
+    }
+
+    async function loadTasksInitial() {
+      try {
+        const res = await fetch('/api/tasks?limit=40');
+        const data = await res.json();
+        state.tasks = data.tasks || [];
+        taskCountBadge.textContent = state.tasks.length;
+        renderTasksList();
+
+        if (state.tasks.length > 0 && !state.activeTaskId) {
+          selectTask(state.tasks[0].id);
+        }
+      } catch (err) {
+        console.error('Failed to load tasks', err);
+      }
+    }
+
+    async function pollCheck() {
+      if (!state.autoSync) return;
+      try {
+        const res = await fetch(`/api/poll?taskId=${state.activeTaskId || ''}`);
+        const data = await res.json();
+        
+        // Auto-switch only if user enabled followLive and a new executing task arrived
+        if (state.followLive && data.latestTaskId && data.latestTaskId !== state.activeTaskId && data.latestStatus === 'executing') {
+          await loadTasksInitial();
+          await selectTask(data.latestTaskId);
+          return;
+        }
+
+        // Otherwise, refresh current task data if mtime changed
+        if (data.mtime && data.mtime !== state.lastMtime) {
+          state.lastMtime = data.mtime;
+          if (state.activeTaskId) {
+            await reloadActiveTaskData();
+          }
+        }
+      } catch {}
+    }
+
+    async function selectTask(taskId) {
+      state.activeTaskId = taskId;
+      state.activeTurnIndex = 0;
+      state.activeToolIndex = 0;
+      renderTasksList();
+      await reloadActiveTaskData();
+    }
+
+    async function reloadActiveTaskData() {
+      if (!state.activeTaskId) return;
+      try {
+        const res = await fetch(`/api/task/${state.activeTaskId}`);
+        const data = await res.json();
+        state.activeTaskData = data;
+        updateHeader(data.task);
+
+        const turns = data.turns || [];
+        updateFilterCounts(turns);
+
+        const visibleIndices = getVisibleTurnIndices();
+        if (visibleIndices.length > 0) {
+          if (!visibleIndices.includes(state.activeTurnIndex)) {
+            state.activeTurnIndex = visibleIndices[0];
+          }
+        } else {
+          state.activeTurnIndex = 0;
+        }
+
+        renderTimeline();
+        renderInspector();
+      } catch (err) {
+        console.error('Failed to fetch task trace', err);
+      }
+    }
+
+    function updateHeader(task) {
+      if (!task) return;
+      headerCwd.textContent = `cwd: ${task.cwd || 'N/A'}`;
+      headerTaskId.textContent = task.id;
+      
+      const status = task.status || 'unknown';
+      headerStatusBadge.textContent = status.toUpperCase();
+
+      if (status === 'executing') {
+        headerStatusBadge.className = 'px-1.5 py-0.5 rounded text-[10px] font-semibold uppercase bg-emerald-950 text-emerald-400 border border-emerald-800 animate-pulse';
+      } else if (status === 'completed' || status === 'succeeded') {
+        headerStatusBadge.className = 'px-1.5 py-0.5 rounded text-[10px] font-semibold uppercase bg-zinc-900 text-zinc-300 border border-zinc-700';
+      } else {
+        headerStatusBadge.className = 'px-1.5 py-0.5 rounded text-[10px] font-semibold uppercase bg-rose-950 text-rose-400 border border-rose-800';
+      }
+
+      const turns = state.activeTaskData?.turns || [];
+      headerTurnsCount.textContent = turns.length;
+      turnsSummaryCount.textContent = `${turns.length} turns`;
+
+      let lastDecode = '--';
+      let lastPrefill = '--';
+      for (let i = turns.length - 1; i >= 0; i--) {
+        const m = turns[i].dispatch?.metrics;
+        if (m) {
+          const tps = computeRustTps(m);
+          if (tps.decodeTps !== '--') {
+            lastDecode = tps.decodeTps;
+            lastPrefill = tps.prefillTps;
+            break;
+          }
+        }
+      }
+      headerDecodeSpeed.textContent = lastDecode;
+      headerPrefillSpeed.textContent = lastPrefill;
+    }
+
+    function updateFilterCounts(turns) {
+      const counts = { all: turns.length, edit: 0, bash: 0, search: 0, read: 0 };
+      turns.forEach(turn => {
+        const toolCalls = turn.dispatch?.tool_calls || [];
+        const names = toolCalls.map(t => t.name);
+        if (names.includes('edit_file') || names.includes('write_file')) counts.edit++;
+        if (names.includes('bash')) counts.bash++;
+        if (names.includes('search_code') || names.includes('ast_search')) counts.search++;
+        if (names.includes('read_file') || names.includes('list_dir')) counts.read++;
+      });
+
+      document.querySelectorAll('#spanFilters .filter-btn').forEach(btn => {
+        const f = btn.dataset.filter;
+        const countSpan = btn.querySelector('.filter-count');
+        if (countSpan && counts[f] !== undefined) {
+          countSpan.textContent = `(${counts[f]})`;
+        }
+      });
+    }
+
+    function renderTasksList() {
+      const q = (taskSearchInput.value || '').trim().toLowerCase();
+      taskSearchClearBtn.classList.toggle('hidden', q.length === 0);
+
+      const filtered = state.tasks.filter(t => t.id.toLowerCase().includes(q) || (t.prompt || '').toLowerCase().includes(q));
+
+      tasksListContainer.innerHTML = '';
+      if (filtered.length === 0) {
+        tasksListContainer.innerHTML = `<div class="p-4 text-center text-xs text-zinc-600 font-mono">No matching tasks found.</div>`;
+        return;
+      }
+
+      filtered.forEach(task => {
+        const isActive = task.id === state.activeTaskId;
+        const card = document.createElement('div');
+        card.className = `p-2 rounded border cursor-pointer font-mono text-xs transition flex flex-col gap-1 ${
+          isActive 
+            ? 'bg-card-active border-zinc-400 text-white shadow-sm' 
+            : 'bg-card border-border-subtle text-zinc-400 hover:border-zinc-700 hover:text-zinc-200'
+        }`;
+
+        const isExec = task.status === 'executing';
+        const dateStr = new Date(task.createdAt).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+
+        card.innerHTML = `
+          <div class="flex items-center justify-between">
+            <span class="font-medium truncate max-w-[140px] ${isActive ? 'text-white' : 'text-zinc-300'}">${escapeHtml(task.id)}</span>
+            <span class="text-[10px] px-1 rounded ${isExec ? 'bg-emerald-950 text-emerald-400 border border-emerald-800' : 'text-zinc-500'}">
+              ${isExec ? 'LIVE' : dateStr}
+            </span>
+          </div>
+          <p class="text-[11px] text-zinc-500 font-sans line-clamp-1">${escapeHtml(task.prompt || 'No prompt')}</p>
+        `;
+
+        card.addEventListener('click', () => selectTask(task.id));
+        tasksListContainer.appendChild(card);
+      });
+    }
+
+    function renderTimeline() {
+      const turns = state.activeTaskData?.turns || [];
+      spansListContainer.innerHTML = '';
+
+      if (turns.length === 0) {
+        spansListContainer.innerHTML = `<div class="p-6 text-center text-xs text-zinc-600 font-mono">No execution turns logged.</div>`;
+        updateNavButtons();
+        return;
+      }
+
+      const visibleIndices = getVisibleTurnIndices();
+      if (visibleIndices.length === 0) {
+        spansListContainer.innerHTML = `
+          <div class="p-6 text-center text-xs text-zinc-500 font-mono flex flex-col gap-1">
+            <span>No turns match filter "${state.activeFilter}".</span>
+            <button class="text-accent underline text-[11px] mt-1" onclick="switchFilter('all')">Show all turns</button>
+          </div>
+        `;
+        updateNavButtons();
+        return;
+      }
+
+      visibleIndices.forEach(idx => {
+        const turn = turns[idx];
+        const dispatch = turn.dispatch;
+        const toolCalls = dispatch?.tool_calls || [];
+        const isSelected = idx === state.activeTurnIndex;
+        const metrics = dispatch?.metrics || {};
+
+        const row = document.createElement('div');
+        row.id = `turn-row-${idx}`;
+        row.className = `p-2 rounded border cursor-pointer font-mono text-xs transition flex flex-col gap-1.5 ${
+          isSelected 
+            ? 'bg-card-active border-zinc-300 text-white shadow-sm' 
+            : 'bg-card border-border-subtle text-zinc-400 hover:border-zinc-700'
+        }`;
+
+        const toolBadges = toolCalls.map((tc, tIdx) => {
+          let badgeColor = 'bg-zinc-800 text-zinc-300 border-zinc-700';
+          if (tc.name === 'bash') badgeColor = 'bg-emerald-950 text-emerald-400 border-emerald-800';
+          else if (tc.name === 'edit_file') badgeColor = 'bg-blue-950 text-blue-400 border-blue-800';
+          else if (tc.name === 'write_file') badgeColor = 'bg-amber-950 text-amber-400 border-amber-800';
+          else if (tc.name === 'search_code' || tc.name === 'ast_search') badgeColor = 'bg-cyan-950 text-cyan-400 border-cyan-800';
+
+          const isToolActive = isSelected && tIdx === state.activeToolIndex;
+          const activeClass = isToolActive ? 'ring-1 ring-white font-extrabold text-white brightness-125' : '';
+
+          return `<span class="tool-pill px-1.5 py-0.2 rounded text-[10px] font-bold border ${badgeColor} ${activeClass} hover:brightness-125 transition" data-tidx="${tIdx}">${escapeHtml(tc.name)}</span>`;
+        }).join('');
+
+        const promptSummary = (dispatch?.content || '').trim().replace(/\n/g, ' ').slice(0, 50);
+        const totalSec = metrics.total_ms ? (metrics.total_ms / 1000).toFixed(1) : '0.5';
+
+        row.innerHTML = `
+          <div class="flex items-center justify-between">
+            <div class="flex items-center gap-1.5">
+              <span class="font-bold ${isSelected ? 'text-white' : 'text-zinc-300'}">#${String(turn.turn).padStart(2, '0')}</span>
+              <div class="flex items-center gap-1 flex-wrap">${toolBadges || '<span class="text-[10px] text-zinc-500">THINK</span>'}</div>
+            </div>
+            <span class="text-[11px] text-zinc-500 shrink-0">${totalSec}s</span>
+          </div>
+
+          ${promptSummary ? `<p class="text-[11px] text-zinc-400 font-sans truncate">${escapeHtml(promptSummary)}</p>` : ''}
+        `;
+
+        row.querySelectorAll('.tool-pill').forEach(btn => {
+          btn.addEventListener('click', (e) => {
+            e.stopPropagation();
+            state.activeTurnIndex = idx;
+            state.activeToolIndex = parseInt(btn.dataset.tidx, 10) || 0;
+            renderTimeline();
+            renderInspector();
+          });
+        });
+
+        row.addEventListener('click', () => {
+          state.activeTurnIndex = idx;
+          state.activeToolIndex = 0;
+          renderTimeline();
+          renderInspector();
+        });
+
+        spansListContainer.appendChild(row);
+      });
+
+      updateNavButtons();
+    }
+
+    function updateNavButtons() {
+      const visibleIndices = getVisibleTurnIndices();
+      const currentPos = visibleIndices.indexOf(state.activeTurnIndex);
+
+      btnPrevTurn.disabled = currentPos <= 0;
+      btnNextTurn.disabled = currentPos < 0 || currentPos >= visibleIndices.length - 1;
+
+      btnPrevTurn.classList.toggle('opacity-30', btnPrevTurn.disabled);
+      btnPrevTurn.classList.toggle('cursor-not-allowed', btnPrevTurn.disabled);
+      btnNextTurn.classList.toggle('opacity-30', btnNextTurn.disabled);
+      btnNextTurn.classList.toggle('cursor-not-allowed', btnNextTurn.disabled);
+    }
+
+    function renderInspector() {
+      const turns = state.activeTaskData?.turns || [];
+      const turn = turns[state.activeTurnIndex];
+      const task = state.activeTaskData?.task;
+
+      if (!turn) {
+        inspectorTurnIndicator.textContent = 'Turn --';
+        document.getElementById('execRationaleText').textContent = 'No matching turn selected.';
+        document.getElementById('actionToolBadge').textContent = 'NONE';
+        document.getElementById('actionTargetLabel').textContent = '--';
+        document.getElementById('actionStatusBadge').textContent = 'IDLE';
+        document.getElementById('argsMetaLabel').textContent = '--';
+        document.getElementById('outputMetaLabel').textContent = '--';
+        document.getElementById('actionArgsCode').textContent = '--';
+        document.getElementById('actionOutputCode').textContent = '--';
+        document.getElementById('diffCodeBlock').textContent = 'No active turn.';
+        document.getElementById('rawEventJson').textContent = '{}';
+        return;
+      }
+
+      inspectorTurnIndicator.textContent = `Turn #${turn.turn} of ${turns.length}`;
+
+      const dispatch = turn.dispatch;
+      const results = turn.results || [];
+      const toolCalls = dispatch?.tool_calls || [];
+      const metrics = dispatch?.metrics || {};
+
+      // Sync top header bar with active turn metrics
+      headerTurnsCount.textContent = `Turn ${turn.turn} / ${turns.length}`;
+      const activeTps = computeRustTps(metrics);
+      if (activeTps.decodeTps !== '--') {
+        headerDecodeSpeed.textContent = activeTps.decodeTps;
+        headerPrefillSpeed.textContent = activeTps.prefillTps;
+      } else {
+        headerDecodeSpeed.textContent = '-- tok/s';
+        headerPrefillSpeed.textContent = '-- tok/s';
+      }
+
+      // 1. UNIFIED EXECUTION TAB (Rationale + Action + Output)
+      const reasoningText = (dispatch?.content || '').trim();
+      const reasoningTokens = metrics.reasoning_tokens || 0;
+      
+      if (reasoningText) {
+        document.getElementById('execRationaleText').textContent = reasoningText;
+      } else if (reasoningTokens > 0) {
+        document.getElementById('execRationaleText').textContent = `[Deliberation Trace]: The model performed ${reasoningTokens.toLocaleString()} reasoning tokens in delta.reasoning_content before directly dispatching the tool call below.`;
+      } else {
+        document.getElementById('execRationaleText').textContent = '(Model directly dispatched the action without preceding rationale)';
+      }
+      document.getElementById('execReasoningTokens').textContent = `${reasoningTokens.toLocaleString()} reasoning tokens`;
+
+      // Multi-Tool Switcher if multiple tools exist
+      const toolSwitcherBar = document.getElementById('toolSwitcherBar');
+      const toolButtonsList = document.getElementById('toolButtonsList');
+      if (toolCalls.length > 1) {
+        toolSwitcherBar.classList.remove('hidden');
+        toolButtonsList.innerHTML = '';
+        toolCalls.forEach((tc, idx) => {
+          const btn = document.createElement('button');
+          const isAct = idx === state.activeToolIndex;
+          btn.className = `px-2 py-0.5 rounded text-[11px] font-bold border transition ${
+            isAct ? 'bg-zinc-200 text-black border-white shadow-sm' : 'bg-zinc-900 text-zinc-400 border-border hover:text-white'
+          }`;
+          btn.textContent = `${idx + 1}. ${tc.name}`;
+          btn.addEventListener('click', () => {
+            state.activeToolIndex = idx;
+            renderTimeline();
+            renderInspector();
+          });
+          toolButtonsList.appendChild(btn);
+        });
+      } else {
+        toolSwitcherBar.classList.add('hidden');
+      }
+
+      const activeToolCall = toolCalls[state.activeToolIndex] || toolCalls[0];
+      const activeRes = results.find(r => r.tool_call_id === activeToolCall?.id) || results[state.activeToolIndex];
+
+      const argsMetaLabel = document.getElementById('argsMetaLabel');
+      const outputMetaLabel = document.getElementById('outputMetaLabel');
+
+      if (activeToolCall) {
+        document.getElementById('actionToolBadge').textContent = activeToolCall.name.toUpperCase();
+        
+        let targetLabel = '--';
+        let paramCount = 0;
+        try {
+          const parsed = JSON.parse(activeToolCall.arguments);
+          paramCount = Object.keys(parsed).length;
+          targetLabel = parsed.path || parsed.command || parsed.query || '--';
+        } catch {}
+        document.getElementById('actionTargetLabel').textContent = targetLabel;
+        argsMetaLabel.textContent = `${paramCount} params • ${activeToolCall.arguments.length} chars`;
+
+        const statusBadge = document.getElementById('actionStatusBadge');
+        if (!activeRes) {
+          statusBadge.textContent = 'PENDING';
+          statusBadge.className = 'text-[11px] px-1.5 py-0.5 rounded font-bold bg-amber-950 text-amber-400 border border-amber-800 animate-pulse';
+        } else if (activeRes.is_error) {
+          statusBadge.textContent = 'FAILED';
+          statusBadge.className = 'text-[11px] px-1.5 py-0.5 rounded font-bold bg-rose-950 text-rose-400 border border-rose-800';
+        } else {
+          statusBadge.textContent = 'SUCCESS';
+          statusBadge.className = 'text-[11px] px-1.5 py-0.5 rounded font-bold bg-emerald-950 text-emerald-400 border border-emerald-800';
+        }
+
+        let argsPretty = activeToolCall.arguments;
+        try { argsPretty = JSON.stringify(JSON.parse(activeToolCall.arguments), null, 2); } catch {}
+        
+        const argsEl = document.getElementById('actionArgsCode');
+        argsEl.textContent = argsPretty;
+        Prism.highlightElement(argsEl);
+
+        const outText = activeRes ? (activeRes.output || '(empty output)') : 'Executing tool call...';
+        const lineCount = outText.split('\n').length;
+        outputMetaLabel.textContent = `${lineCount} lines • ${outText.length} bytes`;
+
+        const outEl = document.getElementById('actionOutputCode');
+        outEl.textContent = outText;
+        Prism.highlightElement(outEl);
+      } else {
+        document.getElementById('actionToolBadge').textContent = 'NONE';
+        document.getElementById('actionTargetLabel').textContent = 'No tool call in this turn';
+        document.getElementById('actionStatusBadge').textContent = 'IDLE';
+        document.getElementById('actionStatusBadge').className = 'text-[11px] px-1.5 py-0.5 rounded font-bold bg-zinc-900 text-zinc-500 border border-zinc-800';
+        argsMetaLabel.textContent = '0 params';
+        outputMetaLabel.textContent = '0 lines';
+        document.getElementById('actionArgsCode').textContent = '(none)';
+        document.getElementById('actionOutputCode').textContent = '(none)';
+      }
+
+      // 2. DIFF TAB (Active tool priority, or first modifying tool in turn)
+      const editCall = (activeToolCall?.name === 'edit_file' ? activeToolCall : null) || toolCalls.find(tc => tc.name === 'edit_file');
+      const writeCall = (activeToolCall?.name === 'write_file' ? activeToolCall : null) || toolCalls.find(tc => tc.name === 'write_file');
+      const diffCodeBlock = document.getElementById('diffCodeBlock');
+
+      if (editCall) {
+        try {
+          const args = JSON.parse(editCall.arguments);
+          document.getElementById('diffFileLabel').textContent = `Target: ${args.path || 'file'}`;
+          document.getElementById('diffModeLabel').textContent = 'In-Memory AST Replacement';
+          const diffText = `--- a/${args.path}\n+++ b/${args.path}\n@@ Exact Substring Replacement @@\n- ${args.target_content.replace(/\n/g, '\n- ')}\n+ ${args.replacement_content.replace(/\n/g, '\n+ ')}`;
+          diffCodeBlock.textContent = diffText;
+        } catch {
+          diffCodeBlock.textContent = 'Failed to parse edit_file arguments';
+        }
+      } else if (writeCall) {
+        try {
+          const args = JSON.parse(writeCall.arguments);
+          document.getElementById('diffFileLabel').textContent = `Target: ${args.path || 'file'}`;
+          document.getElementById('diffModeLabel').textContent = `Created File (${args.content?.length || 0} bytes)`;
+          diffCodeBlock.textContent = `+++ b/${args.path}\n${args.content?.slice(0, 4000) || ''}`;
+        } catch {
+          diffCodeBlock.textContent = 'Failed to parse write_file arguments';
+        }
+      } else {
+        document.getElementById('diffFileLabel').textContent = 'Target: --';
+        document.getElementById('diffModeLabel').textContent = 'Non-Modifying Operation';
+        diffCodeBlock.textContent = `This turn contains non-modifying operations (${toolCalls.map(t => t.name).join(', ') || 'deliberation only'}).`;
+      }
+      Prism.highlightElement(diffCodeBlock);
+
+      // 3. TELEMETRY TAB (matching src/telemetry.rs)
+      const tps = computeRustTps(metrics);
+      document.getElementById('telDecodeSpeed').textContent = tps.decodeTps;
+      document.getElementById('telPrefillSpeed').textContent = tps.prefillTps;
+      document.getElementById('telTtft').textContent = metrics.ttft_ms ? `${(metrics.ttft_ms / 1000).toFixed(2)}s` : '--';
+      document.getElementById('telDecodeTime').textContent = `${(tps.decodeMs / 1000).toFixed(2)}s`;
+
+      document.getElementById('telPromptTok').textContent = (metrics.prompt_tokens || 0).toLocaleString();
+      document.getElementById('telCachedTok').textContent = (metrics.cached_tokens || 0).toLocaleString();
+      document.getElementById('telReasonTok').textContent = (metrics.reasoning_tokens || 0).toLocaleString();
+      document.getElementById('telCompTok').textContent = (metrics.completion_tokens || 0).toLocaleString();
+      document.getElementById('telTotalMs').textContent = `${(metrics.total_ms || 0).toFixed(0)} ms`;
+      document.getElementById('taskPromptText').textContent = task?.prompt || 'No prompt available';
+
+      // 4. RAW JSON TAB
+      const rawEl = document.getElementById('rawEventJson');
+      rawEl.textContent = JSON.stringify(turn, null, 2);
+      Prism.highlightElement(rawEl);
+
+      // Auto-scroll timeline to selected row
+      const selectedRow = document.getElementById(`turn-row-${state.activeTurnIndex}`);
+      if (selectedRow) {
+        selectedRow.scrollIntoView({ block: 'nearest', behavior: 'smooth' });
+      }
+    }
+
+    function switchTab(tabName) {
+      document.querySelectorAll('.tab-btn').forEach(b => {
+        b.className = 'tab-btn h-full px-3 border-b-2 border-transparent text-zinc-400 hover:text-zinc-200 flex items-center gap-1.5';
+      });
+      const activeBtn = document.querySelector(`.tab-btn[data-tab="${tabName}"]`);
+      if (activeBtn) {
+        activeBtn.className = 'tab-btn active h-full px-3 border-b-2 border-white text-white font-medium flex items-center gap-1.5';
+      }
+
+      document.querySelectorAll('.tab-panel').forEach(p => p.classList.add('hidden'));
+      const targetPanel = document.getElementById(`panel-${tabName}`);
+      if (targetPanel) {
+        targetPanel.classList.remove('hidden');
+      }
+      state.activeTab = tabName;
+
+      // Ensure active code block in selected tab is rendered
+      if (tabName === 'diff') Prism.highlightElement(document.getElementById('diffCodeBlock'));
+      if (tabName === 'raw') Prism.highlightElement(document.getElementById('rawEventJson'));
+      if (tabName === 'execution') {
+        Prism.highlightElement(document.getElementById('actionArgsCode'));
+        Prism.highlightElement(document.getElementById('actionOutputCode'));
+      }
+    }
+
+    function switchFilter(filterName) {
+      document.querySelectorAll('.filter-btn').forEach(b => {
+        b.className = 'filter-btn px-2 py-0.5 rounded bg-zinc-900 text-zinc-400 hover:text-white border border-zinc-800 flex items-center gap-1';
+      });
+      const btn = document.querySelector(`.filter-btn[data-filter="${filterName}"]`);
+      if (btn) {
+        btn.className = 'filter-btn active px-2 py-0.5 rounded bg-zinc-200 text-black font-semibold flex items-center gap-1';
+      }
+      state.activeFilter = filterName;
+
+      const visibleIndices = getVisibleTurnIndices();
+      if (visibleIndices.length > 0 && !visibleIndices.includes(state.activeTurnIndex)) {
+        state.activeTurnIndex = visibleIndices[0];
+        state.activeToolIndex = 0;
+      }
+      renderTimeline();
+      renderInspector();
+    }
+
+    document.getElementById('inspectorTabs').addEventListener('click', (e) => {
+      const btn = e.target.closest('.tab-btn');
+      if (btn) switchTab(btn.dataset.tab);
+    });
+
+    document.getElementById('spanFilters').addEventListener('click', (e) => {
+      const btn = e.target.closest('.filter-btn');
+      if (btn) switchFilter(btn.dataset.filter);
+    });
+
+    btnPrevTurn.addEventListener('click', () => {
+      const visibleIndices = getVisibleTurnIndices();
+      const currentPos = visibleIndices.indexOf(state.activeTurnIndex);
+      if (currentPos > 0) {
+        state.activeTurnIndex = visibleIndices[currentPos - 1];
+        state.activeToolIndex = 0;
+        renderTimeline();
+        renderInspector();
+      }
+    });
+
+    btnNextTurn.addEventListener('click', () => {
+      const visibleIndices = getVisibleTurnIndices();
+      const currentPos = visibleIndices.indexOf(state.activeTurnIndex);
+      if (currentPos >= 0 && currentPos < visibleIndices.length - 1) {
+        state.activeTurnIndex = visibleIndices[currentPos + 1];
+        state.activeToolIndex = 0;
+        renderTimeline();
+        renderInspector();
+      }
+    });
+
+    window.addEventListener('keydown', (e) => {
+      if (e.target.tagName === 'INPUT') {
+        if (e.key === 'Escape') {
+          taskSearchInput.value = '';
+          taskSearchInput.blur();
+          renderTasksList();
+        }
+        return;
+      }
+
+      // Tab switcher shortcuts: 1, 2, 3, 4
+      if (e.key === '1') switchTab('execution');
+      else if (e.key === '2') switchTab('diff');
+      else if (e.key === '3') switchTab('telemetry');
+      else if (e.key === '4') switchTab('raw');
+      
+      // Navigation: Up/Down or j/k
+      else if (e.key === 'ArrowUp' || e.key === 'k') btnPrevTurn.click();
+      else if (e.key === 'ArrowDown' || e.key === 'j') btnNextTurn.click();
+      
+      // Multi-tool cycling: Left/Right or h/l
+      else if (e.key === 'ArrowLeft' || e.key === 'h') {
+        const turns = state.activeTaskData?.turns || [];
+        const turn = turns[state.activeTurnIndex];
+        const toolCalls = turn?.dispatch?.tool_calls || [];
+        if (toolCalls.length > 1 && state.activeToolIndex > 0) {
+          state.activeToolIndex--;
+          renderTimeline();
+          renderInspector();
+        }
+      } else if (e.key === 'ArrowRight' || e.key === 'l') {
+        const turns = state.activeTaskData?.turns || [];
+        const turn = turns[state.activeTurnIndex];
+        const toolCalls = turn?.dispatch?.tool_calls || [];
+        if (toolCalls.length > 1 && state.activeToolIndex < toolCalls.length - 1) {
+          state.activeToolIndex++;
+          renderTimeline();
+          renderInspector();
+        }
+      }
+      
+      // Filter cycle: f
+      else if (e.key === 'f') {
+        const filters = ['all', 'edit', 'bash', 'search', 'read'];
+        const nextIdx = (filters.indexOf(state.activeFilter) + 1) % filters.length;
+        switchFilter(filters[nextIdx]);
+      }
+      
+      // Search shortcut: /
+      else if (e.key === '/') {
+        e.preventDefault();
+        taskSearchInput.focus();
+      }
+      
+      // Copy shortcut: c
+      else if (e.key === 'c') {
+        btnCopyInspector.click();
+      }
+    });
+
+    taskSearchInput.addEventListener('input', () => renderTasksList());
+    taskSearchClearBtn.addEventListener('click', () => {
+      taskSearchInput.value = '';
+      taskSearchInput.focus();
+      renderTasksList();
+    });
+
+    btnRefresh.addEventListener('click', async () => {
+      btnRefresh.classList.add('animate-spin');
+      await loadTasksInitial();
+      if (state.activeTaskId) await reloadActiveTaskData();
+      setTimeout(() => btnRefresh.classList.remove('animate-spin'), 600);
+    });
+
+    btnLiveSync.addEventListener('click', () => {
+      state.autoSync = !state.autoSync;
+      if (state.autoSync) {
+        syncDot.className = 'w-2 h-2 rounded-full bg-emerald-500';
+        syncText.textContent = 'Sync Active';
+      } else {
+        syncDot.className = 'w-2 h-2 rounded-full bg-zinc-600';
+        syncText.textContent = 'Sync Paused';
+      }
+    });
+
+    btnCopyInspector.addEventListener('click', () => {
+      let copyText = '';
+      const turns = state.activeTaskData?.turns || [];
+      const turn = turns[state.activeTurnIndex];
+      const metrics = turn?.dispatch?.metrics || {};
+
+      if (state.activeTab === 'execution') {
+        const tool = turn?.dispatch?.tool_calls?.[state.activeToolIndex];
+        const out = document.getElementById('actionOutputCode').textContent;
+        copyText = `Tool: ${tool?.name || 'none'}\nTarget: ${document.getElementById('actionTargetLabel').textContent}\nOutput:\n${out}`;
+      } else if (state.activeTab === 'diff') {
+        copyText = document.getElementById('diffCodeBlock').textContent;
+      } else if (state.activeTab === 'telemetry') {
+        const tps = computeRustTps(metrics);
+        copyText = `Turn #${turn?.turn || 0} Telemetry:
+- Decode Rate: ${tps.decodeTps}
+- Prefill Rate: ${tps.prefillTps}
+- TTFT Latency: ${metrics.ttft_ms ? (metrics.ttft_ms / 1000).toFixed(2) + 's' : '--'}
+- Pure Decode Time: ${(tps.decodeMs / 1000).toFixed(2)}s
+- Prompt Tokens: ${metrics.prompt_tokens || 0}
+- Cached Tokens: ${metrics.cached_tokens || 0}
+- Reasoning Tokens: ${metrics.reasoning_tokens || 0}
+- Completion Tokens: ${metrics.completion_tokens || 0}
+- Total Turn Latency: ${metrics.total_ms || 0} ms`;
+      } else {
+        copyText = document.getElementById('rawEventJson').textContent;
+      }
+
+      navigator.clipboard.writeText(copyText).then(() => {
+        copyBtnLabel.textContent = 'Copied!';
+        btnCopyInspector.className = 'px-2 py-0.5 rounded bg-emerald-950 text-emerald-400 border border-emerald-800 transition flex items-center gap-1';
+        setTimeout(() => {
+          copyBtnLabel.textContent = 'Copy';
+          btnCopyInspector.className = 'px-2 py-0.5 rounded bg-zinc-900 hover:bg-zinc-800 text-zinc-300 border border-zinc-800 transition flex items-center gap-1';
+        }, 1200);
+      });
+    });
+
+    function escapeHtml(str) {
+      return String(str || '')
+        .replace(/&/g, '&amp;')
+        .replace(/</g, '&lt;')
+        .replace(/>/g, '&gt;')
+        .replace(/"/g, '&quot;')
+        .replace(/'/g, '&#039;');
+    }
+
+    loadTasksInitial();
+    setInterval(pollCheck, 1500);
+    lucide.createIcons();
+  </script>
+</body>
+</html>

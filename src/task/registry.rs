@@ -234,6 +234,10 @@ impl TaskRegistry {
         }
     }
 
+    pub fn state_dir(&self) -> &StateDir {
+        &self.state
+    }
+
     /// Subscribe to a specific task's terminal-transition channel.
     ///
     /// The returned receiver is woken (a value is received) whenever that

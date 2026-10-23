@@ -63,6 +63,15 @@ pub enum Command {
         #[arg(long)]
         port: Option<u16>,
     },
+    /// Run the interactive Castor Trace visualizer web server
+    Trace {
+        /// Override the state dir root
+        #[arg(long)]
+        state_dir: Option<String>,
+        /// Override the listen port (default: 18030)
+        #[arg(long)]
+        port: Option<u16>,
+    },
     /// Manage the engine (status | start | stop)
     Server {
         /// Action: status, start, or stop
@@ -580,6 +589,16 @@ pub async fn run_with(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
                 return Ok(());
             }
             server.serve(port).await?;
+        }
+        Command::Trace { state_dir, port } => {
+            let loaded = config::load().map_err(|e| format!("config: {e}"))?;
+            let state = match state_dir {
+                Some(dir) => state::StateDir::new(dir),
+                None => state::StateDir::from_config(&loaded.config),
+            };
+            let _ = state.ensure();
+            let port = port.unwrap_or(18030);
+            task::trace::serve_trace(&state, port).await?;
         }
         Command::Server { action } => {
             let loaded = config::load().map_err(|e| format!("config: {e}"))?;

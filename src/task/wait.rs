@@ -81,6 +81,9 @@ impl StatusServer {
             .route("/task/{id}/wait", get(wait_handler))
             .route("/task/{id}/status", get(status_handler))
             .with_state(self.clone())
+            .merge(super::trace::trace_router(
+                self.inner.registry.state_dir().clone(),
+            ))
     }
 
     /// Listen on the given port. Blocks until the server is dropped or the
