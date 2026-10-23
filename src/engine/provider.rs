@@ -1,6 +1,7 @@
 //! OpenAI-compatible chat client: streaming SSE and non-streaming.
 
 use std::collections::BTreeMap;
+use std::sync::LazyLock;
 use std::time::Instant;
 
 use futures_util::StreamExt;
@@ -495,11 +496,108 @@ impl EngineClient {
     }
 }
 
+static RE_TOOL_CALL: LazyLock<regex::Regex> = LazyLock::new(|| {
+    regex::Regex::new(r"(?s)<tool_call>(.*?)</tool_call>").expect("valid tool_call regex")
+});
+static RE_FUNC: LazyLock<regex::Regex> = LazyLock::new(|| {
+    regex::Regex::new(r"(?s)<function=([a-zA-Z0-9_\-]+)>(.*?)</function>").expect("valid function regex")
+});
+static RE_PARAM: LazyLock<regex::Regex> = LazyLock::new(|| {
+    regex::Regex::new(r"(?s)<parameter=([a-zA-Z0-9_\-]+)>(.*?)</parameter>").expect("valid parameter regex")
+});
+
+fn extract_fallback_tool_calls(raw_content: &str) -> (String, Vec<ToolCall>) {
+    let mut tool_calls = Vec::new();
+
+    for cap in RE_TOOL_CALL.captures_iter(raw_content) {
+        let inner = cap.get(1).map(|m| m.as_str().trim()).unwrap_or_default();
+        if inner.is_empty() {
+            continue;
+        }
+
+        // Branch 1: Qwen / Bonsai XML function format (<function=NAME>...</function>)
+        if let Some(func_cap) = RE_FUNC.captures(inner) {
+            let func_name = func_cap.get(1).map(|m| m.as_str().trim()).unwrap_or_default();
+            let body = func_cap.get(2).map(|m| m.as_str()).unwrap_or_default();
+
+            let mut params_map = serde_json::Map::new();
+            for p_cap in RE_PARAM.captures_iter(body) {
+                let p_name = p_cap.get(1).map(|m| m.as_str().trim()).unwrap_or_default();
+                let p_val_raw = p_cap.get(2).map(|m| m.as_str()).unwrap_or_default();
+                let mut p_val = p_val_raw;
+                if let Some(stripped) = p_val.strip_prefix("\r\n") {
+                    p_val = stripped;
+                } else if let Some(stripped) = p_val.strip_prefix('\n') {
+                    p_val = stripped;
+                }
+                if let Some(stripped) = p_val.strip_suffix("\r\n") {
+                    p_val = stripped;
+                } else if let Some(stripped) = p_val.strip_suffix('\n') {
+                    p_val = stripped;
+                }
+
+                let val_json: Value = serde_json::from_str(p_val.trim())
+                    .unwrap_or_else(|_| Value::String(p_val.to_string()));
+                params_map.insert(p_name.to_string(), val_json);
+            }
+
+            let args_str = if params_map.is_empty() {
+                if let Ok(Value::Object(map)) = serde_json::from_str(body.trim()) {
+                    Value::Object(map).to_string()
+                } else {
+                    "{}".to_string()
+                }
+            } else {
+                Value::Object(params_map).to_string()
+            };
+
+            let index = tool_calls.len();
+            tool_calls.push(ToolCall {
+                id: format!("call_fallback_{index}"),
+                name: func_name.to_string(),
+                arguments: args_str,
+                index,
+            });
+        }
+        // Branch 2: Hermes / DeepSeek / Mistral JSON format ({"name": "...", "arguments": ...})
+        else if let Ok(Value::Object(obj)) = serde_json::from_str::<Value>(inner)
+            && let Some(name) = obj.get("name").and_then(Value::as_str)
+        {
+            let args_str = if let Some(args) = obj.get("arguments") {
+                if let Some(s) = args.as_str() {
+                    s.to_string()
+                } else {
+                    args.to_string()
+                }
+            } else if let Some(params) = obj.get("parameters") {
+                params.to_string()
+            } else {
+                "{}".to_string()
+            };
+
+            let index = tool_calls.len();
+            tool_calls.push(ToolCall {
+                id: format!("call_fallback_{index}"),
+                name: name.to_string(),
+                arguments: args_str,
+                index,
+            });
+        }
+    }
+
+    if tool_calls.is_empty() {
+        (raw_content.to_string(), tool_calls)
+    } else {
+        let stripped = RE_TOOL_CALL.replace_all(raw_content, "").trim().to_string();
+        (stripped, tool_calls)
+    }
+}
+
 #[allow(clippy::too_many_arguments)] // each argument is a distinct per-turn metric
 fn assemble(
     content: &str,
-    tool_calls: BTreeMap<usize, ToolCall>,
-    finish_reason: Option<String>,
+    mut tool_calls: BTreeMap<usize, ToolCall>,
+    mut finish_reason: Option<String>,
     ttft: Option<std::time::Duration>,
     prompt_tokens: Option<u64>,
     cached_tokens: Option<u64>,
@@ -507,17 +605,35 @@ fn assemble(
     reasoning_tokens: Option<u64>,
     t0: Instant,
 ) -> Completion {
+    let mut final_content = content.to_string();
+
+    // Fallback tool call extraction: if upstream server emitted raw XML or JSON
+    // tool calls inside content (common with llama.cpp, Qwen chat templates,
+    // or when reasoning tokens precede function calls), extract them into structured ToolCalls.
+    if tool_calls.is_empty() {
+        let (stripped, fallback_tcs) = extract_fallback_tool_calls(content);
+        if !fallback_tcs.is_empty() {
+            final_content = stripped;
+            for tc in fallback_tcs {
+                tool_calls.insert(tc.index, tc);
+            }
+            if finish_reason.is_none() || finish_reason.as_deref() == Some("stop") {
+                finish_reason = Some("tool_calls".to_string());
+            }
+        }
+    }
+
     let total = t0.elapsed();
     let tokens = completion_tokens.or_else(|| {
-        if content.is_empty() {
+        if final_content.is_empty() {
             None
         } else {
-            Some((content.len() / 4).max(1) as u64)
+            Some((final_content.len() / 4).max(1) as u64)
         }
     });
     let tokens_per_sec = tokens.map(|t| t as f64 / total.as_secs_f64());
     Completion {
-        content: content.to_string(),
+        content: final_content,
         tool_calls: tool_calls.into_values().collect(),
         finish_reason,
         metrics: Metrics {
@@ -897,4 +1013,70 @@ mod tests {
         let json = m.to_json();
         assert!(json["content"].is_string());
     }
+
+    #[test]
+    fn test_extract_fallback_qwen_xml_single_param() {
+        let raw = "I will check the files.\n\n<tool_call>\n<function=bash>\n<parameter=command>\ncargo test config\n</parameter>\n</function>\n</tool_call>";
+        let (stripped, tcs) = extract_fallback_tool_calls(raw);
+        assert_eq!(stripped, "I will check the files.");
+        assert_eq!(tcs.len(), 1);
+        assert_eq!(tcs[0].name, "bash");
+        assert_eq!(tcs[0].arguments, r#"{"command":"cargo test config"}"#);
+    }
+
+    #[test]
+    fn test_extract_fallback_qwen_xml_multi_param() {
+        let raw = "<tool_call>\n<function=edit_file>\n<parameter=path>\nsrc/config.rs\n</parameter>\n<parameter=old_str>\nlet a = 1;\n</parameter>\n<parameter=new_str>\nlet a = 2;\n</parameter>\n</function>\n</tool_call>";
+        let (stripped, tcs) = extract_fallback_tool_calls(raw);
+        assert_eq!(stripped, "");
+        assert_eq!(tcs.len(), 1);
+        assert_eq!(tcs[0].name, "edit_file");
+        let parsed: Value = serde_json::from_str(&tcs[0].arguments).unwrap();
+        assert_eq!(parsed["path"], "src/config.rs");
+        assert_eq!(parsed["old_str"], "let a = 1;");
+        assert_eq!(parsed["new_str"], "let a = 2;");
+    }
+
+    #[test]
+    fn test_extract_fallback_qwen_xml_parallel() {
+        let raw = "<tool_call>\n<function=read_file>\n<parameter=path>\nsrc/lib.rs\n</parameter>\n</function>\n</tool_call>\n<tool_call>\n<function=read_file>\n<parameter=path>\nsrc/main.rs\n</parameter>\n</function>\n</tool_call>";
+        let (stripped, tcs) = extract_fallback_tool_calls(raw);
+        assert_eq!(stripped, "");
+        assert_eq!(tcs.len(), 2);
+        assert_eq!(tcs[0].name, "read_file");
+        assert_eq!(tcs[0].index, 0);
+        assert_eq!(tcs[1].name, "read_file");
+        assert_eq!(tcs[1].index, 1);
+    }
+
+    #[test]
+    fn test_extract_fallback_hermes_json() {
+        let raw = "Executing now:\n<tool_call>\n{\"name\": \"bash\", \"arguments\": {\"command\": \"cargo test\"}}\n</tool_call>";
+        let (stripped, tcs) = extract_fallback_tool_calls(raw);
+        assert_eq!(stripped, "Executing now:");
+        assert_eq!(tcs.len(), 1);
+        assert_eq!(tcs[0].name, "bash");
+        assert_eq!(tcs[0].arguments, r#"{"command":"cargo test"}"#);
+    }
+
+    #[test]
+    fn test_assemble_populates_fallback_tool_calls() {
+        let raw = "<tool_call>\n<function=bash>\n<parameter=command>\necho 1\n</parameter>\n</function>\n</tool_call>";
+        let completion = assemble(
+            raw,
+            BTreeMap::new(),
+            Some("stop".into()),
+            None,
+            None,
+            None,
+            None,
+            None,
+            Instant::now(),
+        );
+        assert_eq!(completion.content, "");
+        assert_eq!(completion.tool_calls.len(), 1);
+        assert_eq!(completion.tool_calls[0].name, "bash");
+        assert_eq!(completion.finish_reason.as_deref(), Some("tool_calls"));
+    }
 }
+
