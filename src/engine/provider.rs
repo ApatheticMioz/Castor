@@ -352,6 +352,15 @@ impl EngineClient {
                     let Some(delta) = choice.get("delta").or_else(|| choice.get("message")) else {
                         continue;
                     };
+                    if let Some(r) = delta
+                        .get("reasoning_content")
+                        .or_else(|| delta.get("reasoning"))
+                        .and_then(Value::as_str)
+                        && !r.is_empty()
+                        && ttft.is_none()
+                    {
+                        ttft = Some(t0.elapsed());
+                    }
                     if let Some(c) = delta.get("content").and_then(Value::as_str) {
                         if !c.is_empty() && ttft.is_none() {
                             ttft = Some(t0.elapsed());
