@@ -825,4 +825,271 @@ mod tests {
         let _ = sem.release(&second);
         assert_eq!(sem.list_slots().len(), 0);
     }
+
+    #[test]
+    fn test_concurrency_4_agents_acquire_distinct_slots() {
+        let state = tmp_state();
+        let sem = TaskSemaphore::new(&state, 4);
+        let rt = rt();
+
+        let leases = rt.block_on(async {
+            let mut handles = Vec::new();
+            for i in 0..4 {
+                let s = sem.clone();
+                let task_id = format!("agent_{i}");
+                handles.push(tokio::spawn(async move { s.acquire(&task_id).await }));
+            }
+            let mut out = Vec::new();
+            for h in handles {
+                out.push(
+                    tokio::time::timeout(Duration::from_millis(1000), h)
+                        .await
+                        .unwrap()
+                        .unwrap(),
+                );
+            }
+            out
+        });
+
+        assert_eq!(leases.len(), 4);
+        let mut slot_indices: Vec<usize> = leases.iter().map(|l| l.index).collect();
+        slot_indices.sort_unstable();
+        assert_eq!(slot_indices, vec![0, 1, 2, 3]);
+
+        assert_eq!(sem.list_slots().len(), 4);
+        let status = sem.slot_status(std::process::id() as u32);
+        assert!(status.is_fully_occupied);
+        assert_eq!(status.total_capacity, 4);
+        assert_eq!(status.slots.len(), 4);
+
+        for l in &leases {
+            assert_eq!(sem.release(l), ReleaseResult::Released);
+        }
+        assert_eq!(sem.list_slots().len(), 0);
+    }
+
+    #[test]
+    fn test_concurrency_3_agents_in_4_slots_leaves_headroom() {
+        let state = tmp_state();
+        let sem = TaskSemaphore::new(&state, 4);
+        let rt = rt();
+
+        let leases = rt.block_on(async {
+            let mut out = Vec::new();
+            for i in 0..3 {
+                let task_id = format!("agent_{i}");
+                out.push(sem.acquire(&task_id).await);
+            }
+            out
+        });
+
+        assert_eq!(leases.len(), 3);
+        assert_eq!(sem.list_slots().len(), 3);
+        let status = sem.slot_status(std::process::id() as u32);
+        assert!(!status.is_fully_occupied);
+        assert_eq!(status.total_capacity, 4);
+
+        // Immediate 4th acquire succeeds without blocking
+        let agent4 = rt.block_on(async {
+            tokio::time::timeout(Duration::from_millis(200), sem.acquire("agent_3"))
+                .await
+                .expect("4th agent should acquire immediately")
+        });
+        assert_eq!(sem.list_slots().len(), 4);
+
+        // Release slot 1 (agent_1)
+        assert_eq!(sem.release(&leases[1]), ReleaseResult::Released);
+        assert_eq!(sem.list_slots().len(), 3);
+
+        // 5th acquire should immediately reclaim slot 1
+        let agent5 = rt.block_on(async {
+            tokio::time::timeout(Duration::from_millis(200), sem.acquire("agent_4"))
+                .await
+                .expect("5th agent should claim freed slot immediately")
+        });
+        assert_eq!(agent5.index, leases[1].index);
+        assert_eq!(sem.list_slots().len(), 4);
+
+        // Clean up
+        sem.release(&leases[0]);
+        sem.release(&leases[2]);
+        sem.release(&agent4);
+        sem.release(&agent5);
+        assert_eq!(sem.list_slots().len(), 0);
+    }
+
+    #[test]
+    fn test_concurrency_10_agents_4_slots_bounded_fifo() {
+        use std::sync::atomic::{AtomicUsize, Ordering as Ord};
+
+        let state = tmp_state();
+        let sem = TaskSemaphore::with_poll_interval(&state, 4, 20);
+        let rt = rt();
+
+        let active_count = Arc::new(AtomicUsize::new(0));
+        let max_observed = Arc::new(AtomicUsize::new(0));
+        let total_completed = Arc::new(AtomicUsize::new(0));
+
+        rt.block_on(async {
+            let mut handles = Vec::new();
+            for i in 0..10 {
+                let s = sem.clone();
+                let active = active_count.clone();
+                let max_obs = max_observed.clone();
+                let done = total_completed.clone();
+                let task_id = format!("worker_{i}");
+
+                handles.push(tokio::spawn(async move {
+                    let lease = s.acquire(&task_id).await;
+                    let cur = active.fetch_add(1, Ord::SeqCst) + 1;
+                    max_obs.fetch_max(cur, Ord::SeqCst);
+
+                    // Concurrency invariant: active slots MUST never exceed capacity of 4
+                    assert!(cur <= 4, "active count {cur} exceeded max_slots 4!");
+
+                    // Simulate work (15ms)
+                    tokio::time::sleep(Duration::from_millis(15)).await;
+
+                    active.fetch_sub(1, Ord::SeqCst);
+                    let res = s.release(&lease);
+                    assert_eq!(res, ReleaseResult::Released);
+                    done.fetch_add(1, Ord::SeqCst);
+                }));
+            }
+
+            for h in handles {
+                tokio::time::timeout(Duration::from_secs(10), h)
+                    .await
+                    .expect("task timed out")
+                    .unwrap();
+            }
+        });
+
+        assert_eq!(total_completed.load(Ord::SeqCst), 10);
+        assert_eq!(max_observed.load(Ord::SeqCst), 4);
+        assert_eq!(active_count.load(Ord::SeqCst), 0);
+        assert_eq!(sem.list_slots().len(), 0);
+    }
+
+    #[test]
+    fn test_multi_process_4_slots_alien_exclusion() {
+        let state = tmp_state();
+        let sem = TaskSemaphore::with_poll_interval(&state, 4, 50);
+        let bin = castor_bin();
+        assert!(bin.exists(), "castor binary not found at {bin:?}");
+
+        // Spawn 4 separate child processes each claiming 1 slot and holding for 2 seconds
+        let mut children = Vec::new();
+        for i in 0..4 {
+            let child = std::process::Command::new(&bin)
+                .args(["__sem_child"])
+                .arg(state.root().to_str().unwrap())
+                .arg(format!("child_task_{i}"))
+                .arg("--max-slots")
+                .arg("4")
+                .stdout(std::process::Stdio::piped())
+                .stderr(std::process::Stdio::null())
+                .spawn()
+                .unwrap();
+            children.push(child);
+        }
+
+        use std::io::BufRead;
+        // Wait for all 4 children to output "HELD"
+        for child in &mut children {
+            let stdout = child.stdout.take().unwrap();
+            let mut reader = std::io::BufReader::new(stdout);
+            let mut line = String::new();
+            let deadline = std::time::Instant::now() + Duration::from_secs(10);
+            loop {
+                let n = reader.read_line(&mut line).unwrap();
+                if n == 0 {
+                    panic!("child exited before HELD");
+                }
+                if line.contains("HELD") {
+                    break;
+                }
+                if std::time::Instant::now() > deadline {
+                    panic!("timeout waiting for HELD");
+                }
+            }
+        }
+
+        // Now all 4 slots are occupied by alien processes!
+        assert_eq!(sem.list_slots().len(), 4);
+
+        // A 5th acquire from the parent process MUST block!
+        let sem_clone = sem.clone();
+        let blocked = rt().block_on(async move {
+            let f = sem_clone.acquire("parent_task_5th");
+            tokio::time::timeout(Duration::from_millis(300), f).await
+        });
+        assert!(
+            blocked.is_err(),
+            "5th acquire must be blocked when 4 slots are occupied"
+        );
+
+        // Wait for children to finish (they hold for ~3s and exit)
+        for mut child in children {
+            let status = child.wait().unwrap();
+            assert!(status.success());
+        }
+
+        // Now parent should be able to acquire immediately
+        let lease = rt().block_on(async {
+            tokio::time::timeout(Duration::from_secs(5), sem.acquire("parent_task_after_drain"))
+                .await
+                .expect("parent acquire should succeed after drain")
+        });
+        assert_eq!(lease.task_id, "parent_task_after_drain");
+        assert_eq!(sem.release(&lease), ReleaseResult::Released);
+        assert_eq!(sem.list_slots().len(), 0);
+    }
+
+    #[test]
+    fn test_multi_slot_crashed_tenant_reclaim() {
+        let state = tmp_state();
+        let sem = TaskSemaphore::new(&state, 4);
+
+        // Artificially inject a dead lease at slot 1 and slot 3 (PID 99999999)
+        let dead_lease_1 = Lease {
+            tenant: 99999999,
+            task_id: "crashed_1".into(),
+            at: 1000,
+            hb: 1000,
+        };
+        let dead_lease_3 = Lease {
+            tenant: 99999999,
+            task_id: "crashed_3".into(),
+            at: 1000,
+            hb: 1000,
+        };
+        fs::write(
+            sem.slot_path(1),
+            serde_json::to_string(&dead_lease_1).unwrap(),
+        )
+        .unwrap();
+        fs::write(
+            sem.slot_path(3),
+            serde_json::to_string(&dead_lease_3).unwrap(),
+        )
+        .unwrap();
+
+        // Clear reclaimable slots
+        sem.clear_reclaimable();
+        assert_eq!(sem.list_slots().len(), 0);
+
+        // Now acquire all 4 slots cleanly
+        let l0 = rt().block_on(sem.acquire("t0"));
+        let l1 = rt().block_on(sem.acquire("t1"));
+        let l2 = rt().block_on(sem.acquire("t2"));
+        let l3 = rt().block_on(sem.acquire("t3"));
+        assert_eq!(sem.list_slots().len(), 4);
+
+        sem.release(&l0);
+        sem.release(&l1);
+        sem.release(&l2);
+        sem.release(&l3);
+        assert_eq!(sem.list_slots().len(), 0);
+    }
 }

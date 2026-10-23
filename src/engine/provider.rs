@@ -496,6 +496,9 @@ impl EngineClient {
     }
 }
 
+static RE_THINK: LazyLock<regex::Regex> = LazyLock::new(|| {
+    regex::Regex::new(r"(?s)<think>.*?</think>").expect("valid think regex")
+});
 static RE_TOOL_CALL: LazyLock<regex::Regex> = LazyLock::new(|| {
     regex::Regex::new(r"(?s)<tool_call>(.*?)</tool_call>").expect("valid tool_call regex")
 });
@@ -509,7 +512,25 @@ static RE_PARAM: LazyLock<regex::Regex> = LazyLock::new(|| {
 fn extract_fallback_tool_calls(raw_content: &str) -> (String, Vec<ToolCall>) {
     let mut tool_calls = Vec::new();
 
+    // Identify <think>...</think> spans so hypothetical or deliberative tool calls
+    // mentioned within reasoning traces are never dispatched as real execution steps.
+    let think_spans: Vec<(usize, usize)> = RE_THINK
+        .find_iter(raw_content)
+        .map(|m| (m.start(), m.end()))
+        .collect();
+    let is_inside_think = |start: usize| {
+        think_spans.iter().any(|(ts, te)| start >= *ts && start < *te)
+    };
+
     for cap in RE_TOOL_CALL.captures_iter(raw_content) {
+        let full_match = match cap.get(0) {
+            Some(m) => m,
+            None => continue,
+        };
+        if is_inside_think(full_match.start()) {
+            continue;
+        }
+
         let inner = cap.get(1).map(|m| m.as_str().trim()).unwrap_or_default();
         if inner.is_empty() {
             continue;
@@ -536,8 +557,24 @@ fn extract_fallback_tool_calls(raw_content: &str) -> (String, Vec<ToolCall>) {
                     p_val = stripped;
                 }
 
-                let val_json: Value = serde_json::from_str(p_val.trim())
-                    .unwrap_or_else(|_| Value::String(p_val.to_string()));
+                let trimmed = p_val.trim();
+                let val_json: Value = if trimmed.starts_with('{') || trimmed.starts_with('[') {
+                    serde_json::from_str(trimmed)
+                        .unwrap_or_else(|_| Value::String(p_val.to_string()))
+                } else if matches!(
+                    p_name,
+                    "start_line" | "end_line" | "max_depth" | "timeout_ms" | "max_results" | "limit"
+                ) && let Ok(n) = trimmed.parse::<i64>()
+                {
+                    Value::Number(n.into())
+                } else if matches!(p_name, "overwrite" | "replace_all" | "fuzzy")
+                    && let Ok(b) = trimmed.parse::<bool>()
+                {
+                    Value::Bool(b)
+                } else {
+                    Value::String(p_val.to_string())
+                };
+
                 params_map.insert(p_name.to_string(), val_json);
             }
 
@@ -559,37 +596,58 @@ fn extract_fallback_tool_calls(raw_content: &str) -> (String, Vec<ToolCall>) {
                 index,
             });
         }
-        // Branch 2: Hermes / DeepSeek / Mistral JSON format ({"name": "...", "arguments": ...})
-        else if let Ok(Value::Object(obj)) = serde_json::from_str::<Value>(inner)
-            && let Some(name) = obj.get("name").and_then(Value::as_str)
-        {
-            let args_str = if let Some(args) = obj.get("arguments") {
-                if let Some(s) = args.as_str() {
-                    s.to_string()
-                } else {
-                    args.to_string()
-                }
-            } else if let Some(params) = obj.get("parameters") {
-                params.to_string()
+        // Branch 2: Hermes / DeepSeek / Mistral / Llama-3 JSON format
+        else if let Ok(Value::Object(obj)) = serde_json::from_str::<Value>(inner) {
+            let (name_opt, args_val) = if let Some(name) = obj.get("name").and_then(Value::as_str) {
+                (
+                    Some(name),
+                    obj.get("arguments").or_else(|| obj.get("parameters")),
+                )
+            } else if let Some(func) = obj.get("function").and_then(Value::as_object) {
+                (
+                    func.get("name").and_then(Value::as_str),
+                    func.get("arguments").or_else(|| func.get("parameters")),
+                )
             } else {
-                "{}".to_string()
+                (None, None)
             };
 
-            let index = tool_calls.len();
-            tool_calls.push(ToolCall {
-                id: format!("call_fallback_{index}"),
-                name: name.to_string(),
-                arguments: args_str,
-                index,
-            });
+            if let Some(name) = name_opt {
+                let args_str = if let Some(args) = args_val {
+                    if let Some(s) = args.as_str() {
+                        s.to_string()
+                    } else {
+                        args.to_string()
+                    }
+                } else {
+                    "{}".to_string()
+                };
+
+                let index = tool_calls.len();
+                tool_calls.push(ToolCall {
+                    id: format!("call_fallback_{index}"),
+                    name: name.to_string(),
+                    arguments: args_str,
+                    index,
+                });
+            }
         }
     }
 
     if tool_calls.is_empty() {
         (raw_content.to_string(), tool_calls)
     } else {
-        let stripped = RE_TOOL_CALL.replace_all(raw_content, "").trim().to_string();
-        (stripped, tool_calls)
+        // Strip only the tool_call blocks that were outside <think>
+        let mut stripped = String::new();
+        let mut last_end = 0;
+        for m in RE_TOOL_CALL.find_iter(raw_content) {
+            if !is_inside_think(m.start()) {
+                stripped.push_str(&raw_content[last_end..m.start()]);
+                last_end = m.end();
+            }
+        }
+        stripped.push_str(&raw_content[last_end..]);
+        (stripped.trim().to_string(), tool_calls)
     }
 }
 
@@ -1077,6 +1135,126 @@ mod tests {
         assert_eq!(completion.tool_calls.len(), 1);
         assert_eq!(completion.tool_calls[0].name, "bash");
         assert_eq!(completion.finish_reason.as_deref(), Some("tool_calls"));
+    }
+
+    #[test]
+    fn test_extract_fallback_numeric_and_boolean_string_params_not_coerced() {
+        let raw = r#"<tool_call>
+<function=edit_file>
+<parameter=path>404.html</parameter>
+<parameter=target_content>true</parameter>
+<parameter=replacement_content>123</parameter>
+<parameter=overwrite>false</parameter>
+<parameter=start_line>42</parameter>
+</function>
+</tool_call>"#;
+        let (stripped, tcs) = extract_fallback_tool_calls(raw);
+        assert_eq!(stripped, "");
+        assert_eq!(tcs.len(), 1);
+        assert_eq!(tcs[0].name, "edit_file");
+        let parsed: Value = serde_json::from_str(&tcs[0].arguments).unwrap();
+        // Path, target_content, and replacement_content must remain strings!
+        assert_eq!(parsed["path"], "404.html");
+        assert_eq!(parsed["target_content"], "true");
+        assert_eq!(parsed["replacement_content"], "123");
+        // Overwrite must be boolean false
+        assert_eq!(parsed["overwrite"], false);
+        // Start_line must be integer 42
+        assert_eq!(parsed["start_line"], 42);
+    }
+
+    #[test]
+    fn test_extract_fallback_ignores_hypothetical_tool_call_inside_think() {
+        let raw = r#"<think>
+Should I run <tool_call><function=bash><parameter=command>rm -rf /</parameter></function></tool_call>? No, that would destroy everything.
+</think>
+I will list the directory:
+<tool_call>
+<function=bash>
+<parameter=command>ls -la</parameter>
+</function>
+</tool_call>"#;
+        let (stripped, tcs) = extract_fallback_tool_calls(raw);
+        // The hypothetical tool call inside <think> must NOT be extracted!
+        assert_eq!(tcs.len(), 1);
+        assert_eq!(tcs[0].name, "bash");
+        assert_eq!(tcs[0].arguments, r#"{"command":"ls -la"}"#);
+        // The <think> block must be preserved in the stripped output
+        assert!(stripped.contains("<think>"));
+        assert!(stripped.contains("rm -rf /"));
+        assert!(stripped.contains("</think>"));
+        assert!(!stripped.contains("ls -la"));
+    }
+
+    #[test]
+    fn test_extract_fallback_openai_nested_function_format() {
+        let raw = r#"<tool_call>
+{"function": {"name": "read_file", "arguments": {"path": "Cargo.toml", "start_line": 1}}}
+</tool_call>"#;
+        let (stripped, tcs) = extract_fallback_tool_calls(raw);
+        assert_eq!(stripped, "");
+        assert_eq!(tcs.len(), 1);
+        assert_eq!(tcs[0].name, "read_file");
+        let parsed: Value = serde_json::from_str(&tcs[0].arguments).unwrap();
+        assert_eq!(parsed["path"], "Cargo.toml");
+        assert_eq!(parsed["start_line"], 1);
+    }
+
+    #[test]
+    fn test_extract_fallback_hermes_arguments_as_escaped_json_string() {
+        let raw = r#"<tool_call>
+{"name": "bash", "arguments": "{\"command\": \"pwd\"}"}
+</tool_call>"#;
+        let (stripped, tcs) = extract_fallback_tool_calls(raw);
+        assert_eq!(stripped, "");
+        assert_eq!(tcs.len(), 1);
+        assert_eq!(tcs[0].name, "bash");
+        assert_eq!(tcs[0].arguments, r#"{"command": "pwd"}"#);
+    }
+
+    #[test]
+    fn test_extract_fallback_multiline_bash_with_nested_quotes_and_xml_tags() {
+        let script = "python3 -c \"import sys; print('<item>ok</item>')\"\ncat << 'EOF' > test.py\ndef run():\n    return 'hello'\nEOF\npython3 test.py";
+        let raw = format!("<tool_call>\n<function=bash>\n<parameter=command>\n{script}\n</parameter>\n</function>\n</tool_call>");
+        let (stripped, tcs) = extract_fallback_tool_calls(&raw);
+        assert_eq!(stripped, "");
+        assert_eq!(tcs.len(), 1);
+        assert_eq!(tcs[0].name, "bash");
+        let parsed: Value = serde_json::from_str(&tcs[0].arguments).unwrap();
+        assert_eq!(parsed["command"], script);
+    }
+
+    #[test]
+    fn test_extract_fallback_mixed_qwen_xml_and_hermes_json() {
+        let raw = r#"<tool_call>
+<function=read_file>
+<parameter=path>src/lib.rs</parameter>
+</function>
+</tool_call>
+<tool_call>
+{"name": "read_file", "arguments": {"path": "src/main.rs"}}
+</tool_call>"#;
+        let (stripped, tcs) = extract_fallback_tool_calls(raw);
+        assert_eq!(stripped, "");
+        assert_eq!(tcs.len(), 2);
+        assert_eq!(tcs[0].name, "read_file");
+        assert_eq!(tcs[0].index, 0);
+        let parsed0: Value = serde_json::from_str(&tcs[0].arguments).unwrap();
+        assert_eq!(parsed0["path"], "src/lib.rs");
+
+        assert_eq!(tcs[1].name, "read_file");
+        assert_eq!(tcs[1].index, 1);
+        let parsed1: Value = serde_json::from_str(&tcs[1].arguments).unwrap();
+        assert_eq!(parsed1["path"], "src/main.rs");
+    }
+
+    #[test]
+    fn test_extract_fallback_malformed_unclosed_tags_graceful() {
+        let raw = "<tool_call><function=bash><parameter=command>echo 1";
+        let (stripped, tcs) = extract_fallback_tool_calls(raw);
+        // Truncated / unclosed must not panic and must return empty tool calls
+        assert_eq!(stripped, raw);
+        assert!(tcs.is_empty());
     }
 }
 

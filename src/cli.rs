@@ -119,6 +119,9 @@ pub enum Command {
         state_dir: String,
         /// Task id to bind to the lease
         task_id: String,
+        /// Maximum slots (default 1)
+        #[arg(long, default_value = "1")]
+        max_slots: usize,
     },
     /// (internal) background worker process for a dispatched task
     #[command(name = "__worker", hide = true)]
@@ -705,10 +708,14 @@ pub async fn run_with(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
                 }
             }
         }
-        Command::__SemChild { state_dir, task_id } => {
+        Command::__SemChild {
+            state_dir,
+            task_id,
+            max_slots,
+        } => {
             let state = state::StateDir::new(state_dir);
             let _ = state.ensure();
-            let sem = task::semaphore::TaskSemaphore::new(&state, 1);
+            let sem = task::semaphore::TaskSemaphore::new(&state, max_slots);
             let lease = sem.acquire(&task_id).await;
             println!("HELD");
             tokio::time::sleep(std::time::Duration::from_secs(3)).await;
