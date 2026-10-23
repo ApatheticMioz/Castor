@@ -314,7 +314,15 @@ impl TaskSemaphore {
     }
 
     /// Whether an alien (live) tenant holds any slot.
+    ///
+    /// When `max_slots > 1`, multiple concurrent workers are permitted across
+    /// distinct slot files (e.g. slots 0..3 for multi-agent execution); each slot
+    /// is independently protected by O_EXCL file creation. Exclusivity across alien
+    /// tenants applies only in single-slot (`max_slots == 1`) environments.
     fn alien_tenant_active(&self) -> bool {
+        if self.inner.max_slots > 1 {
+            return false;
+        }
         let me = std::process::id() as u32;
         for i in 0..self.inner.max_slots {
             if let Some(l) = self.read_lease(i)
