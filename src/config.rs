@@ -183,6 +183,57 @@ pub struct PartialPorts {
     pub proxy: Option<u16>,
 }
 
+pub fn builtin_profiles() -> std::collections::HashMap<String, PartialProfile> {
+    let mut map = std::collections::HashMap::new();
+    map.insert(
+        "bonsai-max".to_string(),
+        PartialProfile {
+            model: Some("Ternary-Bonsai-2-27B-PQ2_0".to_string()),
+            base_url: Some("http://127.0.0.1:18020".to_string()),
+            api_key: None,
+            engine_type: Some("llama.cpp".to_string()),
+            launch_command: Some("cmd /c scripts\\bonsai\\start_bonsai_max_512k.bat".to_string()),
+            stop_command: Some("taskkill /F /IM llama-server.exe".to_string()),
+            max_context: Some(524288),
+            ports: None,
+            max_concurrent_tasks: Some(4),
+            tool_prefix: None,
+            probe_budget: None,
+            searxng_url: None,
+            brave_api_key: None,
+            openalex_email: None,
+            openalex_api_key: None,
+            boot_timeout_secs: None,
+        },
+    );
+    map.insert(
+        "hyperqwen-huge".to_string(),
+        PartialProfile {
+            model: Some("qwen3.8-27b".to_string()),
+            base_url: Some("http://127.0.0.1:18020".to_string()),
+            api_key: None,
+            engine_type: Some("vllm".to_string()),
+            launch_command: Some(
+                "wsl -d Ubuntu -- bash ~/qwen-serving/launchers/start_huge.sh".to_string(),
+            ),
+            stop_command: Some(
+                "wsl -d Ubuntu -- bash ~/qwen-serving/launchers/stop_server.sh".to_string(),
+            ),
+            max_context: Some(245760),
+            ports: None,
+            max_concurrent_tasks: Some(1),
+            tool_prefix: None,
+            probe_budget: None,
+            searxng_url: None,
+            brave_api_key: None,
+            openalex_email: None,
+            openalex_api_key: None,
+            boot_timeout_secs: None,
+        },
+    );
+    map
+}
+
 /// Load the effective configuration from the real environment.
 pub fn load() -> Result<LoadedConfig, ConfigError> {
     load_with(|key| std::env::var(key).ok())
@@ -212,21 +263,32 @@ pub fn load_with(get_env: impl Fn(&str) -> Option<String>) -> Result<LoadedConfi
         None
     };
 
+    let builtins = builtin_profiles();
     let (file_synthetic, profile_name) = match file {
         Some(f) => {
             let selected = get_env("CASTOR_PROFILE")
                 .filter(|s| !s.is_empty())
                 .or_else(|| f.profile.clone());
             if let Some(ref name) = selected {
-                let prof = f.profiles.get(name).ok_or_else(|| {
-                    let mut names: Vec<&str> = f.profiles.keys().map(String::as_str).collect();
-                    names.sort_unstable();
-                    ConfigError::InvalidValue {
-                        key: "profile".into(),
-                        value: name.clone(),
-                        reason: format!("unknown profile (defined: [{}])", names.join(", ")),
-                    }
-                })?;
+                let prof = f
+                    .profiles
+                    .get(name)
+                    .or_else(|| builtins.get(name))
+                    .ok_or_else(|| {
+                        let mut names: Vec<&str> = f
+                            .profiles
+                            .keys()
+                            .chain(builtins.keys())
+                            .map(String::as_str)
+                            .collect();
+                        names.sort_unstable();
+                        names.dedup();
+                        ConfigError::InvalidValue {
+                            key: "profile".into(),
+                            value: name.clone(),
+                            reason: format!("unknown profile (defined: [{}])", names.join(", ")),
+                        }
+                    })?;
                 (Some(file_with_profile(&f, Some(prof))), selected)
             } else {
                 (Some(f.clone()), None)
@@ -234,13 +296,21 @@ pub fn load_with(get_env: impl Fn(&str) -> Option<String>) -> Result<LoadedConfi
         }
         None => {
             if let Some(name) = get_env("CASTOR_PROFILE").filter(|s| !s.is_empty()) {
-                return Err(ConfigError::InvalidValue {
-                    key: "CASTOR_PROFILE".into(),
-                    value: name,
-                    reason: "no config.json file found to resolve profile from".into(),
-                });
+                if let Some(prof) = builtins.get(&name) {
+                    let empty_file = FileConfig::default();
+                    (Some(file_with_profile(&empty_file, Some(prof))), Some(name))
+                } else {
+                    let mut names: Vec<&str> = builtins.keys().map(String::as_str).collect();
+                    names.sort_unstable();
+                    return Err(ConfigError::InvalidValue {
+                        key: "CASTOR_PROFILE".into(),
+                        value: name,
+                        reason: format!("unknown profile (builtin: [{}])", names.join(", ")),
+                    });
+                }
+            } else {
+                (None, None)
             }
-            (None, None)
         }
     };
     let file = file_synthetic.as_ref();
@@ -1204,5 +1274,40 @@ mod tests {
         assert!(res.is_err());
         let err = res.err().unwrap().to_string();
         assert!(err.contains("unknown profile"), "{err}");
+    }
+
+    #[test]
+    fn builtin_profile_resolves_without_config_file() {
+        let dir = tmp_dir();
+        let res = load_with(|key| match key {
+            "CASTOR_STATE_DIR" => Some(dir.to_string_lossy().into()),
+            "CASTOR_PROFILE" => Some("bonsai-max".into()),
+            _ => None,
+        })
+        .unwrap();
+        assert_eq!(res.profile_name.as_deref(), Some("bonsai-max"));
+        assert_eq!(
+            res.config.model.as_deref(),
+            Some("Ternary-Bonsai-2-27B-PQ2_0")
+        );
+        assert_eq!(res.config.engine_type.as_deref(), Some("llama.cpp"));
+        assert_eq!(res.config.max_concurrent_tasks, 4);
+        assert_eq!(res.config.max_context, Some(524288));
+    }
+
+    #[test]
+    fn builtin_profile_hyperqwen_huge_resolves() {
+        let dir = tmp_dir();
+        let res = load_with(|key| match key {
+            "CASTOR_STATE_DIR" => Some(dir.to_string_lossy().into()),
+            "CASTOR_PROFILE" => Some("hyperqwen-huge".into()),
+            _ => None,
+        })
+        .unwrap();
+        assert_eq!(res.profile_name.as_deref(), Some("hyperqwen-huge"));
+        assert_eq!(res.config.model.as_deref(), Some("qwen3.8-27b"));
+        assert_eq!(res.config.engine_type.as_deref(), Some("vllm"));
+        assert_eq!(res.config.max_concurrent_tasks, 1);
+        assert_eq!(res.config.max_context, Some(245760));
     }
 }
