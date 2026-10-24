@@ -445,7 +445,15 @@ pub async fn run_session(
         turns += 1;
 
         // Build the request: messages first, tool schemas last (APC contract).
-        let completion = engine.chat(&messages, tools, true, effort).await?;
+        let completion = match engine.chat(&messages, tools, true, effort).await {
+            Ok(c) => c,
+            Err(crate::engine::EngineError::Sse(err)) => {
+                tracing::warn!("Transient SSE stream error on turn {turns}: {err}; retrying once");
+                tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+                engine.chat(&messages, tools, true, effort).await?
+            }
+            Err(err) => return Err(RunnerError::Engine(err)),
+        };
 
         // Record the dispatch event (with the engine's per-turn token usage,
         // so current Rust runs contribute to the telemetry token totals).
@@ -486,8 +494,22 @@ pub async fn run_session(
             // Compute the ceiling signal before moving `completion.content`.
             let ceiling_hit = is_reasoning_ceiling(&completion);
 
-            // Final content.
-            final_text = completion.content;
+            // Final content: if content is empty but the model provided substantive
+            // reasoning_content (common when reasoning models finish deliberation
+            // or emit conclusions in thought tokens), preserve the reasoning trace
+            // as the final output rather than discarding it.
+            final_text = if !completion.content.trim().is_empty() {
+                completion.content
+            } else if let Some(rc) = completion
+                .reasoning_content
+                .as_deref()
+                .map(str::trim)
+                .filter(|s| !s.is_empty())
+            {
+                rc.to_string()
+            } else {
+                completion.content
+            };
             final_produced = true;
 
             // Deliberation-ceiling salvage pass: the model stopped at its
@@ -665,15 +687,27 @@ pub async fn run_session(
                      your findings and the work you have completed.",
                 ));
                 let salvage = engine.chat(&messages, &[], true, effort).await?;
+                let salvage_text = if !salvage.content.trim().is_empty() {
+                    salvage.content
+                } else if let Some(rc) = salvage
+                    .reasoning_content
+                    .as_deref()
+                    .map(str::trim)
+                    .filter(|s| !s.is_empty())
+                {
+                    rc.to_string()
+                } else {
+                    String::new()
+                };
                 logger
                     .append(serde_json::json!({
                         "type": "salvage",
                         "turn": turns,
-                        "content": salvage.content,
+                        "content": salvage_text,
                     }))
                     .map_err(RunnerError::Io)?;
-                if !salvage.content.trim().is_empty() {
-                    final_text = salvage.content;
+                if !salvage_text.trim().is_empty() {
+                    final_text = salvage_text;
                 } else {
                     // Honest failure.
                     status = "failed".to_string();
@@ -945,6 +979,7 @@ mod tests {
         };
         Completion {
             content: content.into(),
+            reasoning_content: None,
             tool_calls,
             finish_reason: Some(finish.into()),
             metrics: Metrics {
@@ -1379,6 +1414,7 @@ mod tests {
     fn comp_finish(content: &str, finish: &str) -> Completion {
         Completion {
             content: content.into(),
+            reasoning_content: None,
             tool_calls: Vec::new(),
             finish_reason: Some(finish.into()),
             metrics: Metrics {

@@ -89,6 +89,7 @@ impl ReplayEngine {
                     };
                     Some(Completion {
                         content,
+                        reasoning_content: None,
                         tool_calls,
                         finish_reason: Some(finish_reason.into()),
                         metrics: Metrics {
@@ -138,6 +139,7 @@ impl ChatEngine for ReplayEngine {
                 // cleanly rather than failing with `TraceExhausted`.
                 Ok(Completion {
                     content: String::new(),
+                    reasoning_content: None,
                     tool_calls: Vec::new(),
                     finish_reason: Some("stop".into()),
                     metrics: Metrics {

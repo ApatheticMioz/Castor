@@ -168,6 +168,7 @@ pub struct Metrics {
 #[derive(Debug, Clone)]
 pub struct Completion {
     pub content: String,
+    pub reasoning_content: Option<String>,
     pub tool_calls: Vec<ToolCall>,
     pub finish_reason: Option<String>,
     pub metrics: Metrics,
@@ -178,7 +179,8 @@ pub struct EngineClient {
     base_url: String,
     model: String,
     api_key: Option<String>,
-    backend: super::backend::Backend,
+    pub backend: super::backend::Backend,
+    pub capabilities: super::backend::EngineCapabilities,
 }
 
 impl EngineClient {
@@ -198,12 +200,15 @@ impl EngineClient {
                 url: base_url.clone(),
                 source: e,
             })?;
+        let backend = super::backend::Backend::from_config(cfg);
+        let capabilities = backend.capabilities();
         Ok(Self {
             http,
             base_url,
             model,
             api_key: cfg.api_key.clone(),
-            backend: super::backend::Backend::from_config(cfg),
+            backend,
+            capabilities,
         })
     }
 
@@ -231,19 +236,22 @@ impl EngineClient {
             body["stream_options"] = json!({ "include_usage": true });
         }
         if let Some(effort) = reasoning_effort {
-            if self.backend == super::backend::Backend::LlamaCpp {
-                let normalized = match effort.trim().to_ascii_lowercase().as_str() {
-                    "high" | "xhigh" => Some("xhigh"),
-                    "medium" | "med" => Some("medium"),
-                    "low" => Some("low"),
-                    "none" | "off" | "false" | "0" | "" => None,
-                    _ => Some("medium"),
-                };
-                if let Some(tier) = normalized {
-                    body["reasoning_effort"] = json!(tier);
+            match self.backend.effort_serializer() {
+                super::backend::EffortSerializer::TopLevel => {
+                    let normalized = match effort.trim().to_ascii_lowercase().as_str() {
+                        "high" | "xhigh" => Some("xhigh"),
+                        "medium" | "med" => Some("medium"),
+                        "low" => Some("low"),
+                        "none" | "off" | "false" | "0" | "" => None,
+                        _ => Some("medium"),
+                    };
+                    if let Some(tier) = normalized {
+                        body["reasoning_effort"] = json!(tier);
+                    }
                 }
-            } else {
-                body["chat_template_kwargs"] = json!({ "reasoning_effort": effort });
+                super::backend::EffortSerializer::ChatTemplateKwargs => {
+                    body["chat_template_kwargs"] = json!({ "reasoning_effort": effort });
+                }
             }
         }
         let mut req = self.http.post(&url).json(&body);
@@ -275,6 +283,7 @@ impl EngineClient {
         let mut stream = resp.bytes_stream();
         let mut buf: Vec<u8> = Vec::new();
         let mut content = String::new();
+        let mut reasoning_content = String::new();
         let mut finish_reason: Option<String> = None;
         let mut ttft: Option<std::time::Duration> = None;
         let mut prompt_tokens: Option<u64> = None;
@@ -294,8 +303,14 @@ impl EngineClient {
                 };
                 let payload = payload.trim();
                 if payload == "[DONE]" {
+                    let rc = if reasoning_content.trim().is_empty() {
+                        None
+                    } else {
+                        Some(reasoning_content)
+                    };
                     return Ok(assemble(
                         &content,
+                        rc,
                         tool_calls,
                         finish_reason,
                         ttft,
@@ -358,10 +373,11 @@ impl EngineClient {
                         .get("reasoning_content")
                         .or_else(|| delta.get("reasoning"))
                         .and_then(Value::as_str)
-                        && !r.is_empty()
-                        && ttft.is_none()
                     {
-                        ttft = Some(t0.elapsed());
+                        if !r.is_empty() && ttft.is_none() {
+                            ttft = Some(t0.elapsed());
+                        }
+                        reasoning_content.push_str(r);
                     }
                     if let Some(c) = delta.get("content").and_then(Value::as_str) {
                         if !c.is_empty() && ttft.is_none() {
@@ -397,13 +413,19 @@ impl EngineClient {
                 }
             }
         }
-        if self.backend == super::backend::Backend::LlamaCpp {
+        if self.capabilities.stream_sentinel == super::backend::StreamSentinel::RequiresDone {
             return Err(EngineError::Sse(
-                "llama.cpp stream ended without [DONE]".into(),
+                "stream ended without [DONE] sentinel".into(),
             ));
         }
+        let rc = if reasoning_content.trim().is_empty() {
+            None
+        } else {
+            Some(reasoning_content)
+        };
         Ok(assemble(
             &content,
+            rc,
             tool_calls,
             finish_reason,
             ttft,
@@ -483,8 +505,15 @@ impl EngineClient {
         } else {
             Some(t0.elapsed())
         };
+        let reasoning_content = msg
+            .get("reasoning_content")
+            .or_else(|| msg.get("reasoning"))
+            .and_then(Value::as_str)
+            .filter(|s| !s.trim().is_empty())
+            .map(String::from);
         Ok(assemble(
             &content,
+            reasoning_content,
             tool_calls,
             finish_reason,
             ttft,
@@ -655,6 +684,7 @@ fn extract_fallback_tool_calls(raw_content: &str) -> (String, Vec<ToolCall>) {
 #[allow(clippy::too_many_arguments)] // each argument is a distinct per-turn metric
 fn assemble(
     content: &str,
+    reasoning_content: Option<String>,
     mut tool_calls: BTreeMap<usize, ToolCall>,
     mut finish_reason: Option<String>,
     ttft: Option<std::time::Duration>,
@@ -693,6 +723,7 @@ fn assemble(
     let tokens_per_sec = tokens.map(|t| t as f64 / total.as_secs_f64());
     Completion {
         content: final_content,
+        reasoning_content,
         tool_calls: tool_calls.into_values().collect(),
         finish_reason,
         metrics: Metrics {
@@ -1123,6 +1154,7 @@ mod tests {
         let raw = "<tool_call>\n<function=bash>\n<parameter=command>\necho 1\n</parameter>\n</function>\n</tool_call>";
         let completion = assemble(
             raw,
+            None,
             BTreeMap::new(),
             Some("stop".into()),
             None,
