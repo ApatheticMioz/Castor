@@ -628,3 +628,122 @@ async fn live_llama_cpp_tool_round_trip() {
     assert_tool_round_trip(&fixture.config).await;
     assert!(fixture.cli("stop").output().unwrap().status.success());
 }
+
+/// Enforce the shared-invariant contract (Rule 4.1): `CLAUDE.md` and
+/// `GEMINI.md` must stay strictly byte-identical so every agent persona
+/// (Claude, Antigravity) honors the same operating contract.
+#[test]
+fn test_persona_contracts_byte_identical() {
+    let root = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+    let claude_bytes = std::fs::read(root.join("CLAUDE.md")).expect("CLAUDE.md missing");
+    let gemini_bytes = std::fs::read(root.join("GEMINI.md")).expect("GEMINI.md missing");
+    assert_eq!(claude_bytes, gemini_bytes, "CLAUDE.md and GEMINI.md are not byte-identical");
+}
+
+/// Adversarial verification of Backend capability mappings and engine aliases.
+#[test]
+fn test_backend_capabilities_matrix() {
+    use castor::engine::backend::{
+        Backend, EffortSerializer, ProbeShape, ReadinessKind, ReasoningWireFormat, StreamSentinel,
+    };
+
+    let mut cfg = Fixture::new("http://127.0.0.1:18020/v1").config.clone();
+
+    // LlamaCpp / Bonsai
+    cfg.engine_type = Some("llama.cpp".into());
+    let b = Backend::from_config(&cfg);
+    assert_eq!(b, Backend::LlamaCpp);
+    let caps = b.capabilities();
+    assert_eq!(caps.stream_sentinel, StreamSentinel::RequiresDone);
+    assert_eq!(caps.effort_serializer, EffortSerializer::TopLevel);
+    assert_eq!(caps.reasoning_format, ReasoningWireFormat::DeepSeekField);
+    assert_eq!(caps.readiness_kind, ReadinessKind::LlamaHealth);
+    assert_eq!(caps.probe_shape, ProbeShape::JsonSchemaChat);
+    assert!(caps.is_managed);
+
+    // Vllm / HyperQwen
+    cfg.engine_type = Some("vllm".into());
+    let b = Backend::from_config(&cfg);
+    assert_eq!(b, Backend::Vllm);
+    let caps = b.capabilities();
+    assert_eq!(caps.stream_sentinel, StreamSentinel::StandardEof);
+    assert_eq!(caps.effort_serializer, EffortSerializer::ChatTemplateKwargs);
+    assert!(!caps.is_managed);
+
+    // Generic / Ollama / SGLang / LM Studio
+    for alias in ["generic", "openai", "sglang", "ollama", "lmstudio"] {
+        cfg.engine_type = Some(alias.into());
+        let b = Backend::from_config(&cfg);
+        assert_eq!(b, Backend::Generic, "alias {alias} must map to Generic");
+        let caps = b.capabilities();
+        assert_eq!(caps.stream_sentinel, StreamSentinel::StandardEof);
+        assert_eq!(caps.effort_serializer, EffortSerializer::TopLevel);
+        assert!(!caps.is_managed);
+    }
+}
+
+/// Adversarial verification of WSL path normalization against control character injection.
+#[test]
+fn test_wsl_normalize_adversarial_paths() {
+    use castor::platform::wsl_normalize;
+
+    // A Windows command with \bonsai must not escape \b to ASCII 0x08 (backspace) in WSL sh
+    let cmd = "cmd.exe /c scripts\\bonsai\\start_bonsai_max_512k.bat";
+    let norm = wsl_normalize(cmd);
+    if cfg!(target_os = "linux") && std::path::Path::new("/proc/sys/fs/binfmt_misc/WSLInterop").exists() {
+        assert_eq!(norm, "cmd.exe /c scripts/bonsai/start_bonsai_max_512k.bat");
+        assert!(!norm.contains("\\b"), "Must not leave literal \\b exposed to shell expansion");
+    }
+
+    // Windows cmd without .exe prefix
+    let cmd2 = "cmd /c D:\\LLM_Ecosystem\\scripts\\bonsai\\start.bat";
+    let norm2 = wsl_normalize(cmd2);
+    if cfg!(target_os = "linux") && std::path::Path::new("/proc/sys/fs/binfmt_misc/WSLInterop").exists() {
+        assert_eq!(norm2, "cmd.exe /c D:/LLM_Ecosystem/scripts/bonsai/start.bat");
+    }
+}
+
+/// Adversarial verification that reasoning-only streams populate reasoning_content
+/// and complete successfully without triggering DegenerateFinalError.
+#[tokio::test]
+async fn test_reasoning_only_stream_preserves_content() {
+    use axum::body::{Body, Bytes};
+    use axum::response::IntoResponse;
+
+    let base = mock(Router::new().route(
+        "/v1/chat/completions",
+        post(|Json(_body): Json<Value>| async move {
+            let frames = [
+                "data: {\"choices\":[{\"delta\":{\"reasoning_content\":\"Deep thinking tokens...\"}}]}\n\n",
+                "data: {\"choices\":[{\"delta\":{\"reasoning_content\":\" and final conclusion.\"}}]}\n\n",
+                "data: {\"choices\":[{\"delta\":{},\"finish_reason\":\"stop\"}],\"usage\":{\"prompt_tokens\":10,\"completion_tokens\":20}}\n\n",
+                "data: [DONE]\n\n",
+            ];
+            let stream = futures_util::stream::iter(
+                frames.map(|f| Ok::<Bytes, std::convert::Infallible>(Bytes::from(f))),
+            );
+            (
+                [("content-type", "text/event-stream")],
+                Body::from_stream(stream),
+            )
+                .into_response()
+        }),
+    ))
+    .await;
+
+    let mut cfg = Fixture::new(&base).config.clone();
+    cfg.engine_type = Some("llama.cpp".into());
+    let client = EngineClient::from_config(&cfg).unwrap();
+
+    let completion = client
+        .chat(&[Message::default()], &[], true, None)
+        .await
+        .unwrap();
+
+    assert!(completion.content.is_empty());
+    assert_eq!(
+        completion.reasoning_content.as_deref(),
+        Some("Deep thinking tokens... and final conclusion.")
+    );
+    assert_eq!(completion.finish_reason.as_deref(), Some("stop"));
+}
