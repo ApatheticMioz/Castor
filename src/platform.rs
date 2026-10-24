@@ -129,11 +129,15 @@ pub fn wsl_normalize(cmd: &str) -> String {
     let first = &trimmed[..first_end];
     let rest = trimmed[first_end..].trim_start();
     match first {
-        "cmd" => {
-            if rest.is_empty() {
+        "cmd" | "cmd.exe" => {
+            // Under WSL, Windows paths with backslashes get mangled by POSIX sh
+            // (e.g. \b becomes backspace). Convert backslashes to forward slashes so
+            // the command survives POSIX shell evaluation intact.
+            let safe_rest = rest.replace('\\', "/");
+            if safe_rest.is_empty() {
                 "cmd.exe".to_string()
             } else {
-                format!("cmd.exe {rest}")
+                format!("cmd.exe {safe_rest}")
             }
         }
         "taskkill" => {
@@ -206,6 +210,10 @@ mod tests {
             assert_eq!(
                 wsl_normalize("cmd /c echo hi"),
                 "cmd.exe /c echo hi"
+            );
+            assert_eq!(
+                wsl_normalize(r"cmd /c scripts\bonsai\start.bat"),
+                "cmd.exe /c scripts/bonsai/start.bat"
             );
             // Non-matching commands are untouched.
             assert_eq!(wsl_normalize("nvidia-smi"), "nvidia-smi");
