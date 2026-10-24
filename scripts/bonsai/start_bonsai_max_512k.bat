@@ -5,6 +5,7 @@ REM with Q4_0 FlashAttention KV compression (16 KiB/tok), 16GB pageable host RAM
 REM and fine-tuned DFlash2 drafter. Completely eliminates multi-agent KV cache thrashing on mega-context tasks.
 
 setlocal
+cd /d "%~dp0\..\.."
 
 set BIN=.\llama-cpp\prism-cuda\llama-server.exe
 set MODEL=.\models\Ternary-Bonsai-2-27B-PQ2_0.gguf

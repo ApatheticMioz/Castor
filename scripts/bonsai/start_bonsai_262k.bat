@@ -4,6 +4,7 @@ REM Configured for 100% GPU VRAM residency, Flash Attention, Q8 KV cache (~8.2 G
 REM Leaves >7.5 GiB free VRAM headroom. Port: 18020 (Castor default).
 
 setlocal
+cd /d "%~dp0\..\.."
 
 set BIN=.\llama-cpp\prism-cuda\llama-server.exe
 set MODEL=.\models\Ternary-Bonsai-2-27B-PQ2_0.gguf

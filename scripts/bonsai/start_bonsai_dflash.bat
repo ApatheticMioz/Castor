@@ -3,6 +3,7 @@ REM High-performance, speculative-decoding launcher for Ternary-Bonsai-2-27B wit
 REM Uses native PRISM CUDA DFlash implementation with tuned n_max=3 for minimal rejection penalty and 75+ t/s code bursts.
 
 setlocal
+cd /d "%~dp0\..\.."
 
 set BIN=.\llama-cpp\prism-cuda\llama-server.exe
 set MODEL=.\models\Ternary-Bonsai-2-27B-PQ2_0.gguf

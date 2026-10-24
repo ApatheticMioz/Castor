@@ -3,6 +3,7 @@ REM High-context (131,072 tokens) launcher for Ternary-Bonsai-2-27B on llama.cpp
 REM Uses Q8 KV cache (4.0 GiB) or Q4 KV cache (2.0 GiB). Total VRAM fits easily in 24GB.
 
 setlocal
+cd /d "%~dp0\..\.."
 
 set BIN=.\llama-cpp\prism-cuda\llama-server.exe
 set MODEL=.\models\Ternary-Bonsai-2-27B-PQ2_0.gguf

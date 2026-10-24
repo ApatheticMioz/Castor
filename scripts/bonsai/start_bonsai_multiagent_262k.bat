@@ -5,6 +5,7 @@ REM with Q4_0 FlashAttention KV cache (16 KiB/tok) and dynamic lookup cache (-lc
 REM Eliminates KV cache thrashing and enables true concurrent subagent execution.
 
 setlocal
+cd /d "%~dp0\..\.."
 
 set BIN=.\llama-cpp\prism-cuda\llama-server.exe
 set MODEL=.\models\Ternary-Bonsai-2-27B-PQ2_0.gguf
