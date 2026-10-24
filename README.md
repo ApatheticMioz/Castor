@@ -6,7 +6,7 @@
 [![npm](https://img.shields.io/npm/v/mcp-castor.svg?color=CB3837&logo=npm)](https://www.npmjs.com/package/mcp-castor)
 [![Rust](https://img.shields.io/badge/Rust-2024%20Edition-DEA584?logo=rust&logoColor=white)](https://www.rust-lang.org/)
 [![License: AGPL-3.0](https://img.shields.io/badge/License-AGPL--3.0-blue.svg)](LICENSE)
-[![Test Gate: 349/349](https://img.shields.io/badge/Test%20Gate-349%2F349%20Green-brightgreen.svg)](#testing--verification)
+[![Test Gate: 372/372](https://img.shields.io/badge/Test%20Gate-372%2F372%20Green-brightgreen.svg)](#testing--verification)
 
 ---
 
@@ -254,7 +254,7 @@ cd Castor
 # Build binary
 cargo build --release
 
-# Run verification suite (349 tests)
+# Run verification suite (372 tests)
 cargo test
 
 # Register local release build with clients
@@ -268,7 +268,7 @@ cargo test
 Castor maintains a strict zero-warning and offline verification gate:
 
 ```bash
-# Fast offline test gate (349 tests, ~7s)
+# Fast offline test gate (372 tests, ~7s)
 cargo test
 
 # Strict clippy lint gate (zero warnings enforced)

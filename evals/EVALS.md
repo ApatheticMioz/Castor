@@ -5,9 +5,9 @@ Shankar): **error analysis first, deterministic-only CI gate, binary pass/fail,
 no imagined tasks.** Every task below was derived from a *real* failure class
 observed in `~/.castor/sessions/*/events.jsonl` (see §Failure Classes).
 
-## 1. Failure classes (ground truth, 2026-10-01)
+## 1. Failure Classes
 
-Counts from 15 session ends / ~1,100 events across 10 sessions:
+Classification of observed error classes across session event ledgers:
 
 | # | Class | Count | Evidence (event type) |
 |---|-------|-------|------------------------|
