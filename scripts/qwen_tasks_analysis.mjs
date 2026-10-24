@@ -2,10 +2,7 @@
 /**
  * qwen_tasks_analysis.mjs — Telemetry exporter for Qwen task dispatches.
  *
- * Rebuilds (with CORRECTED semantics) the one-off script that produced
- * docs/audits/telemetry/qwen_tasks_analysis_2026-09-13.json. Only the output
- * of that script was ever committed; the script itself was lost. This is the
- * repo-tool reconstruction.
+ * Exports per-dispatch telemetry rows from on-disk session logs and task records.
  *
  * INPUTS
  *   --tasks-dir    Directory of per-dispatch task files:  task_<id>.json
@@ -19,27 +16,25 @@
  *                   engine_empty_response / session_end events)
  *   --out          Output JSON file (array of per-dispatch rows).
  *
- * OUTPUT SCHEMA (field-compatible with the committed 2026-09-13 analysis;
- * 25 fields, fixed order):
+ * OUTPUT SCHEMA (25 fields, fixed order):
  *   taskId, sessionId, cwd, createdAt, durationSec, status, isError,
  *   endStatus, promptLen, prompt, toolCallsCount, tools, totalBash,
  *   bashCommandsSummary, filesWritten, filesReadCount, turns, promptTokens,
  *   completionTokens, thinkingTokens, ttftMedMs, rateAvgTokS, continuations,
  *   emptyStreamRetries, engineEmptyResponses
  *
- * CORRECTED SEMANTICS (the audit's defects F17/F18):
+ * METRICS SEMANTICS:
  *   1) promptTokens  = MAX of per-turn metrics.promptTokens across the
- *      session's events (the final context depth). NEVER 0: when the engine
- *      never reported a non-zero promptTokens (or there are no events at all)
+ *      session's events (the final context depth). When the engine does not
+ *      report a non-zero promptTokens (or if no events are recorded)
  *      the value is null, distinguishing "unknown" from "zero".
  *   2) Session-cumulative fields — turns, completionTokens, thinkingTokens,
  *      tools, totalBash, ttftMedMs, continuations, emptyStreamRetries,
  *      engineEmptyResponses — are stamped ONLY on the LAST dispatch row of
  *      each session (the most recent createdAt); every other row of that
- *      session carries null. This prevents downstream sums from double-counting
- *      a reused session (the ~3x inflation in the original).
+ *      session carries null to prevent accidental double-counting.
  *   3) rateAvgTokS   = mean per-turn tokens/sec. When the engine's
- *      metrics.tokensPerSec is absent or 0 for a turn, the rate is DERIVED as
+ *      metrics.tokensPerSec is absent or 0 for a turn, the rate is derived as
  *      completionTokens / ((totalMs - ttftMs) / 1000) (generation time only,
  *      excluding time-to-first-token). The schema has no dedicated flag, so
  *      this derivation is documented in scripts/README.md.

@@ -62,7 +62,7 @@ def load_lineage(target_dir):
     try:
         with open(path, "r", encoding="utf-8") as f:
             data = json.load(f)
-        # Tolerate a partial/legacy file by filling missing keys.
+        # Fill missing default keys if incomplete.
         for k, v in empty.items():
             data.setdefault(k, v)
         return data

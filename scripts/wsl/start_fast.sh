@@ -12,10 +12,6 @@ export PREFIX_CACHE=1
 export PYTORCH_CUDA_ALLOC_CONF=expandable_segments:False
 export VLLM_WSL2_ENABLE_PIN_MEMORY=1
 # Server-side reasoning default: medium effort when no per-request override is sent.
-# Validated: xhigh (the model's own template default) can burn an entire modest token
-# budget on reasoning alone for non-trivial tasks (measured: 1500/1500 tokens consumed,
-# truncated mid-answer). medium is the community- and self-validated balance - real
-# accuracy lift over off, without xhigh's verbosity tax on simple delegated tasks.
 export EXTRA_ARGS='--default-chat-template-kwargs {"reasoning_effort":"medium"}'
 # Universal Stateful UTF-8 & SSE Stream Sanitizer Proxy (port 18022 -> 18020)
 pkill -9 -f 'stream_proxy.js' 2>/dev/null || true

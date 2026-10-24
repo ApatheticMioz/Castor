@@ -1,6 +1,6 @@
 @echo off
 REM High-context (262,144 tokens - FULL NATIVE CONTEXT) launcher for Ternary-Bonsai-2-27B on llama.cpp (PRISM CUDA).
-REM Configured for 100% GPU VRAM residency, Flash Attention, Q8 KV cache (~8.2 GiB), ~16.4 GiB total VRAM on RTX 3090.
+REM Configured for 100% GPU VRAM residency, Flash Attention, Q8 KV cache (~8.2 GiB), ~16.4 GiB total VRAM.
 REM Leaves >7.5 GiB free VRAM headroom. Port: 18020 (Castor default).
 
 setlocal

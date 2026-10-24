@@ -1,50 +1,48 @@
-# Empirical Head-to-Head Benchmark: HyperQwen vs. Bonsai
+# Serving Engine Architecture: HyperQwen vs. Bonsai
 
-Live, side-by-side A/B evaluation conducted on an **NVIDIA GeForce RTX 3090 (24GB VRAM)** on a Windows host with 32GB RAM, benchmarking both single-agent autoregressive generation and massive 100k–200k token multi-agent interleaved workflows.
+Architectural comparison and profile documentation for local 24GB VRAM serving backends, detailing single-agent autoregressive generation and high-context multi-agent interleaved workflows.
 
 ---
 
-## 1. Executive Summary & Comparative Matrix
+## 1. Architecture Matrix
 
-All tests execute on port 18020 under strict mutual exclusivity:
+All configurations target port 18020 under mutual exclusivity:
 - **Bonsai Runtime**: Native Windows `llama.cpp` PRISM CUDA binary with fused FlashAttention and dynamic n-gram lookup (`-lcd`).
 - **HyperQwen Runtime**: WSL2 Ubuntu custom vLLM 0.30.0 with AutoRound Marlin W4A16 GEMM kernels, DFlash2 speculative decoding, KVarN tiled KV compression, and CPU-offloaded Qwen-VL vision.
 
-| Metric / Dimension | Pure Bonsai 262K ([`start_bonsai_262k.bat`](start_bonsai_262k.bat)) | Bonsai 262K DFlash2 ([`start_bonsai_dflash_262k.bat`](start_bonsai_dflash_262k.bat)) | Bonsai Max 512K Unified ([`start_bonsai_max_512k.bat`](start_bonsai_max_512k.bat)) | HyperQwen Default ([`scripts/main/start.bat`](../main/start.bat)) (245k Huge + DFlash2) | Empirical Trade-off |
+| Dimension | Pure Bonsai 262K ([`start_bonsai_262k.bat`](start_bonsai_262k.bat)) | Bonsai 262K DFlash2 ([`start_bonsai_dflash_262k.bat`](start_bonsai_dflash_262k.bat)) | Bonsai Max 512K Unified ([`start_bonsai_max_512k.bat`](start_bonsai_max_512k.bat)) | HyperQwen Default ([`scripts/main/start.bat`](../main/start.bat)) (245k Huge + DFlash2) | Architecture Profile |
 |---|---|---|---|---|---|
 | **Runtime Engine** | `llama.cpp` PRISM CUDA (Native Windows) | `llama.cpp` PRISM CUDA (Native Windows) | `llama.cpp` PRISM CUDA (Native Windows) | Custom vLLM 0.30.0 + DFlash2 + KVarN (WSL2 Ubuntu) | Native Windows vs WSL2 |
-| **Model Weights** | **6.70 GiB** (PQ2_0 1.58-bit ternary) | 6.70 GiB base + 1.91 GiB fine-tuned draft | 6.70 GiB base + 1.91 GiB fine-tuned draft | 14.71 GiB (AutoRound W4A16) + 1.2 GiB draft | Bonsai is 54% lighter |
-| **KV Cache Type** | Q8_0 (32 KiB/tok) | **Q4_0 (16 KiB/tok)** | **Q4_0 (16 KiB/tok)** | KVarN (4-bit K / 2-bit V per 128-tok tile) | Q4_0 matches KVarN efficiency |
-| **Total Context / Pool** | 262,144 tokens (1 slot) | 262,144 tokens (1 slot) | **524,288 tokens** (Unified `-kvu`, 4 slots) | 245,760 tokens (`MAX_SEQS=1`) | Bonsai 512k unified pool |
-| **VRAM Allocated** | **18.06 GiB** (6.25 GiB free) | **18.53 GiB** (6.04 GiB free) | **22.84 GiB** (1.73 GiB free) | 23.48 GiB (843 MiB free) | Bonsai has dynamic slot room |
-| **Host RAM Architecture** | 19.8 GB free (Pageable) | 19.8 GB free (Pageable) | **7.5 GB Working Set / 22.2 GB Pageable Commit** | 10.05 GB free (**14 GB Hard-Pinned via mlock**) | Bonsai RAM is pageable for Windows apps |
-| **Cold Startup Latency** | **< 2.0s** (Instant mmap) | ~5.3s (mmap base + draft) | ~5.8s (mmap base + draft) | 45 – 60s (CUDA graph compile & warmup) | Bonsai boots 10x–25x faster |
-| **Single-Agent Decode Rate** | 58.7 tok/s aggregate | **72.7 tok/s** (Peak: 97.8 tok/s) | **72.7 tok/s** (Peak: 97.8 tok/s) | **112.9 tok/s** (Peak: 133.8 tok/s) | HyperQwen is 1.55x faster serial decode |
-| **Resumption Turn TTFT (161k Depth)** | N/A | ~4.5s (1 slot) | **4.95s** (**0% eviction**, 52 delta toks) | **247.19s** (**100% eviction**, recomputes 161k) | **Bonsai is 50x faster on resumption** |
-| **Multi-Agent Mega-Context (432k total)** | N/A | Thrashes at >1 slot | **411.29s (6.85 mins)** | **625.40s (10.42 mins)** | **Bonsai is 1.52x faster overall (saves 3.57m)** |
-| **Multimodal Vision** | No (Text-only GGUF) | No (Text-only GGUF) | No (Text-only GGUF) | **Yes** (CPU-offloaded vision tower, 0 VRAM penalty) | HyperQwen has vision capability |
+| **Model Weights** | **6.70 GiB** (PQ2_0 1.58-bit ternary) | 6.70 GiB base + 1.91 GiB fine-tuned draft | 6.70 GiB base + 1.91 GiB fine-tuned draft | 14.71 GiB (AutoRound W4A16) + 1.2 GiB draft | 1.58-bit vs 4-bit |
+| **KV Cache Type** | Q8_0 (32 KiB/tok) | **Q4_0 (16 KiB/tok)** | **Q4_0 (16 KiB/tok)** | KVarN (4-bit K / 2-bit V per 128-tok tile) | Quantized KV cache |
+| **Total Context / Pool** | 262,144 tokens (1 slot) | 262,144 tokens (1 slot) | **524,288 tokens** (Unified `-kvu`, 4 slots) | 245,760 tokens (`MAX_SEQS=1`) | Unified vs dedicated |
+| **VRAM Allocated** | **18.06 GiB** (6.25 GiB free) | **18.53 GiB** (6.04 GiB free) | **22.84 GiB** (1.73 GiB free) | 23.48 GiB (843 MiB free) | Dynamic slot headroom |
+| **Host RAM Architecture** | Pageable virtual commit | Pageable virtual commit | Pageable virtual commit | Hard-pinned (`mlock`) | Memory manager interaction |
+| **Cold Startup Latency** | **< 2.0s** (Instant mmap) | ~5.3s (mmap base + draft) | ~5.8s (mmap base + draft) | 45 – 60s (CUDA graph compile & warmup) | Startup characteristics |
+| **Single-Agent Decode Rate** | 58.7 tok/s aggregate | **72.7 tok/s** (Peak: 97.8 tok/s) | **72.7 tok/s** (Peak: 97.8 tok/s) | **112.9 tok/s** (Peak: 133.8 tok/s) | Serial decode throughput |
+| **Resumption Turn TTFT (161k Depth)** | N/A | ~4.5s (1 slot) | **4.95s** (**0% eviction**, 52 delta toks) | **247.19s** (**100% eviction**, recomputes 161k) | Context retention speed |
+| **Multi-Agent Mega-Context (432k total)** | N/A | Exceeds single slot | **411.29s** | **625.40s** | Multi-slot completion time |
+| **Multimodal Vision** | No (Text-only GGUF) | No (Text-only GGUF) | No (Text-only GGUF) | **Yes** (CPU-offloaded vision tower, 0 VRAM penalty) | Multimodal support |
 
 ---
 
-## 2. Real Mega-Context Multi-Agent Empirical Benchmark (161k + 55k Tokens)
+## 2. Multi-Agent Context Dynamics
 
-To evaluate real production multi-agent performance without synthetic toy prompts, an identical 4-turn workload was dispatched against both architectures using live Castor microkernel source code (`src/tools/sandbox.rs`, `src/task/registry.rs`, `src/config.rs`, `src/mcp/mod.rs`, `evals/dgi/dataset.json`):
-- **Phase 1 (Lead Architect Turn 1)**: Ingests **161,015 tokens** of live repository code.
-- **Phase 2 (Subagent Turn 1)**: Ingests a divergent **55,166-token** evaluation dataset.
-- **Phase 3 (Lead Architect Turn 2 - Resumption)**: Returns control to Lead Architect back at **161,063 tokens** depth.
-- **Phase 4 (Subagent Turn 2 - Resumption)**: Returns control to Subagent back at **55,198 tokens** depth.
+Multi-turn interleaved workloads across multiple agents exhibit distinct KV cache eviction characteristics:
+- **Phase 1 (Lead Architect Turn 1)**: Ingests repository context (~161,000 tokens).
+- **Phase 2 (Subagent Turn 1)**: Ingests evaluation dataset (~55,000 tokens).
+- **Phase 3 (Lead Architect Turn 2 - Resumption)**: Returns control to Lead Architect back at ~161,000 tokens depth.
+- **Phase 4 (Subagent Turn 2 - Resumption)**: Returns control to Subagent back at ~55,000 tokens depth.
 
-### Empirical Turn-by-Turn Telemetry
+### Context Performance Profile
 
-| Benchmark Phase | Context Depth | Bonsai Max 512K Unified ([`start_bonsai_max_512k.bat`](start_bonsai_max_512k.bat)) | HyperQwen Huge ([`scripts/main/start.bat`](../main/start.bat)) | Observed Cache State |
+| Phase | Context Depth | Bonsai Max 512K Unified ([`start_bonsai_max_512k.bat`](start_bonsai_max_512k.bat)) | HyperQwen Huge ([`scripts/main/start.bat`](../main/start.bat)) | Cache Behavior |
 |---|---|---|---|---|
 | **Phase 1: Agent 1 T1** | 161,015 tokens | 308.91s (~530 tok/s prefill) | **248.01s** (~650 tok/s prefill) | Cold prefill |
 | **Phase 2: Subagent 2 T1** | 55,166 tokens | **64.73s** (~888 tok/s prefill) | 65.39s (~850 tok/s prefill) | Divergent prefill |
-| **Phase 3: Agent 1 T2** | 161,063 tokens | **4.95s** (Evaluated 52 delta tokens in 407 ms) | **247.19s** (Full prompt recomputation) | **Bonsai: 0% eviction / HyperQwen: 100% eviction** |
-| **Phase 4: Subagent 2 T2** | 55,198 tokens | **32.70s** (Evaluated 36 delta tokens in 309 ms) | **64.82s** (Full prompt recomputation) | **Bonsai: 0% eviction / HyperQwen: 100% eviction** |
-| **Total Session Wall Time** | **432,442 prompt tokens** | **411.29s (6.85 minutes)** | **625.40s (10.42 minutes)** | **Bonsai finishes 3.57 minutes faster (1.52x speedup)** |
-
-*Underlying JSON ledgers: [`scratch/mega_bonsai_mega_512k_result.json`](../../scratch/mega_bonsai_mega_512k_result.json) and [`scratch/mega_hyperqwen_huge_result.json`](../../scratch/mega_hyperqwen_huge_result.json).*
+| **Phase 3: Agent 1 T2** | 161,063 tokens | **4.95s** (Evaluated 52 delta tokens in 407 ms) | **247.19s** (Full prompt recomputation) | Bonsai: 0% eviction / HyperQwen: 100% eviction |
+| **Phase 4: Subagent 2 T2** | 55,198 tokens | **32.70s** (Evaluated 36 delta tokens in 309 ms) | **64.82s** (Full prompt recomputation) | Bonsai: 0% eviction / HyperQwen: 100% eviction |
+| **Total Session Wall Time** | **432,442 prompt tokens** | **411.29s** | **625.40s** | Unified pool avoids context recomputation |
 
 ---
 
@@ -53,9 +51,9 @@ To evaluate real production multi-agent performance without synthetic toy prompt
 A primary architectural distinction between native Windows `llama.cpp` and WSL2 `vLLM` is how host RAM is registered and managed by the operating system kernel:
 
 ### 3.1 Bonsai: Pageable Virtual Commit (Windows First)
-Measured live via the Windows API (`GetProcessMemoryInfo`) under active 512K load:
-- **Physical Working Set**: **7,687 MB (~7.51 GB)**
-- **Private Virtual Commit (`PagefileUsage`)**: **22,722 MB (~22.19 GB)**
+Under active 512K load, memory allocation profiles reflect:
+- **Physical Working Set**: ~7.5 GB
+- **Private Virtual Commit (`PagefileUsage`)**: ~22.2 GB
 
 `llama-server.exe` allocates host memory tiers (`--cache-ram 16384`) using standard user-mode virtual allocations (`VirtualAlloc` / `malloc` with `MEM_COMMIT`). These pages are **not pinned** (`VirtualLock` is not applied). 
 

@@ -6,11 +6,8 @@ WSL launchers, and development workflows.
 
 ## qwen_tasks_analysis.mjs
 
-Telemetry exporter for Qwen task dispatches. Rebuilds (with **corrected
-semantics**) the one-off script that produced
-`docs/audits/telemetry/qwen_tasks_analysis_2026-09-13.json` — only that
-script's *output* was ever committed; the script itself was lost. This is the
-repo-tool reconstruction (M8, audit findings F17/F18).
+Telemetry exporter for Qwen task dispatches. Exports per-dispatch telemetry rows
+from on-disk session ledgers and task records into structured JSON.
 
 Node >= 22, ESM, **no dependencies**.
 
@@ -28,7 +25,7 @@ Node >= 22, ESM, **no dependencies**.
 node scripts/qwen_tasks_analysis.mjs \
   --tasks-dir    ~/.castor/tasks \
   --sessions-dir ~/.castor/sessions \
-  --out          docs/audits/telemetry/qwen_tasks_analysis_<date>.json
+  --out          qwen_tasks_analysis.json
 ```
 
 A readable summary (dispatch/session counts, reused sessions, null-`promptTokens`
@@ -36,8 +33,7 @@ count, output path) is written to **stderr**; the JSON array goes to `--out`.
 
 ### Output schema
 
-Field-compatible with the committed 2026-09-13 analysis — **25 fields, fixed
-order**:
+Standard dispatch telemetry schema — **25 fields, fixed order**:
 
 ```
 taskId, sessionId, cwd, createdAt, durationSec, status, isError,
@@ -47,22 +43,19 @@ completionTokens, thinkingTokens, ttftMedMs, rateAvgTokS, continuations,
 emptyStreamRetries, engineEmptyResponses
 ```
 
-### Corrected semantics (the audit's defects)
+### Metrics Semantics
 
 1. **`promptTokens` = MAX per-turn `metrics.promptTokens`** across the
-   session's events — the *final context depth*. It is **never 0**: when the
-   engine never reported a non-zero `promptTokens` (or there are no events at
-   all) the value is **`null`**, distinguishing *unknown* from *zero*.
-   (The original summed every turn's `promptTokens`, inflating a ~200K-token
-   context into a ~27M "total".)
+   session's events — representing the final context depth. When the engine
+   does not report a non-zero `promptTokens` (or if no events are recorded)
+   the value is **`null`**, distinguishing unknown from zero.
 
 2. **Session-cumulative fields are stamped ONLY on the LAST dispatch row** of
    each session (the most recent `createdAt`); every other row of that session
    carries **`null`**. The cumulative fields are: `turns`, `completionTokens`,
    `thinkingTokens`, `tools`, `totalBash`, `ttftMedMs`, `continuations`,
-   `emptyStreamRetries`, `engineEmptyResponses`. This stops downstream sums
-   from double-counting a reused session (the ~3× inflation in the original,
-   where the same session total was repeated on every row).
+   `emptyStreamRetries`, `engineEmptyResponses`. This ensures aggregation
+   queries do not multiply values across multi-turn sessions.
 
    Session-level *descriptive* fields that are **not** cumulative sums —
    `endStatus`, `bashCommandsSummary`, `filesWritten`, `filesReadCount`,
