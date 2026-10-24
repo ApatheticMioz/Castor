@@ -1,6 +1,6 @@
 //! Structural AST search/replace powered by `ast-grep` (tree-sitter).
 //!
-//! Port of `mcp-castor/src/harness/services/ast_service.js` semantics:
+//! Structural capabilities:
 //! - `ast_search` — code-like pattern matching with metavariables (`$VAR`, `$$$BODY`).
 //! - `ast_replace` — structural rewrite that preserves formatting, with a
 //!   mandatory syntax gate (reparse + ERROR-node check) and per-file rollback.
@@ -24,7 +24,7 @@ use thiserror::Error;
 
 use super::sandbox::{self, SandboxError};
 
-/// Directories skipped during recursive walks (mirrors `sandbox_fs.js`).
+/// Directories skipped during recursive walks.
 const IGNORED_DIRS: &[&str] = &[
     ".venv",
     "venv",
@@ -59,7 +59,7 @@ pub enum AstError {
     Language(String),
 }
 
-/// A single AST match. `line`/`col` are 0-indexed (matching the JS contract).
+/// A single AST match. `line`/`col` are 0-indexed.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Match {
     pub file: String,

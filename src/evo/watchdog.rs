@@ -1,9 +1,6 @@
 //! Watchdog: stall detection for the evo lineage.
 //!
-//! Ported from `mcp-castor/src/harness/evo/watchdog.js` — only the
-//! detection rule is ported (stagnation = no fitness improvement).
-//! The JS version tracks consecutive rejections; the Rust version
-//! adapts this to the lineage context:
+//! Detection rules for lineage stagnation:
 //! - Stalled when the newest commit is older than 7 days, OR
 //! - Stalled when the last 5 commits show no fitness improvement.
 
@@ -136,10 +133,9 @@ mod tests {
     #[test]
     fn old_commit_is_stalled() {
         let mut lin = Lineage::default();
-        // A commit from 2020-01-01 (long ago).
+        // Commit older than the 7-day stall threshold.
         lin.add_node(node("a", &[], Some(1.0), "2020-01-01T00:00:00.000Z"))
             .unwrap();
-        // Now is 2026-01-01.
         let now_ms = 1_767_225_600_000;
         assert_eq!(evaluate(&lin, now_ms), WatchdogVerdict::StalledOld);
     }
@@ -160,7 +156,7 @@ mod tests {
             lin.add_node(node(&id, &parents_refs, Some(0.5), &created))
                 .unwrap();
         }
-        // Now is 2026-01-06 (recent, so not StalledOld).
+        // Current timestamp within the 7-day window.
         let now_ms = 1_767_225_600_000 + 5 * 86_400_000;
         assert_eq!(
             evaluate(&lin, now_ms),

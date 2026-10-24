@@ -1,9 +1,9 @@
 //! Cross-process task-slot semaphore.
 //!
-//! Faithful port of `mcp-castor/src/semaphore.js`. Slots are file leases at
-//! `<state>/tasks/slots/slot_N.json` (N in `0..max_slots`). A lease is claimed
-//! with an atomic O_EXCL create, heartbeated by rewriting the file, and freed
-//! by an ownership-checked unlink.
+//! Slots are file leases at `<state>/tasks/slots/slot_N.json` (N in `0..max_slots`).
+//! A lease is claimed with an atomic O_EXCL create and freed by an ownership-checked
+//! unlink. Stale lease reclamation is based on PID liveness (`is_process_alive`)
+//! and zombie detection.
 //!
 //! Semantics preserved:
 //! - **Single-tenant multi-slot invariant**: a tenant (pid) may hold up to

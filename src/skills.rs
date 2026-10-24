@@ -18,12 +18,10 @@
 //! <workflow body in markdown>
 //! ```
 //!
-//! This module is **model-routed**: it only discovers skills and renders a
-//! compact index for the system prompt. There is deliberately **no keyword
-//! matching** here — that was a locked v1.0.0 decision in the JS reference
-//! (`mcp-castor/src/skills.js`), whose matching / negation-regex code is
-//! deleted by design. The model reads the SKILL.md body via `read_file` when
-//! a skill is relevant; injection happens runner-side later.
+//! This module is **model-routed**: it discovers skills and renders a
+//! compact index for the system prompt. There is no keyword matching:
+//! the model reads the SKILL.md body via `read_file` when a skill is
+//! relevant; injection happens runner-side later.
 //!
 //! Frontmatter parsing is hand-rolled (a flat `key: value` subset) rather than
 //! pulling in a YAML crate: for a two-field frontmatter the hand parser is

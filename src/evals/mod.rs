@@ -1,5 +1,5 @@
 //! Evals data model: strict typed parsing of the eval fixture formats
-//! defined in `castor/evals/EVALS.md` (`task.toml` + `trace.jsonl`).
+//! defined in `evals/EVALS.md` (`task.toml` + `trace.jsonl`).
 //!
 //! `fixture` is the data model; `replay` is the trace-replaying engine;
 //! `runner` glues them together with the real session loop and the

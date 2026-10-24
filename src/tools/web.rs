@@ -1,5 +1,4 @@
-//! Web search and document fetching, ported from
-//! `mcp-castor/src/harness/services/web_service.js`.
+//! Web search and document fetching.
 //!
 //! `web_search` runs a strict provider chain:
 //!   1. SearXNG JSON API (only when `searxng_url` is configured). If it is

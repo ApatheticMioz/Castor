@@ -30,7 +30,7 @@ use serde_json::json;
 use crate::proxy::sanitize::{SseSanitizer, sanitize_request_body};
 use crate::state::{AcquireResult, Locks, StateDir};
 
-/// Inbound request body limit (50 MB, matching the JS proxy).
+/// Inbound request body limit (50 MB).
 const MAX_BODY_BYTES: usize = 50 * 1024 * 1024;
 
 /// Singleton lock TTL (30 s).

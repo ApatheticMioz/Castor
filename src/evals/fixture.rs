@@ -1,6 +1,6 @@
 //! Strict typed parsing of eval fixtures: `task.toml` and `trace.jsonl`.
 //!
-//! Formats are defined in `castor/evals/EVALS.md` (§2 task format, §3 trace
+//! Formats are defined in `evals/EVALS.md` (§2 task format, §3 trace
 //! format). Both parsers are strict: unknown fields are denied, and any
 //! malformed input yields a typed error naming the offending file/line.
 

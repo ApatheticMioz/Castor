@@ -415,9 +415,8 @@ fn default_config_path(client: &str) -> std::path::PathBuf {
 
 /// The `castor mcp` server spec merged into the client's config JSON.
 ///
-/// The command is the current executable (or `node index.js`-style dev
-/// invocation is intentionally NOT used here — this is the Rust binary),
-/// so the registration is self-contained and npm-free.
+/// The command points to the current binary executable,
+/// ensuring the client registration is fully self-contained.
 fn castor_server_spec() -> serde_json::Value {
     let command = std::env::current_exe()
         .map(|p| p.to_string_lossy().into_owned())

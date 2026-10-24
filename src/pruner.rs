@@ -1,6 +1,6 @@
 //! State directory retention / pruning.
 //!
-//! Faithful port of the policy semantics in `mcp-castor/src/state_pruner.js`:
+//! Retention policy semantics:
 //! - **Sessions**: a session directory is a candidate only when its event
 //!   stream carries a terminal event (`session_end` / `session_error`) AND it
 //!   is not referenced by an incomplete (not-done) task. Candidates are then
@@ -29,7 +29,7 @@ use thiserror::Error;
 /// Default TTL for scratch directory artifacts (4 days in milliseconds).
 pub const DEFAULT_SCRATCH_TTL_MS: u64 = 4 * 86_400_000;
 
-/// Retention policy (defaults ported from `state_pruner.js`).
+/// Retention policy.
 #[derive(Debug, Clone)]
 pub struct PrunePolicy {
     /// Max age in milliseconds (default 14 days).
@@ -218,7 +218,7 @@ pub fn apply(state_dir: &Path, plan: &mut PrunePlan) -> Result<usize, PruneError
 }
 
 // ---------------------------------------------------------------------------
-// Session planning (port of `pruneOldSessions`)
+// Session planning
 // ---------------------------------------------------------------------------
 
 fn plan_sessions(state_dir: &Path, policy: &PrunePolicy, now: u64) -> Vec<PathBuf> {

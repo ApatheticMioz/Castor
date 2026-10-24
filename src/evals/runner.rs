@@ -454,7 +454,7 @@ fn last_assistant_content(steps: &[TraceStep]) -> Option<String> {
     })
 }
 
-/// F6: every `tool_call` has a matching `tool_result`.
+/// Fitness criterion: every `tool_call` has a matching `tool_result`.
 fn trace_every_tool_call_has_result(steps: &[TraceStep]) -> CheckStatus {
     let calls = tool_calls(steps);
     let result_ids: HashSet<String> = tool_results(steps).into_iter().map(|(id, _)| id).collect();
@@ -473,7 +473,7 @@ fn trace_every_tool_call_has_result(steps: &[TraceStep]) -> CheckStatus {
     }
 }
 
-/// F4: the final assistant message is non-empty.
+/// Fitness criterion: the final assistant message is non-empty.
 fn trace_final_message_nonempty(steps: &[TraceStep]) -> CheckStatus {
     match last_assistant_content(steps) {
         Some(content) if !content.trim().is_empty() => CheckStatus::Pass,
@@ -482,7 +482,7 @@ fn trace_final_message_nonempty(steps: &[TraceStep]) -> CheckStatus {
     }
 }
 
-/// F3: no tool output was spilled to `.scratch/`.
+/// Fitness criterion: no tool output was spilled to `.scratch/`.
 fn trace_no_tool_output_spilled(steps: &[TraceStep]) -> CheckStatus {
     let spilled = steps
         .iter()
@@ -582,7 +582,7 @@ fn trace_edit_file_count_eq_1(steps: &[TraceStep]) -> CheckStatus {
     }
 }
 
-/// F5: no two consecutive identical *failed* tool calls.
+/// Fitness criterion: no two consecutive identical *failed* tool calls.
 fn trace_no_consecutive_identical_failed_toolcall(steps: &[TraceStep]) -> CheckStatus {
     let calls = tool_calls(steps);
     let failed_by_id: HashMap<String, bool> = tool_results(steps).into_iter().collect();

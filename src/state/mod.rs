@@ -1,9 +1,8 @@
 //! Persistent state layout and the lockfile / wedge-counter primitives.
 //!
-//! This is a faithful port of the `mcp-castor` lifecycle-lock semantics
-//! (`server_lifecycle.js`): O_EXCL lockfiles with TTL-based stale recovery
-//! via rename-to-tombstone, PID-ownership-checked release, and an atomic
-//! (write-temp-then-rename) wedge counter.
+//! Provides filesystem-backed synchronization across processes: O_EXCL lockfiles
+//! with TTL-based stale recovery via rename-to-tombstone, PID-ownership-checked
+//! release, and an atomic (write-temp-then-rename) wedge counter.
 //!
 //! Layout under the state dir:
 //! ```text
@@ -283,9 +282,8 @@ fn now_millis() -> u64 {
 
 /// Process-local serialization for wedge-counter read-modify-write.
 ///
-/// Cross-process atomicity is out of scope for this primitive (matching the
-/// JS implementation); this mutex makes concurrent in-process increments
-/// lossless.
+/// Ensures concurrent in-process increments are lossless. Cross-process
+/// atomicity relies on atomic write-and-rename of the counter file.
 static COUNTER_LOCK: Mutex<()> = Mutex::new(());
 
 /// An atomic (write-temp-then-rename) counter at `<locks>/<name>.count`.

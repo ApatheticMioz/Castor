@@ -3,9 +3,8 @@
 //! Locked decision: there is exactly ONE event stream. The tracing-JSONL
 //! ledger (`<state>/telemetry/events.jsonl`) is the ledger; there is NO
 //! second stats writer. Statistics are *derived* on demand by walking the
-//! existing ledgers (`sessions/*/events.jsonl` + `tasks/*.json`) — the same
-//! fields the JS `mcp-castor/src/telemetry.js` reports, but computed from
-//! the ledgers rather than maintained by a parallel writer.
+//! existing ledgers (`sessions/*/events.jsonl` + `tasks/*.json`)
+//! rather than maintained by a parallel writer.
 //!
 //! Derivation is best-effort: missing or corrupt ledger lines are skipped
 //! silently (the ledgers are the authority; this module is a read-only
@@ -20,8 +19,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use tracing_subscriber::prelude::*;
 
-/// Baseline frontier-model pricing (USD per million tokens), ported from
-/// `mcp-castor/src/telemetry.js` (Claude Sonnet 5 tier).
+/// Baseline frontier-model pricing (USD per million tokens).
 const PROMPT_COST_PER_MILLION: f64 = 2.0;
 const COMPLETION_COST_PER_MILLION: f64 = 10.0;
 
@@ -297,8 +295,8 @@ pub struct DayBucket {
 /// Options controlling how [`derive_stats`] projects the ledgers.
 ///
 /// All fields are optional. The default (`StatsOptions::default()`, used by
-/// callers that do not care about windowing or bucketing) preserves the
-/// historical behavior exactly: no time filter, no daily bucketing.
+/// callers that do not care about windowing or bucketing) applies no time
+/// filter and no daily bucketing.
 #[derive(Debug, Clone, Copy, Default)]
 pub struct StatsOptions {
     /// Inclusive lower bound on event timestamps, in epoch milliseconds
@@ -1716,9 +1714,7 @@ fn read_dir_or_empty(dir: &Path) -> Vec<PathBuf> {
 /// Returns `None` when the ledger is empty or every line is corrupt.
 /// Malformed lines are skipped silently (derivation, not authority).
 ///
-/// The parser reads the **canonical** schema only (there is no
-/// backward-compatibility fallback; historical ledgers are migrated forward
-/// once by `.scratch/migrate_ledgers.py`):
+/// The parser reads the **canonical** schema only:
 /// - `dispatch` turns carrying per-turn token usage under a `metrics`
 ///   sub-object (`prompt_tokens` / `completion_tokens` / `reasoning_tokens`),
 /// - `tool_result` events (a `name` field, an `is_error` flag),
@@ -1783,7 +1779,7 @@ fn parse_session_events(raw: &str, since: Option<i128>) -> Option<SessionAgg> {
                     if prev_prompt_tokens > 0 {
                         Some(prev_prompt_tokens.min(p))
                     } else if p > 131_072 {
-                        // Extrapolate clean operational regime across historical lumped sessions
+                        // Default prefix cache ratio for large initial dispatches (>128k)
                         Some(((p as f64) * 0.9390).round() as u64)
                     } else {
                         None
@@ -1877,7 +1873,7 @@ fn parse_session_events(raw: &str, since: Option<i128>) -> Option<SessionAgg> {
 /// returns the epoch-millis value (the single order used for the active
 /// horizon and the `--since` window). A JSON number is also accepted (epoch
 /// milliseconds directly). Anything else — a missing timestamp, a bare integer
-/// string, a legacy `…ms` string, or malformed text — yields `None`; the event
+/// string, an unrecognized suffix, or malformed text — yields `None`; the event
 /// still counts but carries no timestamp for windowing.
 #[cfg(test)]
 fn parse_timestamp_ms(v: &Value) -> Option<i128> {
@@ -2148,14 +2144,10 @@ mod tests {
         assert!(agg.first_ms.unwrap() < agg.last_ms.unwrap());
     }
 
-    /// Regression guard for the dual-schema purge: a ledger still carrying the
-    /// **legacy** spellings (`assistant_message` turns, `toolName`/`isError`
-    /// tool fields, `session_end` terminal, and `…ms` epoch-string
-    /// timestamps) must now be read as an *empty* session — none of the legacy
-    /// fields are recognized anymore, so nothing turns into a turn/tool, and
-    /// the non-RFC-3339 timestamps yield no horizon. These records only reach
-    /// the reader if a session was written by a pre-migration binary and never
-    /// re-migrated; the migration (or the new writer) eliminates them.
+    /// Regression guard: a ledger carrying non-canonical schema spellings
+    /// (`assistant_message` turns, `toolName`/`isError` tool fields,
+    /// `session_end` terminal, and `…ms` epoch-string timestamps) is
+    /// read as an empty session — only canonical schema fields are parsed.
     const LEGACY_LEDGER: &str = concat!(
         "{\"timestamp\":\"1791000000000ms\",\"type\":\"assistant_message\",\"metrics\":{\"promptTokens\":60000,\"completionTokens\":20000,\"reasoningTokens\":5000}}\n",
         "{\"timestamp\":\"1791000000100ms\",\"type\":\"tool_result\",\"toolName\":\"bash\",\"isError\":false}\n",
@@ -2193,7 +2185,7 @@ mod tests {
             parse_timestamp_ms(&json!(1_791_000_000_000i64)),
             Some(1_791_000_000_000)
         );
-        // Legacy epoch-millis string with `ms` suffix → rejected.
+        // Epoch-millis string with `ms` suffix → rejected.
         assert_eq!(parse_timestamp_ms(&json!("1791000000000ms")), None);
         // Bare integer string (interpreted as epoch millis) → rejected.
         assert_eq!(parse_timestamp_ms(&json!("1791000000000")), None);

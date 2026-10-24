@@ -1,5 +1,4 @@
-//! 5-layer path containment policy, ported from
-//! `mcp-castor/src/harness/services/sandbox_fs.js`.
+//! 5-layer path containment policy.
 //!
 //! Layers (each a `pub fn` returning `Result<PathBuf, SandboxError>`):
 //! 1. `resolve_workspace_root` — canonicalize the workspace root
@@ -346,8 +345,7 @@ impl SandboxPolicy {
     }
 
     /// The tight policy used by [`crate::tools::fs::FsExecutor::new`] and the
-    /// eval runner, where only the workspace itself may be touched. This
-    /// preserves the historical single-root behavior (and its tests).
+    /// eval runner, where only the workspace itself may be touched.
     pub fn workspace_only(root: &Path) -> Self {
         let ws = canonical_or_self(root);
         Self::new(vec![ws.clone()], vec![ws])
@@ -731,7 +729,6 @@ mod tests {
 
     // ========================================================================
     // 137-Vector Security Table
-    // Ported verbatim from mcp-castor/tests/security.test.js
     // (123 attack vectors blocked + 14 allow vectors permitted)
     //
     // Each row: (input, op, expected, layer, path_operand, runnable)
@@ -739,9 +736,8 @@ mod tests {
     //     for allowed ones.
     //   - `runnable` = true when the vector can be exercised live against a
     //     Rust policy: `ShellPolicy` rows through `shell::validate`, path
-    //     rows through `normalize_traversal`. false for JS-only rules
-    //     (deadman-fuse / dry-run / module-isolation) that have no Rust
-    //     equivalent and are mapped to the closest layer.
+    //     rows through `normalize_traversal`. false for policy rules
+    //     (deadman-fuse / dry-run / module-isolation) mapped to the closest layer.
     // ========================================================================
 
     #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -831,7 +827,7 @@ mod tests {
         }
 
         // --- Category 4: Workspace Root Directory Overwrite (1) ---
-        // JS-only: writing a file over the root directory. Closest Rust
+        // Writing a file over the root directory. Closest Rust
         // layer is the path-containment policy (PathEscape).
         v.push(Vector {
             input: "<workspaceRoot>",
@@ -947,8 +943,7 @@ mod tests {
         }
 
         // --- Category 5c: In-Memory Dead-Man Fuse (1) ---
-        // JS-only: synthetic canary token. Closest Rust layer: none
-        // (mapped to DeadManFuse).
+        // Synthetic canary token mapped to DeadManFuse.
         v.push(Vector {
             input: "CANARY_DISASTER_FUSE_TOKEN",
             op: None,
@@ -959,8 +954,7 @@ mod tests {
         });
 
         // --- Category 5d: Dry-Run Hard Gate (1) ---
-        // JS-only: dry-run simulation. Closest Rust layer: none
-        // (mapped to DryRunGate).
+        // Dry-run simulation mapped to DryRunGate.
         v.push(Vector {
             input: "echo safe_dry_run_simulation",
             op: None,
@@ -971,8 +965,7 @@ mod tests {
         });
 
         // --- Category 5e: Structural Module Isolation (1) ---
-        // JS-only: zero-child-process guarantee. Closest Rust layer: none
-        // (mapped to ModuleIsolation).
+        // Zero-child-process guarantee mapped to ModuleIsolation.
         v.push(Vector {
             input: "shell_validator.js",
             op: None,

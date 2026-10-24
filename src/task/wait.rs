@@ -1,8 +1,6 @@
 //! Status / long-poll HTTP server.
 //!
-//! Faithful port of the `mcp-castor` status-server semantics
-//! (`task_registry.js` `statusHttpServer` + `wait_endpoint.test.js` +
-//! `status_lifecycle.test.js`):
+//! Architecture and invariants:
 //!
 //! - **Singleton**: acquires `Locks::acquire("status")` at startup. If the
 //!   lock is held by another live process, the server exits 0 with a single

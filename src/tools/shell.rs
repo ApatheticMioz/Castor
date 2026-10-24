@@ -1,6 +1,4 @@
-//! Shell command policy validator and sandboxed executor, ported from
-//! `mcp-castor/src/harness/services/shell_validator.js` and
-//! `mcp-castor/src/harness/services/shell_executor.js`.
+//! Shell command policy validator and sandboxed executor.
 //!
 //! `validate` classifies a command string and returns a typed refusal error
 //! for dangerous classes (fork bombs, disk wipes, `rm`/`del` on protected
@@ -60,8 +58,7 @@ const WIN_FLAGS: &[&str] = &["/f", "/s", "/q", "/p", "/a", "/c", "/e", "/t", "/y
 // Pattern-level blocks (verbatim, not path-aware).
 // ---------------------------------------------------------------------------
 
-/// Precompiled pattern-level block signatures, modeled on
-/// `mcp-castor/src/harness/services/shell_validator.js` `PATTERN_LEVEL_BLOCKS`.
+/// Precompiled pattern-level block signatures.
 /// Whitespace between tokens is tolerated (`\s*` / `\s+`) so spacing variants
 /// (e.g. `:() { :|:& };`) cannot bypass the matcher.
 fn pattern_blocks() -> &'static [(&'static str, Regex)] {
@@ -532,7 +529,7 @@ pub fn validate(cmd: &str) -> Result<(), ShellPolicyError> {
 // Executor
 // ---------------------------------------------------------------------------
 
-/// Per-stream capture ceiling (mirrors the JS executor's 256KB buffer cap).
+/// Per-stream capture ceiling (256KB buffer cap).
 const MAX_CAPTURE_BYTES: usize = 256 * 1024;
 
 /// Result of a sandboxed shell execution.

@@ -353,7 +353,7 @@ pub fn parse_task_trace(state: &StateDir, task_id: &str) -> Option<TaskTraceResp
         if !direct_matches.is_empty() {
             direct_matches
         } else {
-            // Single task session or legacy session: use all events
+            // Single task session or unpartitioned session: use all events
             all_events
         }
     };

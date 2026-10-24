@@ -1,6 +1,6 @@
 //! Task registry: in-memory task records with a disk mirror.
 //!
-//! Faithful port of the core semantics of `mcp-castor/src/task_registry.js`:
+//! Core semantics:
 //! - A task record is held in an in-memory map behind a `tokio::Mutex`.
 //! - Every state transition is mirrored to `<state>/tasks/task_<id>.json`
 //!   via write-temp-then-rename (atomic), so a crash mid-write never leaves a
@@ -24,7 +24,7 @@ use tokio::sync::{Mutex, broadcast};
 use crate::state::StateDir;
 use crate::task::semaphore::pid_alive;
 
-/// Hard cap on the elastic turn budget (port of `MAX_ELASTIC_TURNS`).
+/// Hard cap on the elastic turn budget.
 pub const MAX_ELASTIC_TURNS: u32 = 200;
 
 /// Task lifecycle status.
@@ -720,10 +720,10 @@ mod tests {
         // 1970-01-01 00:00:00 UTC
         assert_eq!(epoch_secs_to_utc(0), (1970, 1, 1, 0, 0, 0));
 
-        // Leap year: 2024-02-29 13:50:45 UTC = 1709214645
+        // Leap year: 1709214645
         assert_eq!(epoch_secs_to_utc(1709214645), (2024, 2, 29, 13, 50, 45));
 
-        // Future date: 2026-10-04 11:09:19 UTC = 1791112159
+        // Future epoch seconds: 1791112159
         assert_eq!(epoch_secs_to_utc(1791112159), (2026, 10, 4, 11, 9, 19));
     }
 

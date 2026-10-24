@@ -1,17 +1,15 @@
 //! SSE response pipeline: stateful UTF-8 reassembly, mid-stream error
 //! translation, multimodal guard, and the runaway-repetition circuit breaker.
 //!
-//! This is a faithful port of `mcp-castor/stream_proxy.js` +
-//! `mcp-castor/src/repetition_detector.js`. The UTF-8 reassembly uses the
-//! `encoding_rs` incremental decoder (the Rust equivalent of Node's
-//! `TextDecoder` with `{ stream: true }`): partial multi-byte sequences are
-//! held back across chunk boundaries and never emitted, and invalid bytes
-//! map to U+FFFD (the `errors="replace"` contract).
+//! The UTF-8 reassembly uses the `encoding_rs` incremental decoder with
+//! streaming support: partial multi-byte sequences are held back across chunk
+//! boundaries and never emitted, and invalid bytes map to U+FFFD
+//! (the `errors="replace"` contract).
 
 use encoding_rs::{CoderResult, Decoder, UTF_8};
 
 // ---------------------------------------------------------------------------
-// Repetition detector (port of `repetition_detector.js`)
+// Repetition detector
 // ---------------------------------------------------------------------------
 
 /// Characters that appear in long consecutive runs in model output (git-diff
@@ -157,8 +155,6 @@ pub const GUARD_MARKER_TEMPLATE: &str = "\n\n[StreamProxy Guard: Runaway repetit
 
 /// Incremental UTF-8 decoder that holds partial multi-byte sequences across
 /// chunk boundaries and replaces invalid bytes with U+FFFD.
-///
-/// This is the Rust equivalent of Node's `TextDecoder("utf-8", { stream: true })`.
 #[derive(Debug)]
 pub struct Utf8Reassembler {
     decoder: Decoder,
