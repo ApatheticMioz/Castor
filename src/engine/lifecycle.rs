@@ -1,9 +1,8 @@
 //! Engine lifecycle: boot, canary, wedge detection, heal, stop.
 //!
-//! Port of the `mcp-castor` `server_lifecycle.js` semantics: a cross-process
-//! boot lock, a canary that probes the configured model id, a wedge counter
-//! with a serialized heal, and a stop that prefers the configured
-//! `stop_command` over a process-group kill.
+//! Subsystem architecture: a cross-process boot lock, a canary that probes the
+//! configured model id, a wedge counter with a serialized heal, and a stop that
+//! prefers the configured `stop_command` over a process-group kill.
 
 use std::collections::VecDeque;
 use std::process::Stdio;
@@ -18,6 +17,7 @@ use tokio::sync::Mutex;
 
 use super::backend::{Backend, api_url};
 use crate::config::Config;
+use crate::platform::{is_wsl, wsl_normalize};
 use crate::state::{AcquireResult, Locks, StateDir, WedgeCounter};
 
 const BOOT_LOCK: &str = "engine_boot";
@@ -336,6 +336,13 @@ impl EngineLifecycle {
     }
 
     pub(crate) fn shell_command(cmd: &str) -> Command {
+        // When running under WSL, bare `cmd`/`taskkill` are resolved through
+        // Windows interop; add the explicit `.exe` so the right binary is found.
+        let cmd = if is_wsl() {
+            wsl_normalize(cmd)
+        } else {
+            cmd.to_string()
+        };
         #[cfg(windows)]
         {
             let mut c = Command::new("cmd");

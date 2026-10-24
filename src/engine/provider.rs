@@ -192,6 +192,7 @@ impl EngineClient {
             .clone()
             .ok_or(EngineError::MissingConfig { field: "model" })?;
         let http = reqwest::Client::builder()
+            .tcp_keepalive(Some(std::time::Duration::from_secs(15)))
             .build()
             .map_err(|e| EngineError::Connect {
                 url: base_url.clone(),

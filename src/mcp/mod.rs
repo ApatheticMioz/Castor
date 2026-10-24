@@ -20,6 +20,9 @@ use schemars::JsonSchema;
 use serde::Deserialize;
 use serde_json::Value;
 
+use crate::state::StateDir;
+use crate::task::semaphore::TaskSemaphore;
+
 /// Default tool-name prefix (matches `config::Config::tool_prefix` default).
 pub const DEFAULT_TOOL_PREFIX: &str = "castor";
 
@@ -398,9 +401,13 @@ impl CastorMcpServer {
                 ))]);
             }
         };
-        let state = crate::state::StateDir::from_config(&loaded.config);
+        let state = StateDir::from_config(&loaded.config);
         let _ = state.ensure();
         let registry = crate::task::registry::TaskRegistry::new(&state);
+        let sem = TaskSemaphore::new(
+            &state,
+            loaded.config.max_concurrent_tasks as usize,
+        );
 
         match params.action.as_str() {
             "list" => {
@@ -418,6 +425,7 @@ impl CastorMcpServer {
                 CallToolResult::success(vec![ContentBlock::text(out)])
             }
             "cancel_all" => {
+                sem.clear_reclaimable();
                 let tasks = registry.list().await;
                 let mut count = 0;
                 for t in tasks {
@@ -487,6 +495,7 @@ impl CastorMcpServer {
                 CallToolResult::success(vec![ContentBlock::text(text)])
             }
             "cancel" | "kill" => {
+                sem.clear_reclaimable();
                 let task_id = match params.task_id {
                     Some(ref id) => id,
                     None => {

@@ -53,7 +53,7 @@ function pickNewest(paths) {
 if (isWin) {
   const winBin = pickNewest([winReleaseExe, winDebugExe]);
   if (winBin) {
-    handleSpawn(spawn(winBin, args, { stdio: "inherit" }));
+    handleSpawn(spawn(winBin, args, { stdio: "inherit", cwd: root }));
   } else {
     // Forward to WSL2
     const wslRoot = root
@@ -69,11 +69,12 @@ if (isWin) {
       spawn("wsl.exe", ["--", wslBin, ...args], {
         stdio: "inherit",
         windowsHide: true,
+        cwd: root,
       })
     );
   }
 } else {
   const bin = pickNewest([linuxReleaseBin, linuxDebugBin]) ?? "castor";
-  handleSpawn(spawn(bin, args, { stdio: "inherit" }));
+  handleSpawn(spawn(bin, args, { stdio: "inherit", cwd: root }));
 }
 
