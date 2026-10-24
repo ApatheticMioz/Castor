@@ -361,8 +361,8 @@ impl SseSanitizer {
 // ---------------------------------------------------------------------------
 
 /// Placeholder text that replaces image blocks in the multimodal guard.
-pub const IMAGE_PLACEHOLDER: &str = "[Image file omitted: Local Qwen3.8-27B runs in pure text mode for Universal 245K context. \
-     Images must be inspected multimodally by the Lead Architect.]";
+pub const IMAGE_PLACEHOLDER: &str = "[Image file omitted: Local peer engineer runs in text mode under the active profile. \
+     Visual inspection is performed via read_file or multimodally by the Lead Architect.]";
 
 /// Returns whether local vision support is enabled via environment variables.
 pub fn is_vision_enabled() -> bool {

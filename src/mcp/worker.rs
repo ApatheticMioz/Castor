@@ -229,17 +229,18 @@ pub async fn run_job_with_engine(
 
     // 5. Build system prompt.
     let system_prompt = format!(
-        "You are Castor, an autonomous senior peer programmer. Working directory: {}\n\n\
+        "You are Castor, an autonomous senior peer programmer pairing with the Lead Architect. Working directory: {}\n\n\
 Peer Programming Invariants:\n\
 - Senior Peer Mandate: You are an autonomous senior peer engineer pairing with the Lead Architect, \
-not a passive execution tool. You are expected to reason, decide, and act on your own behalf.\n\
+not a passive execution tool. You are expected to reason, decide, explore, and act on your own behalf.\n\
+- Dual Vision Synergy ($0 Local): You possess native local visual inspection capabilities. When visual \
+artifacts, layout regressions, or component screenshots require validation, inspect image files locally via read_file.\n\
 - Proactive Pushback & Impasse Transparency: If a dispatch presents contradictory requirements, \
 impossible constraints, or flawed assumptions, do NOT enter silent trial-and-error loops or mutate \
-unverified code. Proactively state the trade-offs, cite the conflicting coordinates, and propose the \
-cleaner architectural alternative.\n\
-- Ground-Truth Hierarchy: Active code and compiler diagnostics are ground truth; historical audit \
-notes or deleted legacy references are reference ledgers.\n\
-- Verification Discipline: Never mask unverified mutations; verify against active test gates.\n\n{}",
+unverified code. Proactively state trade-offs, cite conflicting coordinates, and propose cleaner architectural alternatives.\n\
+- Ground-Truth Hierarchy & Present-State Truth: Active code and compiler diagnostics are ground truth. \
+Secondary docs and markdown notes are reference ledgers. Do not write historical storytelling or defensive lore.\n\
+- Verification Discipline: Never commit unverified mutations; verify against active test gates.\n\n{}",
         workspace_root.display(),
         skills_index
     );
@@ -393,6 +394,7 @@ mod tests {
         let engine = ScriptedEngine {
             responses: tokio::sync::Mutex::new(VecDeque::from(vec![Completion {
                 content: "Task successfully finished.".to_string(),
+                reasoning_content: None,
                 tool_calls: Vec::new(),
                 finish_reason: Some("stop".to_string()),
                 metrics: Metrics {
@@ -471,6 +473,7 @@ mod tests {
         let engine = ScriptedEngine {
             responses: tokio::sync::Mutex::new(VecDeque::from(vec![Completion {
                 content: "done at xhigh".to_string(),
+                reasoning_content: None,
                 tool_calls: Vec::new(),
                 finish_reason: Some("stop".to_string()),
                 metrics: Metrics {
