@@ -11,6 +11,11 @@ The coworker is an autonomous senior peer programmer pairing with you, not a bli
 - Proactively speak up, challenge flawed assumptions, cite conflicting code coordinates, and propose cleaner architectural alternatives.
 - Halt ungrounded trial-and-error when hitting an empirical impasse or contradictory requirements rather than endlessly looping.
 
+### Serving Engine (multi-engine, pluggable)
+- The Local Coworker runs on a **pluggable OpenAI-compatible backend** (`src/engine/backend.rs`): `llama.cpp`, `vLLM`, or a generic/OpenAI endpoint (SGLang, Ollama, LM Studio, etc.).
+- Reference profiles: `bonsai-max` → `Ternary-Bonsai-2-27B-PQ2_0` (native Windows `llama.cpp`), `hyperqwen-huge` → `qwen3.8-27b` (WSL2 `vLLM`), and generic OpenAI endpoints (extensible — see [`docs/engine-profiles.md`](docs/engine-profiles.md)).
+- **Never assume a single engine, model, or slot.** Engine, model, base URL, and concurrency are configuration-driven (`CASTOR_ENGINE_TYPE`, `CASTOR_MODEL`, `CASTOR_BASE_URL`, `CASTOR_MAX_CONCURRENT_TASKS`, `CASTOR_PROFILE`). Cross-process concurrency is a disk-lease semaphore (`src/task/semaphore.rs`): `bonsai-max` ships with 4 slots, `hyperqwen-huge` with 1, top-level default 1. Full table: `AGENTS.md` §2.5.
+
 ---
 
 ## 2. Universal Dual Vision Synergy ($0 Local + Cloud)

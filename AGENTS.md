@@ -16,8 +16,9 @@
 
 **Castor** is a local-first, **$0-token-cost** agent microkernel written in Rust that lets a
 high-reasoning cloud orchestrator (the *Lead Architect*) drive a locally-served
-**Qwen3.8-27B** peer programmer to do code exploration, structural AST
-surgery, testing, and file editing — all inside a zero-trust sandbox.
+peer programmer across any OpenAI-compatible serving engine (configured via pluggable
+profiles: `llama.cpp`, `vLLM`, `SGLang`, `Ollama`, `LM Studio`, etc. — see [`docs/engine-profiles.md`](docs/engine-profiles.md))
+to do code exploration, structural AST surgery, testing, and file editing — all inside a zero-trust sandbox.
 
 ```
 Lead Architect (cloud: Claude / Gemini / Antigravity)
@@ -26,7 +27,7 @@ Lead Architect (cloud: Claude / Gemini / Antigravity)
 castor  (Rust MCP server + Castor microkernel)
         |  in-process tool calls (<0.1 ms) + zero-turn HTTP wait (:18021)
         v
-Local Serving Engine (WSL2 / Linux, :18020)  ->  Serving Provider (Qwen3.8-27B default)
+Local Serving Engine (:18020)  ->  Pluggable Engine Profile (Bonsai / Qwen / Any)
 ```
 
 The crate root lives at the repository root (`Cargo.toml`). A Node.js cross-platform shim
@@ -42,7 +43,7 @@ which one it is before acting.
 | Persona | Runtime | Mandate | Hard Limits |
 |---|---|---|---|
 | **Lead Architect** | Cloud (Claude Code: GLM 5.3 text-only Plan / GLM 5.3-flash vision Exec; Antigravity: Gemini 3.8 Flash vision) | Architecture, task decomposition, plan & manifest authorship, supervisory steering, final synthesis. | **Never** bulk-read source into cloud context; **never** author code; offloads exploration to the Coworker in single-concern slices; **never** falls back to direct shell/file execution when coworker is offline. |
-| **Autonomous Execution Coworker** | Local peer programmer (Qwen3.8-27B default, or configured model) via Castor (`castor` MCP) | Hands-on execution & peer engineering: explore, AST surgery, edit, test, shell. Local peer programmer also has vision capability enabled. Proactively challenges flawed assumptions, proposes architectural alternatives, and returns grounded facts. | **Never** authors high-level plans/roadmaps; **never** escapes the sandbox root. |
+| **Autonomous Execution Coworker** | Local peer programmer (Ternary-Bonsai-2-27B or configured model) via Castor (`castor` MCP) | Hands-on execution & peer engineering: explore, AST surgery, edit, test, shell. Local peer programmer also has vision capability enabled. Proactively challenges flawed assumptions, proposes architectural alternatives, and returns grounded facts. | **Never** authors high-level plans/roadmaps; **never** escapes the sandbox root. |
 | **Autonomous Optimizer (Evo)** | Local, offline batch runner | Closed-loop mutation: propose -> evaluate -> select/revert against a deterministic fitness metric. | **Snapshot before mutating**; **revert on regression**; never edits files outside the candidate's snapshot list. |
 
 > **Honest attribution:** No agent may claim "we" or coworker collaboration
@@ -60,9 +61,9 @@ All commands are **relative** — never hardcode a drive letter or home path.
 - **Rust >= 1.85** (Cargo, Rust 2024 edition).
 - **Node.js >= 22** (optional, only for the `bin/castor.js` npm shim).
 - **Git** (leave `core.autocrlf` at default — `.gitattributes` pins LF).
-- **Optional, for the full live stack:** a GPU with >= 24 GB VRAM, WSL2 (or
-  native Linux), CUDA 12.4+, and an OpenAI-compatible serving engine (vLLM, Ollama,
-  LM Studio, SGLang, etc.; Qwen3.8-27B on `:18020` is the default).
+- **Optional, for the full live stack:** a GPU with >= 24 GB VRAM, Windows (or
+  native Linux / WSL2), CUDA 12.4+, and an OpenAI-compatible serving engine (`llama.cpp` PRISM CUDA,
+  vLLM, Ollama, LM Studio, SGLang, etc.; port `:18020` is the default).
   **You do NOT need a GPU to run the test gate** (see section 5).
 
 ### 2.2 Build
@@ -98,16 +99,16 @@ node bin/castor.js install --client all
 ### 2.5 Key environment variables & configuration
 | Variable | Default | Meaning |
 |---|---|---|
-| `CASTOR_MODEL` | `Qwen3.8-27B` | Target model identifier for the coworker. |
+| `CASTOR_MODEL` | `Ternary-Bonsai-2-27B-PQ2_0` | Target model identifier for the coworker (or configured profile). |
 | `CASTOR_BASE_URL` | `http://127.0.0.1:18020/v1` | OpenAI-compatible endpoint. |
 | `CASTOR_TOOL_PREFIX` | `castor` | Namespace prefix for MCP tools (`castor_coworker`, etc.). |
-| `CASTOR_MAX_CONCURRENT` | `1` | Cross-process execution slots (disk-lease semaphore). |
+| `CASTOR_MAX_CONCURRENT_TASKS` | `1` | Cross-process execution slots (disk-lease semaphore). Slot defaults: 1 top-level, 4 for `bonsai-max`, 1 for `hyperqwen-huge`. |
 | `CASTOR_STATE_DIR` | `~/.castor` | Root for task JSON, slot leases, session logs, Evo lineage. |
 | `STATUS_PORT` | `18021` | Zero-turn long-poll HTTP wait/status server. |
 | `STREAM_PROXY_PORT` | `18022` | Universal SSE streaming proxy (loopback only). |
 | `CASTOR_REASONING_EFFORT` | `medium` | Fallback effort when a dispatch sends none {xhigh, medium, low}. |
 | `TEST_OFFLINE` | *(unset)* | Set to `1` to force live suites to skip (GPU-less runs). |
-| `ALLOW_ENGINE_INTERRUPT` | `0` | Dangerous override: by default, test suites NEVER interrupt, probe, or reboot vLLM. |
+| `ALLOW_ENGINE_INTERRUPT` | `0` | Dangerous override: by default, test suites NEVER interrupt, probe, or reboot a running serving engine. |
 | `CASTOR_BASE_TURN_BUDGET` | `80` | Base turn budget before requiring supervisor lease extension or landing. |
 | `CASTOR_MAX_ELASTIC_TURNS` | `200` | Maximum allowed turn ceiling via supervisor lease extension. |
 | `CASTOR_BOOT_TIMEOUT_SECS` | `180` | Serving engine boot timeout in seconds before abort (default 3 minutes). |
@@ -221,7 +222,7 @@ skills/                  # Reusable SKILL.md workflow recipes
 - **NEVER** dump raw binary file bytes (`.png`, `.jpg`, `.exe`, etc.) into plaintext string buffers or transcripts (`BinaryFileError` guard). PDF documents are natively parsed in-memory into clean UTF-8 text by both `read_file` (local filesystem) and `web_fetch` (online URLs) via `lopdf`.
 - **NEVER** silently catch, suppress, or mask errors or upstream HTTP status codes (Rule 8).
 - **NEVER** weaken, skip, or delete a failing test to "unblock" the build.
-- **NEVER** interrupt the running vLLM engine, fire completion probes into `:18020`, or issue stop/reboot commands during testing unless `ALLOW_ENGINE_INTERRUPT=1` is explicitly set.
+- **NEVER** interrupt the running serving engine, fire completion probes into `:18020`, or issue stop/reboot commands during testing unless `ALLOW_ENGINE_INTERRUPT=1` is explicitly set.
 - **NEVER** substitute cloud shell or file tools for coworker execution when the coworker is offline or fails; halt and notify the user or boot via 'castor server start'.
 
 ---
