@@ -207,6 +207,31 @@ pub fn builtin_profiles() -> std::collections::HashMap<String, PartialProfile> {
         },
     );
     map.insert(
+        "bonsai-8gb".to_string(),
+        PartialProfile {
+            model: Some("Ternary-Bonsai-2-27B-PQ2_0".to_string()),
+            base_url: Some("http://127.0.0.1:18020/v1".to_string()),
+            api_key: None,
+            engine_type: Some("llama_cpp".to_string()),
+            launch_command: Some("scripts\\bonsai\\start_bonsai_8gb.bat".to_string()),
+            stop_command: Some("taskkill /F /IM llama-server.exe".to_string()),
+            max_context: Some(8192),
+            ports: Some(PartialPorts {
+                engine: Some(18020),
+                status: None,
+                proxy: None,
+            }),
+            max_concurrent_tasks: Some(1),
+            tool_prefix: None,
+            probe_budget: None,
+            searxng_url: None,
+            brave_api_key: None,
+            openalex_email: None,
+            openalex_api_key: None,
+            boot_timeout_secs: None,
+        },
+    );
+    map.insert(
         "bonsai-12gb".to_string(),
         PartialProfile {
             model: Some("Ternary-Bonsai-2-27B-PQ2_0".to_string()),
@@ -216,6 +241,31 @@ pub fn builtin_profiles() -> std::collections::HashMap<String, PartialProfile> {
             launch_command: Some("scripts\\bonsai\\start_bonsai_12gb.bat".to_string()),
             stop_command: Some("taskkill /F /IM llama-server.exe".to_string()),
             max_context: Some(65536),
+            ports: Some(PartialPorts {
+                engine: Some(18020),
+                status: None,
+                proxy: None,
+            }),
+            max_concurrent_tasks: Some(1),
+            tool_prefix: None,
+            probe_budget: None,
+            searxng_url: None,
+            brave_api_key: None,
+            openalex_email: None,
+            openalex_api_key: None,
+            boot_timeout_secs: None,
+        },
+    );
+    map.insert(
+        "bonsai-16gb".to_string(),
+        PartialProfile {
+            model: Some("Ternary-Bonsai-2-27B-PQ2_0".to_string()),
+            base_url: Some("http://127.0.0.1:18020/v1".to_string()),
+            api_key: None,
+            engine_type: Some("llama_cpp".to_string()),
+            launch_command: Some("scripts\\bonsai\\start_bonsai_16gb.bat".to_string()),
+            stop_command: Some("taskkill /F /IM llama-server.exe".to_string()),
+            max_context: Some(131072),
             ports: Some(PartialPorts {
                 engine: Some(18020),
                 status: None,
@@ -1353,6 +1403,46 @@ mod tests {
         assert_eq!(
             (res.config.ports.engine, res.sources.port_engine),
             (18020, Source::File)
+        );
+    }
+
+    #[test]
+    fn builtin_profile_bonsai_8gb_resolves() {
+        let dir = tmp_dir();
+        let res = load_with(|key| match key {
+            "CASTOR_STATE_DIR" => Some(dir.to_string_lossy().into()),
+            "CASTOR_PROFILE" => Some("bonsai-8gb".into()),
+            _ => None,
+        })
+        .unwrap();
+        assert_eq!(res.profile_name.as_deref(), Some("bonsai-8gb"));
+        assert_eq!(res.config.model.as_deref(), Some("Ternary-Bonsai-2-27B-PQ2_0"));
+        assert_eq!(res.config.engine_type.as_deref(), Some("llama_cpp"));
+        assert_eq!(res.config.max_context, Some(8192));
+        assert_eq!(res.config.max_concurrent_tasks, 1);
+        assert_eq!(
+            res.config.launch_command.as_deref(),
+            Some(r"scripts\bonsai\start_bonsai_8gb.bat")
+        );
+    }
+
+    #[test]
+    fn builtin_profile_bonsai_16gb_resolves() {
+        let dir = tmp_dir();
+        let res = load_with(|key| match key {
+            "CASTOR_STATE_DIR" => Some(dir.to_string_lossy().into()),
+            "CASTOR_PROFILE" => Some("bonsai-16gb".into()),
+            _ => None,
+        })
+        .unwrap();
+        assert_eq!(res.profile_name.as_deref(), Some("bonsai-16gb"));
+        assert_eq!(res.config.model.as_deref(), Some("Ternary-Bonsai-2-27B-PQ2_0"));
+        assert_eq!(res.config.engine_type.as_deref(), Some("llama_cpp"));
+        assert_eq!(res.config.max_context, Some(131072));
+        assert_eq!(res.config.max_concurrent_tasks, 1);
+        assert_eq!(
+            res.config.launch_command.as_deref(),
+            Some(r"scripts\bonsai\start_bonsai_16gb.bat")
         );
     }
 

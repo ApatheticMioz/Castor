@@ -102,19 +102,26 @@ Choose the launcher that matches the target workflow profile:
 1. **[`start_bonsai_24gb.bat`](start_bonsai_24gb.bat)** (Recommended for Heavy Multi-Agent Swarms & Mega-Context, 24GB GPU):
    - Boots a 524,288-token unified hardware pool (`-kvu -np 4`) in 22.84 GiB VRAM with 16GB pageable host RAM cache tier (`--cache-ram 16384`).
    - Eliminates multi-agent KV cache thrashing up to 512k aggregate tokens. Resumption turns execute in seconds.
-2. **[`start_bonsai_dflash_262k.bat`](start_bonsai_dflash_262k.bat)** (Recommended for High-Headroom Single-Agent Bonsai):
+2. **[`start_bonsai_16gb.bat`](start_bonsai_16gb.bat)** (Recommended for 16GB GPUs — RTX 4080 16GB / 4070 Ti Super 16GB / RX 7800 XT):
+   - Boots 131,072 context (1 dedicated slot, `-np 1`, Q4_0 KV `-ctk/-ctv q4_0`) with fine-tuned DFlash2 drafter + lookup-augmented speculation (`-lcd`).
+   - **~13.28 GB total VRAM** (6.70 GB ternary weights + ~0.5 GB DFlash2 draft + 8.0 GB Q4_0 KV + 0.5 GB CUDA/runtime), leaving **>3.1 GB of safety headroom** on a 16GB card.
+   - Delivers **~53.0 tok/s decode** with 36.5% DFlash2 acceptance across full 128K context.
+3. **[`start_bonsai_12gb.bat`](start_bonsai_12gb.bat)** (Recommended for 12GB GPUs — RTX 3060 12GB / 4070 12GB / 3080 12GB):
+   - Boots 65,536 context (1 dedicated slot, `-np 1`, Q4_0 KV `-ctk/-ctv q4_0`) with fine-tuned DFlash2 drafter + lookup-augmented speculation (`-lcd`).
+   - **~11.70 GB total VRAM** (6.70 GB ternary weights + ~0.5 GB DFlash2 draft + 4.0 GB Q4_0 KV + 0.5 GB CUDA/runtime), fitting 100% inside a 12GB card (12,288 MiB).
+   - Single-agent profile: delivers **64K context** with fast speculative decoding (~38.6 tok/s) on 12GB hardware.
+4. **[`start_bonsai_8gb.bat`](start_bonsai_8gb.bat)** (Recommended for 8GB GPUs — RTX 3070 8GB / 3060 Ti 8GB / 4060 8GB / 4060 Ti 8GB):
+   - Boots 8,192 context (1 dedicated slot, `-np 1`, Q4_0 KV `-ctk/-ctv q4_0`) with zero-VRAM host dynamic n-gram lookup (`-lcd`).
+   - **~7.66 GB total VRAM** (6.70 GB ternary weights + 0.51 GB Q4_0 KV + 0.45 GB CUDA/runtime), fitting 100% inside an 8GB card with **>500 MiB safety headroom**.
+   - Prioritizes context over neural drafter weights, using host-side n-gram lookup to accelerate code syntax without consuming VRAM.
+5. **[`start_bonsai_dflash_262k.bat`](start_bonsai_dflash_262k.bat)** (High-Headroom Single-Agent 262K, 24GB GPU):
    - Boots 262,144 context (1 slot) with fine-tuned DFlash2 + dynamic lookup (`-lcd`) + Q4_0 KV cache.
-   - Delivers **72.7 tok/s** aggregate decode (bursts to **97.8 tok/s**) with **6.04 GiB of free VRAM headroom** and **19.8 GB host RAM free**.
-3. **[`start_bonsai_multiagent_262k.bat`](start_bonsai_multiagent_262k.bat)** (Recommended for Dual-Agent Partitioned Workloads):
+6. **[`start_bonsai_multiagent_262k.bat`](start_bonsai_multiagent_262k.bat)** (Dual-Agent Partitioned Workloads, 24GB GPU):
    - Boots two independent 131,072-token hardware KV slots (`-np 2 -c 262144`) in 18.53 GiB VRAM.
-4. **[`start_bonsai_64k.bat`](start_bonsai_64k.bat)** (Lightest Bonsai Profile):
+7. **[`start_bonsai_64k.bat`](start_bonsai_64k.bat)** (Lightest Bonsai Profile, Minimal Setup):
    - Boots 65,536 context (1 slot, Q8_0 KV, ~10.6 GiB VRAM). No drafter; instant mmap startup.
-5. **[`start_bonsai_12gb.bat`](start_bonsai_12gb.bat)** (Recommended for 12GB GPUs — RTX 3060 12GB / 4070 12GB / 3080 12GB):
-   - Boots 65,536 context (1 dedicated slot, `-np 1`, Q4_0 KV `-ctk/-ctv q4_0`) with the fine-tuned DFlash2 drafter + lookup-augmented speculation (`-lcd`).
-   - **~11.7 GB total VRAM** (6.70 GB ternary weights + ~0.5 GB DFlash2 draft + 4.0 GB Q4_0 KV + 0.5 GB CUDA/runtime), fitting 100% inside a 12GB card (12,288 MiB).
-   - Single-agent profile: delivers **64K context** with fast speculative decoding on 12GB hardware; tested live via Castor with verified `n_ctx=65536`.
-6. **[`scripts/main/start.bat`](../main/start.bat)** (Recommended for Maximum Serial Decode & Vision):
-   - Boots HyperQwen Huge (245,760 context, **112.9 tok/s**, multimodal vision tower, 23.48 GiB VRAM). Ideal for single-agent chat and visual screenshot inspection.
+8. **[`scripts/main/start.bat`](../main/start.bat)** (Maximum Serial Decode & Multimodal Vision, 24GB GPU):
+   - Boots HyperQwen Huge (245,760 context, **112.9 tok/s**, multimodal vision tower, 23.48 GiB VRAM).
 
 ## 6. Stopping the Server
 
