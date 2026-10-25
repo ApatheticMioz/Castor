@@ -1,5 +1,5 @@
 @echo off
-REM Max VRAM / 512K Unified Multi-Agent Launcher for Ternary-Bonsai-2-27B.
+REM High-end 24GB profile: Max-VRAM / 512K Unified Multi-Agent Launcher for Ternary-Bonsai-2-27B.
 REM Allocates a 524,288-token unified hardware KV cache pool (-c 524288 -kvu) across 4 slots (-np 4)
 REM with Q4_0 FlashAttention KV compression (16 KiB/tok), 16GB pageable host RAM cache tier (--cache-ram 16384),
 REM and fine-tuned DFlash2 drafter. Completely eliminates multi-agent KV cache thrashing on mega-context tasks.
@@ -42,7 +42,7 @@ if not exist "%DRAFT%" (
 )
 
 echo ===================================================================
-echo Starting Max-VRAM Bonsai-27B (512K Unified Pool, 4 Slots, Q4_0 KV)
+echo Starting Bonsai-27B HIGH-END 24GB PROFILE (512K Unified Pool, 4 Slots, Q4_0 KV)
 echo Target:         %MODEL% (6.70 GiB, 1.58-bit ternary)
 echo Drafter:        %DRAFT%
 echo Slots:          %SLOTS% dynamic slots (-np %SLOTS%)

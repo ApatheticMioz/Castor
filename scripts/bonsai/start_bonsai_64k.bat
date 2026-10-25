@@ -1,7 +1,7 @@
 @echo off
-REM High-performance, zero-RAM-spill launcher for Ternary-Bonsai-2-27B on llama.cpp (PRISM CUDA).
-REM Configured for 100% GPU VRAM residency, Flash Attention, Q8 KV cache, and 98%+ prefix cache hits.
-REM Port: 18020 (Castor default)
+REM 64K single-slot launcher for Ternary-Bonsai-2-27B on llama.cpp (PRISM CUDA).
+REM 100% GPU VRAM residency, Flash Attention, Q8 KV cache, LCP prefix caching.
+REM Lightest Bonsai profile; ~10.6 GiB VRAM. Port: 18020 (Castor default).
 
 setlocal
 cd /d "%~dp0\..\.."
@@ -24,7 +24,7 @@ if not exist "%MODEL%" (
 )
 
 echo ===================================================================
-echo Starting Ternary-Bonsai-2-27B-PQ2_0 on llama.cpp (PRISM CUDA)
+Starting Ternary-Bonsai-2-27B-PQ2_0 (64K Single-Slot)
 echo VRAM Footprint: ~10.6 GiB (6.7 GiB weights + 2.0 GiB Q8 KV Cache)
 echo Context:        %CTX% tokens (1 slot, continuous LCP prefix caching)
 echo FlashAttention: ON (Micro-batch: %UBATCH%, Batch: %BATCH%)

@@ -56,7 +56,7 @@ An engine profile is declared in `~/.castor/config.json` (or via environment var
   "model": "Ternary-Bonsai-2-27B-PQ2_0",
   "max_context": 524288,
   "max_concurrent_tasks": 4,
-  "launch_command": "cmd /c scripts\\bonsai\\start_bonsai_max_512k.bat",
+  "launch_command": "cmd /c scripts\\bonsai\\start_bonsai_24gb.bat",
   "stop_command": "taskkill /F /IM llama-server.exe",
   "boot_timeout_secs": 180
 }
@@ -95,6 +95,47 @@ Castor ships with tuned profiles as reference implementations. All profiles are 
 - **Engine**: Any OpenAI-compatible chat completion provider
 - **Reasoning**: Standard top-level parameters with fallback to content parsing
 - **Concurrency**: Configurable cross-process slots via `CASTOR_MAX_CONCURRENT_TASKS`
+
+### 4.4 `bonsai-12gb` (Native Windows llama.cpp, 12GB VRAM)
+- **Engine**: PRISM CUDA `llama-server.exe` (native Windows)
+- **Model**: `Ternary-Bonsai-2-27B-PQ2_0` (DFlash2 draft) — 1.58-bit ternary base
+- **Drafter**: `Bonsai-2-27B-DFlash2-Q8_0` (fine-tuned; falls back to `Qwen3.8-27B-DFlash2-Q4_K_M`)
+- **Concurrency**: 1 dedicated slot (`-np 1`)
+- **Context**: 32,768 tokens (`-c 32768`), quantized KV `-ctk q4_0 -ctv q4_0`
+- **Reasoning**: DeepSeek format via `delta.reasoning_content`
+- **Launcher**: `scripts/bonsai/start_bonsai_12gb.bat`
+
+---
+
+## 4a. Hardware / VRAM Matrix — `bonsai-12gb` 12GB Budget
+
+`bonsai-12gb` is the lowest-VRAM Bonsai serving profile, engineered to run the full 27B
+ternary model plus a DFlash2 speculative drafter on **12GB GPUs** with a comfortable safety
+headroom. Total budget ≈ **10.0 GB** VRAM, leaving **≥ 2.0 GB** of headroom on a 12GB card.
+
+| Component | Allocation | Notes |
+|---|---|---|
+| Main weights (`Ternary-Bonsai-2-27B-PQ2_0`, 1.58-bit ternary) | ~6.70 GB | ~100% offload (`-ngl 99`) |
+| DFlash2 drafter (`Bonsai-2-27B-DFlash2-Q8_0`, Q8_0) | ~0.50 GB | Fully offloaded (`-ngld 99`), `-sps 0.05` |
+| KV cache (`-c 32768`, `-ctk/-ctv q4_0`) | ~2.00 GB | 4-bit K/V at 32K context, single slot |
+| CUDA context + activation / scratch buffers | ~0.80 GB | FlashAttention (`-fa`, `-b 2048`, `-ub 512`), dynamic `-lcd` lookup cache |
+| **Total** | **~10.00 GB** | **≥ 2.0 GB safety headroom on 12GB VRAM** |
+
+**Target hardware**: 12GB consumer GPUs — RTX 3060 12GB, RTX 4070 12GB, RTX 3080 12GB.
+
+**Trade-offs vs. the heavier Bonsai profiles:**
+- **Single slot only (`-np 1`)**: no unified multi-slot pool, so multi-agent mega-context
+  interleaving (the `bonsai-max` 512K workflow) is unavailable — this is a single-agent /
+  single-session profile.
+- **32K context cap**: a deliberate reduction from the 262K/512K profiles to keep KV cache
+  within the 12GB envelope. Deep single-agent history is supported; very deep resumption
+  workloads are not.
+- **Keeps the speculative decode win**: fine-tuned DFlash2 + lookup-augmented speculation
+  (`--spec-type draft-dflash,ngram-mod`, `-lcd`) is retained, so the 12GB profile still
+  delivers the fast-decode characteristic of the Bonsai family at the smallest footprint.
+- **Pageable host RAM** (Windows first): inactive pages may be trimmed to the NVMe pagefile
+  under host memory pressure, so the profile degrades gracefully rather than hard-OOMing the
+  host (see `scripts/bonsai/README.md` §3).
 
 ---
 

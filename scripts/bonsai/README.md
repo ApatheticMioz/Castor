@@ -10,7 +10,7 @@ All configurations target port 18020 under mutual exclusivity:
 - **Bonsai Runtime**: Native Windows `llama.cpp` PRISM CUDA binary with fused FlashAttention and dynamic n-gram lookup (`-lcd`).
 - **HyperQwen Runtime**: WSL2 Ubuntu custom vLLM 0.30.0 with AutoRound Marlin W4A16 GEMM kernels, DFlash2 speculative decoding, KVarN tiled KV compression, and CPU-offloaded Qwen-VL vision.
 
-| Dimension | Pure Bonsai 262K ([`start_bonsai_262k.bat`](start_bonsai_262k.bat)) | Bonsai 262K DFlash2 ([`start_bonsai_dflash_262k.bat`](start_bonsai_dflash_262k.bat)) | Bonsai Max 512K Unified ([`start_bonsai_max_512k.bat`](start_bonsai_max_512k.bat)) | HyperQwen Default ([`scripts/main/start.bat`](../main/start.bat)) (245k Huge + DFlash2) | Architecture Profile |
+| Dimension | Pure Bonsai 262K ([`start_bonsai_262k.bat`](start_bonsai_262k.bat)) | Bonsai 262K DFlash2 ([`start_bonsai_dflash_262k.bat`](start_bonsai_dflash_262k.bat)) | Bonsai Max 512K Unified ([`start_bonsai_24gb.bat`](start_bonsai_24gb.bat)) | HyperQwen Default ([`scripts/main/start.bat`](../main/start.bat)) (245k Huge + DFlash2) | Architecture Profile |
 |---|---|---|---|---|---|
 | **Runtime Engine** | `llama.cpp` PRISM CUDA (Native Windows) | `llama.cpp` PRISM CUDA (Native Windows) | `llama.cpp` PRISM CUDA (Native Windows) | Custom vLLM 0.30.0 + DFlash2 + KVarN (WSL2 Ubuntu) | Native Windows vs WSL2 |
 | **Model Weights** | **6.70 GiB** (PQ2_0 1.58-bit ternary) | 6.70 GiB base + 1.91 GiB fine-tuned draft | 6.70 GiB base + 1.91 GiB fine-tuned draft | 14.71 GiB (AutoRound W4A16) + 1.2 GiB draft | 1.58-bit vs 4-bit |
@@ -29,6 +29,7 @@ All configurations target port 18020 under mutual exclusivity:
 ## 2. Multi-Agent Context Dynamics
 
 Multi-turn interleaved workloads across multiple agents exhibit distinct KV cache eviction characteristics:
+
 - **Phase 1 (Lead Architect Turn 1)**: Ingests repository context (~161,000 tokens).
 - **Phase 2 (Subagent Turn 1)**: Ingests evaluation dataset (~55,000 tokens).
 - **Phase 3 (Lead Architect Turn 2 - Resumption)**: Returns control to Lead Architect back at ~161,000 tokens depth.
@@ -36,7 +37,7 @@ Multi-turn interleaved workloads across multiple agents exhibit distinct KV cach
 
 ### Context Performance Profile
 
-| Phase | Context Depth | Bonsai Max 512K Unified ([`start_bonsai_max_512k.bat`](start_bonsai_max_512k.bat)) | HyperQwen Huge ([`scripts/main/start.bat`](../main/start.bat)) | Cache Behavior |
+| Phase | Context Depth | Bonsai Max 512K Unified ([`start_bonsai_24gb.bat`](start_bonsai_24gb.bat)) | HyperQwen Huge ([`scripts/main/start.bat`](../main/start.bat)) | Cache Behavior |
 |---|---|---|---|---|
 | **Phase 1: Agent 1 T1** | 161,015 tokens | 308.91s (~530 tok/s prefill) | **248.01s** (~650 tok/s prefill) | Cold prefill |
 | **Phase 2: Subagent 2 T1** | 55,166 tokens | **64.73s** (~888 tok/s prefill) | 65.39s (~850 tok/s prefill) | Divergent prefill |
@@ -98,7 +99,7 @@ On a 24 GB GPU, HyperQwen stores KV caches in unquantized 16-bit format (`float1
 
 Choose the launcher that matches the target workflow profile:
 
-1. **[`start_bonsai_max_512k.bat`](start_bonsai_max_512k.bat)** (Recommended for Heavy Multi-Agent Swarms & Mega-Context):
+1. **[`start_bonsai_24gb.bat`](start_bonsai_24gb.bat)** (Recommended for Heavy Multi-Agent Swarms & Mega-Context, 24GB GPU):
    - Boots a 524,288-token unified hardware pool (`-kvu -np 4`) in 22.84 GiB VRAM with 16GB pageable host RAM cache tier (`--cache-ram 16384`).
    - Eliminates multi-agent KV cache thrashing up to 512k aggregate tokens. Resumption turns execute in seconds.
 2. **[`start_bonsai_dflash_262k.bat`](start_bonsai_dflash_262k.bat)** (Recommended for High-Headroom Single-Agent Bonsai):
@@ -106,5 +107,22 @@ Choose the launcher that matches the target workflow profile:
    - Delivers **72.7 tok/s** aggregate decode (bursts to **97.8 tok/s**) with **6.04 GiB of free VRAM headroom** and **19.8 GB host RAM free**.
 3. **[`start_bonsai_multiagent_262k.bat`](start_bonsai_multiagent_262k.bat)** (Recommended for Dual-Agent Partitioned Workloads):
    - Boots two independent 131,072-token hardware KV slots (`-np 2 -c 262144`) in 18.53 GiB VRAM.
-4. **[`scripts/main/start.bat`](../main/start.bat)** (Recommended for Maximum Serial Decode & Vision):
+4. **[`start_bonsai_64k.bat`](start_bonsai_64k.bat)** (Lightest Bonsai Profile):
+   - Boots 65,536 context (1 slot, Q8_0 KV, ~10.6 GiB VRAM). No drafter; instant mmap startup.
+5. **[`start_bonsai_12gb.bat`](start_bonsai_12gb.bat)** (Recommended for 12GB GPUs — RTX 3060 12GB / 4070 12GB / 3080 12GB):
+   - Boots 32,768 context (1 dedicated slot, `-np 1`, Q4_0 KV `-ctk/-ctv q4_0`) with the fine-tuned DFlash2 drafter + lookup-augmented speculation (`-lcd`).
+   - **~10.0 GB total VRAM** (6.70 GB ternary weights + ~0.5 GB DFlash2 draft + 2.0 GB Q4_0 KV + 0.8 GB CUDA/runtime), leaving **≥ 2.0 GB safety headroom** on a 12GB card.
+   - Single-agent profile: keeps the fast-decode speculative win of the Bonsai family at the smallest footprint; not a multi-slot mega-context profile.
+6. **[`scripts/main/start.bat`](../main/start.bat)** (Recommended for Maximum Serial Decode & Vision):
    - Boots HyperQwen Huge (245,760 context, **112.9 tok/s**, multimodal vision tower, 23.48 GiB VRAM). Ideal for single-agent chat and visual screenshot inspection.
+
+## 6. Stopping the Server
+
+**[`stop_bonsai.bat`](stop_bonsai.bat)** is the deterministic teardown for all Bonsai launchers:
+it issues a graceful `taskkill` first, waits up to 5s for a clean exit (releasing VRAM and the
+dynamic `-lcd` lookup cache file), then force-kills any survivor and verifies the process is gone.
+Safe to run when nothing is up (no-op). Exit code 0 on success, 1 if the process survives.
+
+> The HyperQwen (WSL vLLM) runtime is stopped with **[`scripts/main/stop.bat`](../main/stop.bat)** instead —
+> do not use `stop_bonsai.bat` for it; the two runtimes share the GPU and port 18020 under mutual
+> exclusivity, so only one is ever running.

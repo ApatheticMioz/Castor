@@ -688,10 +688,10 @@ fn test_wsl_normalize_adversarial_paths() {
     use castor::platform::wsl_normalize;
 
     // A Windows command with \bonsai must not escape \b to ASCII 0x08 (backspace) in WSL sh
-    let cmd = "cmd.exe /c scripts\\bonsai\\start_bonsai_max_512k.bat";
+    let cmd = "cmd.exe /c scripts\\bonsai\\start_bonsai_24gb.bat";
     let norm = wsl_normalize(cmd);
     if cfg!(target_os = "linux") && std::path::Path::new("/proc/sys/fs/binfmt_misc/WSLInterop").exists() {
-        assert_eq!(norm, "cmd.exe /c scripts/bonsai/start_bonsai_max_512k.bat");
+        assert_eq!(norm, "cmd.exe /c scripts/bonsai/start_bonsai_24gb.bat");
         assert!(!norm.contains("\\b"), "Must not leave literal \\b exposed to shell expansion");
     }
 
