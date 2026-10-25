@@ -6,6 +6,11 @@
 //!   engine chat → execute tool calls → append results → continue until the
 //!   model produces a final or the turn budget is exhausted.
 //!
+//! Named sessions persist their sanitized conversation history to
+//! `<state>/sessions/<id>/messages.json` (end of each turn + normal
+//! completion) and resume it at the start of a later dispatch, subject to
+//! the 75% `max_context` watermark.
+//!
 //! Budgets, cooperative landing, loop detection, and the JSONL event ledger
 //! live here; the loop detector and event logger are split into submodules.
 
@@ -16,10 +21,11 @@ use std::fs;
 use std::path::{Path, PathBuf};
 
 use async_trait::async_trait;
+use serde::{Deserialize, Serialize};
 use thiserror::Error;
 use tracing::warn;
 
-use crate::engine::{EngineClient, EngineError, Message, Metrics, ToolSchema};
+use crate::engine::{EngineClient, EngineError, Message, Metrics, ToolCall, ToolSchema};
 use crate::state::StateDir;
 
 use events::EventLogger;
@@ -226,6 +232,13 @@ pub struct SessionOptions {
     /// Consecutive non-mutating bash probes before the probe-budget advisory
     /// is injected. Defaults to 4.
     pub probe_budget: usize,
+    /// The engine's max context (in tokens). Drives the session-history
+    /// watermark: a resumed session rolls to a fresh `[system, user]` pair
+    /// when the loaded history plus the new prompt is expected to exceed
+    /// 75% of this budget (tokens approximated as `chars / 4`). `0` (the
+    /// default) means the watermark is disabled — history always resumes
+    /// when present (zero behavior change for callers that don't set it).
+    pub max_context: usize,
 }
 
 impl SessionOptions {
@@ -236,6 +249,7 @@ impl SessionOptions {
             workspace: None,
             reasoning_effort: None,
             probe_budget: DEFAULT_PROBE_BUDGET,
+            max_context: 0,
         }
     }
 
@@ -246,6 +260,7 @@ impl SessionOptions {
             workspace: Some(workspace),
             reasoning_effort: None,
             probe_budget: DEFAULT_PROBE_BUDGET,
+            max_context: 0,
         }
     }
 
@@ -375,6 +390,162 @@ Hint: use read_file with start_line/end_line or search_code to inspect specific 
     }
 }
 
+/// The on-disk shape of a single persisted history message.
+///
+/// Deliberately a *projection* of [`Message`]: it carries only `role`,
+/// `content`, `tool_calls`, and `tool_call_id` — it never carries a
+/// `reasoning_content` payload, so persisted history is sanitized of any
+/// deliberation trace ("cleared to `None`").
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct PersistedMessage {
+    role: String,
+    content: String,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    tool_calls: Vec<PersistedToolCall>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    tool_call_id: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct PersistedToolCall {
+    index: usize,
+    id: String,
+    name: String,
+    arguments: String,
+}
+
+impl From<&PersistedMessage> for Message {
+    fn from(p: &PersistedMessage) -> Self {
+        Message {
+            role: p.role.clone(),
+            content: p.content.clone(),
+            tool_calls: p
+                .tool_calls
+                .iter()
+                .map(|t| ToolCall {
+                    index: t.index,
+                    id: t.id.clone(),
+                    name: t.name.clone(),
+                    arguments: t.arguments.clone(),
+                })
+                .collect(),
+            tool_call_id: p.tool_call_id.clone(),
+        }
+    }
+}
+
+/// Project a [`Message`] into its persisted (sanitized) form.
+fn to_persisted(m: &Message) -> PersistedMessage {
+    // Reasoning is never persisted: the projection has no `reasoning_content`
+    // field at all (the "cleared to None" guarantee), and any ` think` trace
+    // inside assistant content is stripped to prevent context bloat.
+    let content = if m.role == "assistant" {
+        strip_think_tags(&m.content)
+    } else {
+        m.content.clone()
+    };
+    PersistedMessage {
+        role: m.role.clone(),
+        content,
+        tool_calls: m
+            .tool_calls
+            .iter()
+            .map(|t| PersistedToolCall {
+                index: t.index,
+                id: t.id.clone(),
+                name: t.name.clone(),
+                arguments: t.arguments.clone(),
+            })
+            .collect(),
+        tool_call_id: m.tool_call_id.clone(),
+    }
+}
+
+/// The persisted-history location: `<state>/sessions/<session_id>/messages.json`.
+fn session_messages_path(state: &StateDir, session_id: &str) -> PathBuf {
+    state.sessions().join(session_id).join("messages.json")
+}
+
+/// Persist a session's sanitized conversation history.
+///
+/// Drops `system` messages (the system prompt is re-supplied on resume, not
+/// stored) and strips ` think` traces from assistant messages. Best-effort: a
+/// write failure is logged, never propagated (it must not crash the session).
+fn save_messages(state: &StateDir, session_id: &str, messages: &[Message]) {
+    let path = session_messages_path(state, session_id);
+    let sanitized: Vec<PersistedMessage> = messages
+        .iter()
+        .filter(|m| m.role != "system")
+        .map(to_persisted)
+        .collect();
+    if let Some(parent) = path.parent()
+        && let Err(e) = fs::create_dir_all(parent)
+    {
+        warn!(session = %session_id, "failed to create session history dir: {e}");
+        return;
+    }
+    match serde_json::to_vec_pretty(&sanitized) {
+        Ok(bytes) => {
+            if let Err(e) = fs::write(&path, bytes) {
+                warn!(session = %session_id, "failed to persist session history: {e}");
+            }
+        }
+        Err(e) => {
+            warn!(session = %session_id, "failed to serialize session history: {e}");
+        }
+    }
+}
+
+/// Load a previously persisted session history.
+///
+/// Returns `None` when the file is absent or unreadable (a fresh session) or
+/// when it cannot be parsed. On success, returns the reconstructed non-system
+/// [`Message`]s, ready to be prepended to a fresh `[system, user]` pair.
+fn load_messages(state: &StateDir, session_id: &str) -> Option<Vec<Message>> {
+    let path = session_messages_path(state, session_id);
+    let bytes = fs::read(&path).ok()?;
+    let persisted: Vec<PersistedMessage> = serde_json::from_slice(&bytes).ok()?;
+    Some(persisted.iter().map(Message::from).collect())
+}
+
+/// Approximate a text's token count as `chars / 4` (the rough chars-per-token
+/// heuristic for a 4-chars/token packing).
+fn approx_tokens(text: &str) -> usize {
+    text.chars().count() / 4
+}
+
+/// Approximate a message list's token count (sum of per-message `chars / 4`).
+fn history_tokens(messages: &[Message]) -> usize {
+    messages.iter().map(|m| approx_tokens(&m.content)).sum()
+}
+
+/// The 75% rollover watermark for a given `max_context` token budget.
+fn watermark_tokens(max_context: usize) -> usize {
+    (max_context as u64 * 75 / 100) as usize
+}
+
+/// Decide whether a loaded history should be resumed or rolled over.
+///
+/// Resumes when the watermark is disabled (no options, or `max_context == 0`)
+/// or when the loaded history plus the new user prompt fits within 75% of
+/// `max_context`. Otherwise the session rolls over to a fresh `[system, user]`
+/// pair (the caller simply does not prepend the history).
+fn should_resume(
+    history: &[Message],
+    new_user_prompt: &str,
+    options: Option<&SessionOptions>,
+) -> bool {
+    let Some(opts) = options else {
+        return true; // no options → no budget known → resume (disabled)
+    };
+    if opts.max_context == 0 {
+        return true; // watermark disabled
+    }
+    let wm = watermark_tokens(opts.max_context);
+    let est = history_tokens(history) + approx_tokens(new_user_prompt);
+    est <= wm
+}
+
 /// Run a multi-turn agent session.
 ///
 /// Builds the message list (tool schemas last, for the vLLM APC contract),
@@ -411,7 +582,27 @@ pub async fn run_session(
     // session runtime) so the telemetry duration series has a source.
     let started = std::time::Instant::now();
 
-    let mut messages = vec![msg("system", system_prompt), msg("user", user_prompt)];
+    // Named sessions resume their persisted history (see the module docs):
+    // the system prompt is re-supplied first, the sanitized non-system history
+    // is prepended (if present and within the 75% `max_context` watermark), and
+    // the new user prompt is appended last. `None` state or an empty/absent
+    // history yields the original fresh `[system, user]` shape.
+    let mut messages = vec![msg("system", system_prompt)];
+    if let Some(state) = options.and_then(|o| o.state.as_ref())
+        && let Some(history) = load_messages(state, session_id)
+        && !history.is_empty()
+    {
+        if should_resume(&history, user_prompt, options) {
+            messages.extend(history);
+        } else {
+            tracing::info!(
+                session = %session_id,
+                "persisted history exceeds the 75% max_context watermark; \
+                 rolling over to a fresh session"
+            );
+        }
+    }
+    messages.push(msg("user", user_prompt));
     let mut loop_detector = LoopDetector::new(LOOP_WINDOW, LOOP_THRESHOLD);
     let mut turns: u32 = 0;
     let mut final_text = String::new();
@@ -821,6 +1012,12 @@ impasse, state your findings and ask for alignment rather than continuing to re-
                 }
             }
         }
+
+        // End of turn: persist the sanitized history so a later dispatch can
+        // resume it (subject to the 75% `max_context` watermark on load).
+        if let Some(state) = options.and_then(|o| o.state.as_ref()) {
+            save_messages(state, session_id, &messages);
+        }
     }
 
     // Budget exhausted.
@@ -863,6 +1060,12 @@ impasse, state your findings and ask for alignment rather than continuing to re-
             "duration_ms": elapsed_ms,
         }))
         .map_err(RunnerError::Io)?;
+
+    // Normal completion (and budget-exhausted landing): persist the final
+    // sanitized history so a later dispatch resumes from here.
+    if let Some(state) = options.and_then(|o| o.state.as_ref()) {
+        save_messages(state, session_id, &messages);
+    }
 
     Ok(SessionResult {
         final_text,
@@ -1964,6 +2167,276 @@ mod tests {
         assert!(pointer.contains("Tool output spilled to disk"));
         assert!(pointer.contains("--- Head preview"));
         assert!(pointer.contains("--- Tail preview"));
+        let _ = std::fs::remove_dir_all(state.root());
+    }
+
+    // --- Session-history persistence & 75% watermark ----------------------
+
+    #[test]
+    fn save_and_load_round_trips_sanitized_non_system_history() {
+        let state = tmp_state();
+        let messages = vec![
+            msg("system", "SYS"),
+            msg("user", "do the thing"),
+            Message {
+                role: "assistant".into(),
+                content: "\u{3c}think\u{3e} reasoning 42 \u{3c}/think\u{3e} the answer is 42"
+                    .into(),
+                tool_calls: vec![tc("c1", "bash", r#"{"cmd":"ls"}"#)],
+                tool_call_id: None,
+            },
+            Message {
+                role: "tool".into(),
+                content: "file1".into(),
+                tool_calls: Vec::new(),
+                tool_call_id: Some("c1".into()),
+            },
+        ];
+        save_messages(&state, "roundtrip", &messages);
+
+        // The file lands at <state>/sessions/<id>/messages.json.
+        let path = state.sessions().join("roundtrip").join("messages.json");
+        assert!(path.exists(), "messages.json must be written: {path:?}");
+
+        let loaded = load_messages(&state, "roundtrip").expect("history must load");
+
+        // System message is dropped; 3 non-system messages remain.
+        assert_eq!(loaded.len(), 3, "system must be dropped; got {loaded:?}");
+        assert!(
+            !loaded.iter().any(|m| m.role == "system"),
+            "system must not be persisted"
+        );
+
+        // The opening think tag is stripped from the assistant message; the
+        // reasoning/answer content survives. (The projection also carries no
+        // `reasoning_content` payload at all — the "cleared to None" guarantee.)
+        let assistant = loaded.iter().find(|m| m.role == "assistant").unwrap();
+        assert!(
+            !assistant.content.contains("\u{3c}think\u{3e}"),
+            "opening think tag must be stripped: {}",
+            assistant.content
+        );
+        assert!(
+            assistant.content.contains("42"),
+            "non-think content must survive: {}",
+            assistant.content
+        );
+        // The tool_call and its id survive the round-trip.
+        assert_eq!(assistant.tool_calls.len(), 1);
+        assert_eq!(assistant.tool_calls[0].name, "bash");
+        assert_eq!(assistant.tool_calls[0].id, "c1");
+
+        // The tool message keeps its tool_call_id and content.
+        let tool = loaded.iter().find(|m| m.role == "tool").unwrap();
+        assert_eq!(tool.tool_call_id.as_deref(), Some("c1"));
+        assert_eq!(tool.content, "file1");
+
+        let _ = std::fs::remove_dir_all(state.root());
+    }
+
+    #[test]
+    fn load_messages_absent_file_is_none() {
+        let state = tmp_state();
+        // No messages.json was written for this session id.
+        let loaded = load_messages(&state, "never_saved");
+        assert!(loaded.is_none(), "absent history must load as None");
+        let _ = std::fs::remove_dir_all(state.root());
+    }
+
+    #[test]
+    fn watermark_within_budget_resumes() {
+        // max_context = 1000 → 75% watermark = 750 tokens.
+        // history: 1 message of 400 chars = 100 tokens; new prompt 100 chars = 25.
+        // 100 + 25 = 125 <= 750 → resume.
+        let history = vec![msg("user", "a".repeat(400))];
+        let mut opts = SessionOptions::with_state(tmp_state());
+        opts.max_context = 1000;
+        assert!(
+            should_resume(&history, &"b".repeat(100), Some(&opts)),
+            "history within the 75% watermark must resume"
+        );
+    }
+
+    #[test]
+    fn watermark_over_budget_rolls_over() {
+        // max_context = 100 → 75% watermark = 75 tokens.
+        // history: 400 chars = 100 tokens; new prompt 100 chars = 25 → 125 > 75.
+        let history = vec![msg("user", "a".repeat(400))];
+        let mut opts = SessionOptions::with_state(tmp_state());
+        opts.max_context = 100;
+        assert!(
+            !should_resume(&history, &"b".repeat(100), Some(&opts)),
+            "history over the 75% watermark must roll over"
+        );
+    }
+
+    #[test]
+    fn watermark_disabled_when_max_context_zero() {
+        // max_context = 0 is the default (disabled): any history resumes.
+        let history = vec![msg("user", "a".repeat(1_000_000))];
+        let opts = SessionOptions::with_state(tmp_state());
+        assert_eq!(opts.max_context, 0, "default must be disabled (0)");
+        assert!(
+            should_resume(&history, "prompt", Some(&opts)),
+            "zero max_context disables the watermark → always resume"
+        );
+    }
+
+    #[test]
+    fn watermark_disabled_when_no_options() {
+        // No options → no budget known → the watermark is disabled.
+        let history = vec![msg("user", "a".repeat(1_000_000))];
+        assert!(
+            should_resume(&history, "prompt", None),
+            "absent options disable the watermark → always resume"
+        );
+    }
+
+    #[tokio::test]
+    async fn second_dispatch_resumes_prior_history() {
+        let state = tmp_state();
+        let sid = "resume_session";
+
+        // First dispatch: one tool turn + a final. Persists history at the end.
+        let logger1 = EventLogger::new(&state, sid);
+        let engine1 = RecordingEngine::new(
+            vec![
+                comp("", vec![tc("c1", "bash", r#"{"cmd":"ls"}"#)]),
+                comp("First done.", Vec::new()),
+            ],
+            std::sync::Arc::new(CallRecorder::default()),
+        );
+        let executor1 = MockExecutor::new(vec!["file1".into()]);
+        let opts1 = SessionOptions::with_state(state.clone()); // max_context = 0 → resume
+        let res1 = run_session(
+            &engine1,
+            &executor1,
+            &logger1,
+            "SYS",
+            "first prompt",
+            &[tool_schema("bash")],
+            80,
+            Some(&opts1),
+        )
+        .await
+        .unwrap();
+        assert_eq!(res1.status, "completed");
+
+        // The persisted file was written at <state>/sessions/<id>/messages.json.
+        let path = state.sessions().join(sid).join("messages.json");
+        assert!(path.exists(), "messages.json must be persisted: {path:?}");
+
+        // Second dispatch: the first engine call must carry the prior history.
+        let logger2 = EventLogger::new(&state, sid);
+        let recorder2 = std::sync::Arc::new(CallRecorder::default());
+        let engine2 =
+            RecordingEngine::new(vec![comp("Second done.", Vec::new())], recorder2.clone());
+        let executor2 = MockExecutor::new(Vec::new());
+        let opts2 = SessionOptions::with_state(state.clone());
+        let res2 = run_session(
+            &engine2,
+            &executor2,
+            &logger2,
+            "SYS",
+            "second prompt",
+            &[tool_schema("bash")],
+            80,
+            Some(&opts2),
+        )
+        .await
+        .unwrap();
+        assert_eq!(res2.status, "completed");
+
+        // The first engine call of the second dispatch must include the prior
+        // user prompt, the prior tool result, and the new prompt appended last.
+        let first_call = &recorder2.calls.lock().await[0].messages;
+        assert!(
+            first_call
+                .iter()
+                .any(|m| m.role == "user" && m.content == "first prompt"),
+            "prior user prompt must be resumed"
+        );
+        assert!(
+            first_call
+                .iter()
+                .any(|m| m.role == "tool" && m.content == "file1"),
+            "prior tool result must be resumed"
+        );
+        let last = first_call.last().unwrap();
+        assert_eq!(
+            (last.role.as_str(), last.content.as_str()),
+            ("user", "second prompt"),
+            "the new prompt must be appended last: {first_call:?}"
+        );
+
+        let _ = std::fs::remove_dir_all(state.root());
+    }
+
+    #[tokio::test]
+    async fn second_dispatch_rolls_over_when_over_watermark() {
+        let state = tmp_state();
+        let sid = "rollover_session";
+
+        // First dispatch builds a large history (a 4000-char tool output).
+        let logger1 = EventLogger::new(&state, sid);
+        let big_out = "x".repeat(4000); // ~1000 tokens
+        let engine1 = RecordingEngine::new(
+            vec![
+                comp("", vec![tc("c1", "bash", r#"{"cmd":"big"}"#)]),
+                comp("First done.", Vec::new()),
+            ],
+            std::sync::Arc::new(CallRecorder::default()),
+        );
+        let executor1 = MockExecutor::new(vec![big_out]);
+        let opts1 = SessionOptions::with_state(state.clone());
+        let _ = run_session(
+            &engine1,
+            &executor1,
+            &logger1,
+            "SYS",
+            "first",
+            &[tool_schema("bash")],
+            80,
+            Some(&opts1),
+        )
+        .await
+        .unwrap();
+
+        // Second dispatch with a tiny max_context → history exceeds 75% →
+        // roll over to a fresh [system, user] (no prior history resumed).
+        let logger2 = EventLogger::new(&state, sid);
+        let recorder2 = std::sync::Arc::new(CallRecorder::default());
+        let engine2 =
+            RecordingEngine::new(vec![comp("Second done.", Vec::new())], recorder2.clone());
+        let executor2 = MockExecutor::new(Vec::new());
+        let mut opts2 = SessionOptions::with_state(state.clone());
+        opts2.max_context = 100; // 75% = 75 tokens; prior history ~1000+ tokens
+
+        let res2 = run_session(
+            &engine2,
+            &executor2,
+            &logger2,
+            "SYS",
+            "second",
+            &[tool_schema("bash")],
+            80,
+            Some(&opts2),
+        )
+        .await
+        .unwrap();
+        assert_eq!(res2.status, "completed");
+
+        // Rollover: the first engine call must be exactly [system, user].
+        let first_call = &recorder2.calls.lock().await[0].messages;
+        assert_eq!(
+            first_call.len(),
+            2,
+            "rollover must start fresh [system, user]; got {first_call:?}"
+        );
+        assert_eq!(first_call[0].role, "system");
+        assert_eq!(first_call[1].role, "user");
+        assert_eq!(first_call[1].content, "second");
+
         let _ = std::fs::remove_dir_all(state.root());
     }
 }

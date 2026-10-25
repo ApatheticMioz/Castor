@@ -193,7 +193,10 @@ mod tests {
         let wsl = is_wsl();
         let has_marker = std::path::Path::new("/proc/sys/fs/binfmt_misc/WSLInterop").exists();
         // Detection is consistent with at least one artifact.
-        assert!(wsl || !has_marker, "is_wsl() inconsistent with WSLInterop marker");
+        assert!(
+            wsl || !has_marker,
+            "is_wsl() inconsistent with WSLInterop marker"
+        );
     }
 
     #[cfg(unix)]
@@ -207,10 +210,7 @@ mod tests {
                 wsl_normalize("taskkill /F /T /PID 1234"),
                 "taskkill.exe /F /T /PID 1234"
             );
-            assert_eq!(
-                wsl_normalize("cmd /c echo hi"),
-                "cmd.exe /c echo hi"
-            );
+            assert_eq!(wsl_normalize("cmd /c echo hi"), "cmd.exe /c echo hi");
             assert_eq!(
                 wsl_normalize(r"cmd /c scripts\bonsai\start.bat"),
                 "cmd.exe /c scripts/bonsai/start.bat"

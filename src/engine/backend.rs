@@ -71,14 +71,17 @@ pub struct EngineCapabilities {
 
 impl Backend {
     pub fn from_config(config: &Config) -> Self {
-        match config.engine_type.as_deref().map(str::to_ascii_lowercase).as_deref() {
-            Some("llama.cpp") | Some("llamacpp") | Some("llama_cpp") | Some("llama") | Some("bonsai") => {
-                Self::LlamaCpp
-            }
+        match config
+            .engine_type
+            .as_deref()
+            .map(str::to_ascii_lowercase)
+            .as_deref()
+        {
+            Some("llama.cpp") | Some("llamacpp") | Some("llama_cpp") | Some("llama")
+            | Some("bonsai") => Self::LlamaCpp,
             Some("vllm") | Some("hyperqwen") => Self::Vllm,
-            Some("generic") | Some("openai") | Some("sglang") | Some("ollama") | Some("lmstudio") => {
-                Self::Generic
-            }
+            Some("generic") | Some("openai") | Some("sglang") | Some("ollama")
+            | Some("lmstudio") => Self::Generic,
             _ => Self::Legacy,
         }
     }

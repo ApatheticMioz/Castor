@@ -526,17 +526,18 @@ impl EngineClient {
     }
 }
 
-static RE_THINK: LazyLock<regex::Regex> = LazyLock::new(|| {
-    regex::Regex::new(r"(?s)<think>.*?</think>").expect("valid think regex")
-});
+static RE_THINK: LazyLock<regex::Regex> =
+    LazyLock::new(|| regex::Regex::new(r"(?s)<think>.*?</think>").expect("valid think regex"));
 static RE_TOOL_CALL: LazyLock<regex::Regex> = LazyLock::new(|| {
     regex::Regex::new(r"(?s)<tool_call>(.*?)</tool_call>").expect("valid tool_call regex")
 });
 static RE_FUNC: LazyLock<regex::Regex> = LazyLock::new(|| {
-    regex::Regex::new(r"(?s)<function=([a-zA-Z0-9_\-]+)>(.*?)</function>").expect("valid function regex")
+    regex::Regex::new(r"(?s)<function=([a-zA-Z0-9_\-]+)>(.*?)</function>")
+        .expect("valid function regex")
 });
 static RE_PARAM: LazyLock<regex::Regex> = LazyLock::new(|| {
-    regex::Regex::new(r"(?s)<parameter=([a-zA-Z0-9_\-]+)>(.*?)</parameter>").expect("valid parameter regex")
+    regex::Regex::new(r"(?s)<parameter=([a-zA-Z0-9_\-]+)>(.*?)</parameter>")
+        .expect("valid parameter regex")
 });
 
 fn extract_fallback_tool_calls(raw_content: &str) -> (String, Vec<ToolCall>) {
@@ -549,7 +550,9 @@ fn extract_fallback_tool_calls(raw_content: &str) -> (String, Vec<ToolCall>) {
         .map(|m| (m.start(), m.end()))
         .collect();
     let is_inside_think = |start: usize| {
-        think_spans.iter().any(|(ts, te)| start >= *ts && start < *te)
+        think_spans
+            .iter()
+            .any(|(ts, te)| start >= *ts && start < *te)
     };
 
     for cap in RE_TOOL_CALL.captures_iter(raw_content) {
@@ -568,7 +571,10 @@ fn extract_fallback_tool_calls(raw_content: &str) -> (String, Vec<ToolCall>) {
 
         // Branch 1: Qwen / Bonsai XML function format (<function=NAME>...</function>)
         if let Some(func_cap) = RE_FUNC.captures(inner) {
-            let func_name = func_cap.get(1).map(|m| m.as_str().trim()).unwrap_or_default();
+            let func_name = func_cap
+                .get(1)
+                .map(|m| m.as_str().trim())
+                .unwrap_or_default();
             let body = func_cap.get(2).map(|m| m.as_str()).unwrap_or_default();
 
             let mut params_map = serde_json::Map::new();
@@ -593,7 +599,12 @@ fn extract_fallback_tool_calls(raw_content: &str) -> (String, Vec<ToolCall>) {
                         .unwrap_or_else(|_| Value::String(p_val.to_string()))
                 } else if matches!(
                     p_name,
-                    "start_line" | "end_line" | "max_depth" | "timeout_ms" | "max_results" | "limit"
+                    "start_line"
+                        | "end_line"
+                        | "max_depth"
+                        | "timeout_ms"
+                        | "max_results"
+                        | "limit"
                 ) && let Ok(n) = trimmed.parse::<i64>()
                 {
                     Value::Number(n.into())
@@ -1248,7 +1259,9 @@ I will list the directory:
     #[test]
     fn test_extract_fallback_multiline_bash_with_nested_quotes_and_xml_tags() {
         let script = "python3 -c \"import sys; print('<item>ok</item>')\"\ncat << 'EOF' > test.py\ndef run():\n    return 'hello'\nEOF\npython3 test.py";
-        let raw = format!("<tool_call>\n<function=bash>\n<parameter=command>\n{script}\n</parameter>\n</function>\n</tool_call>");
+        let raw = format!(
+            "<tool_call>\n<function=bash>\n<parameter=command>\n{script}\n</parameter>\n</function>\n</tool_call>"
+        );
         let (stripped, tcs) = extract_fallback_tool_calls(&raw);
         assert_eq!(stripped, "");
         assert_eq!(tcs.len(), 1);
@@ -1290,4 +1303,3 @@ I will list the directory:
         assert!(tcs.is_empty());
     }
 }
-

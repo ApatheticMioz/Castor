@@ -573,16 +573,28 @@ fn file_with_profile(file: &FileConfig, profile: Option<&PartialProfile>) -> Fil
             base_url: file.base_url.clone().or_else(|| p.base_url.clone()),
             api_key: file.api_key.clone().or_else(|| p.api_key.clone()),
             engine_type: file.engine_type.clone().or_else(|| p.engine_type.clone()),
-            launch_command: file.launch_command.clone().or_else(|| p.launch_command.clone()),
+            launch_command: file
+                .launch_command
+                .clone()
+                .or_else(|| p.launch_command.clone()),
             stop_command: file.stop_command.clone().or_else(|| p.stop_command.clone()),
             max_context: file.max_context.or(p.max_context),
             ports: merge_partial_ports(file.ports.as_ref(), p.ports.as_ref()),
             max_concurrent_tasks: file.max_concurrent_tasks.or(p.max_concurrent_tasks),
             tool_prefix: file.tool_prefix.clone().or_else(|| p.tool_prefix.clone()),
             searxng_url: file.searxng_url.clone().or_else(|| p.searxng_url.clone()),
-            brave_api_key: file.brave_api_key.clone().or_else(|| p.brave_api_key.clone()),
-            openalex_email: file.openalex_email.clone().or_else(|| p.openalex_email.clone()),
-            openalex_api_key: file.openalex_api_key.clone().or_else(|| p.openalex_api_key.clone()),
+            brave_api_key: file
+                .brave_api_key
+                .clone()
+                .or_else(|| p.brave_api_key.clone()),
+            openalex_email: file
+                .openalex_email
+                .clone()
+                .or_else(|| p.openalex_email.clone()),
+            openalex_api_key: file
+                .openalex_api_key
+                .clone()
+                .or_else(|| p.openalex_api_key.clone()),
             boot_timeout_secs: file.boot_timeout_secs.or(p.boot_timeout_secs),
             probe_budget: file.probe_budget.or(p.probe_budget),
             profile: file.profile.clone(),
@@ -1416,7 +1428,10 @@ mod tests {
         })
         .unwrap();
         assert_eq!(res.profile_name.as_deref(), Some("bonsai-8gb"));
-        assert_eq!(res.config.model.as_deref(), Some("Ternary-Bonsai-2-27B-PQ2_0"));
+        assert_eq!(
+            res.config.model.as_deref(),
+            Some("Ternary-Bonsai-2-27B-PQ2_0")
+        );
         assert_eq!(res.config.engine_type.as_deref(), Some("llama_cpp"));
         assert_eq!(res.config.max_context, Some(8192));
         assert_eq!(res.config.max_concurrent_tasks, 1);
@@ -1436,7 +1451,10 @@ mod tests {
         })
         .unwrap();
         assert_eq!(res.profile_name.as_deref(), Some("bonsai-16gb"));
-        assert_eq!(res.config.model.as_deref(), Some("Ternary-Bonsai-2-27B-PQ2_0"));
+        assert_eq!(
+            res.config.model.as_deref(),
+            Some("Ternary-Bonsai-2-27B-PQ2_0")
+        );
         assert_eq!(res.config.engine_type.as_deref(), Some("llama_cpp"));
         assert_eq!(res.config.max_context, Some(131072));
         assert_eq!(res.config.max_concurrent_tasks, 1);

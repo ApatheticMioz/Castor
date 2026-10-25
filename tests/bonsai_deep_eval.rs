@@ -17,8 +17,7 @@ fn get_client() -> (Config, EngineClient) {
         "CASTOR_ENGINE_TYPE" => Some("llama.cpp".into()),
         "CASTOR_BASE_URL" => Some("http://127.0.0.1:18020/v1".into()),
         "CASTOR_MODEL" => Some(
-            std::env::var("CASTOR_MODEL")
-                .unwrap_or_else(|_| "Ternary-Bonsai-2-27B-PQ2_0".into()),
+            std::env::var("CASTOR_MODEL").unwrap_or_else(|_| "Ternary-Bonsai-2-27B-PQ2_0".into()),
         ),
         _ => None,
     })

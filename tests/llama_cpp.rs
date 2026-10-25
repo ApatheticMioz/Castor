@@ -637,7 +637,10 @@ fn test_persona_contracts_byte_identical() {
     let root = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
     let claude_bytes = std::fs::read(root.join("CLAUDE.md")).expect("CLAUDE.md missing");
     let gemini_bytes = std::fs::read(root.join("GEMINI.md")).expect("GEMINI.md missing");
-    assert_eq!(claude_bytes, gemini_bytes, "CLAUDE.md and GEMINI.md are not byte-identical");
+    assert_eq!(
+        claude_bytes, gemini_bytes,
+        "CLAUDE.md and GEMINI.md are not byte-identical"
+    );
 }
 
 /// Adversarial verification of Backend capability mappings and engine aliases.
@@ -690,16 +693,26 @@ fn test_wsl_normalize_adversarial_paths() {
     // A Windows command with \bonsai must not escape \b to ASCII 0x08 (backspace) in WSL sh
     let cmd = "cmd.exe /c scripts\\bonsai\\start_bonsai_24gb.bat";
     let norm = wsl_normalize(cmd);
-    if cfg!(target_os = "linux") && std::path::Path::new("/proc/sys/fs/binfmt_misc/WSLInterop").exists() {
+    if cfg!(target_os = "linux")
+        && std::path::Path::new("/proc/sys/fs/binfmt_misc/WSLInterop").exists()
+    {
         assert_eq!(norm, "cmd.exe /c scripts/bonsai/start_bonsai_24gb.bat");
-        assert!(!norm.contains("\\b"), "Must not leave literal \\b exposed to shell expansion");
+        assert!(
+            !norm.contains("\\b"),
+            "Must not leave literal \\b exposed to shell expansion"
+        );
     }
 
     // Windows cmd without .exe prefix
     let cmd2 = "cmd /c D:\\LLM_Ecosystem\\scripts\\bonsai\\start.bat";
     let norm2 = wsl_normalize(cmd2);
-    if cfg!(target_os = "linux") && std::path::Path::new("/proc/sys/fs/binfmt_misc/WSLInterop").exists() {
-        assert_eq!(norm2, "cmd.exe /c D:/LLM_Ecosystem/scripts/bonsai/start.bat");
+    if cfg!(target_os = "linux")
+        && std::path::Path::new("/proc/sys/fs/binfmt_misc/WSLInterop").exists()
+    {
+        assert_eq!(
+            norm2,
+            "cmd.exe /c D:/LLM_Ecosystem/scripts/bonsai/start.bat"
+        );
     }
 }
 

@@ -131,6 +131,11 @@ pub struct Lease {
     pub at: u64,
     /// Epoch ms of the last heartbeat.
     pub hb: u64,
+    /// Context tokens consumed by the task bound to this lease.
+    /// `#[serde(default)]` keeps backward compatibility with lease files
+    /// written before this field existed (they deserialize to 0).
+    #[serde(default)]
+    pub context_tokens: u32,
 }
 
 /// Handle to a held slot lease, returned by [`TaskSemaphore::acquire`].
@@ -183,6 +188,11 @@ struct Inner {
     poll_interval: Duration,
     waiters: Mutex<Waiters>,
     next_id: AtomicU64,
+    /// Total token budget for the pool. `0` means the token-budget check is
+    /// disabled (original slot-count-only semantics).
+    pool_capacity_tokens: u32,
+    /// Static token overhead charged per slot state entry.
+    per_slot_state_tokens: u32,
 }
 
 impl TaskSemaphore {
@@ -196,6 +206,8 @@ impl TaskSemaphore {
                 poll_interval: Duration::from_millis(DEFAULT_POLL_MS),
                 waiters: Mutex::new(Waiters::default()),
                 next_id: AtomicU64::new(0),
+                pool_capacity_tokens: 0,
+                per_slot_state_tokens: 0,
             }),
         }
     }
@@ -210,8 +222,38 @@ impl TaskSemaphore {
                 poll_interval: Duration::from_millis(poll_ms.max(1)),
                 waiters: Mutex::new(Waiters::default()),
                 next_id: AtomicU64::new(0),
+                pool_capacity_tokens: 0,
+                per_slot_state_tokens: 0,
             }),
         }
+    }
+
+    /// Set the token-budget parameters on a [`TaskSemaphore`] (builder pattern).
+    ///
+    /// - `pool_capacity_tokens`: total token budget for the whole pool. When
+    ///   `0`, the token-budget gate is disabled (original slot-count-only
+    ///   semantics).
+    /// - `per_slot_state_tokens`: static token overhead charged per slot state
+    ///   entry (the metadata / bookkeeping cost of each lease record).
+    ///
+    /// The combined per-lease cost model is:
+    /// `per_slot_state_tokens + lease.context_tokens`
+    ///
+    /// See [`Self::acquire_with_tokens`] for the claim-time gate.
+    pub fn with_token_budget(
+        mut self,
+        pool_capacity_tokens: u32,
+        per_slot_state_tokens: u32,
+    ) -> Self {
+        // `inner` is an `Arc<Inner>`; to mutate the fields we need `Arc::get_mut`
+        // (which panics if there are other strong refs). In practice this is
+        // called immediately after construction (builder pattern), so there is
+        // only one strong ref.
+        let inner = Arc::get_mut(&mut self.inner)
+            .expect("with_token_budget must be called before any clone is made");
+        inner.pool_capacity_tokens = pool_capacity_tokens;
+        inner.per_slot_state_tokens = per_slot_state_tokens;
+        self
     }
 
     pub fn max_slots(&self) -> usize {
@@ -241,8 +283,9 @@ impl TaskSemaphore {
         }
     }
 
-    /// Try to claim a single slot index.
-    fn try_claim(&self, i: usize, task_id: &str) -> ClaimOutcome {
+    /// Try to claim a single slot index with a given initial context-token
+    /// value baked into the persisted [`Lease`].
+    fn try_claim(&self, i: usize, task_id: &str, context_tokens: u32) -> ClaimOutcome {
         let path = self.slot_path(i);
         let tenant = std::process::id() as u32;
         let now = now_ms();
@@ -259,6 +302,7 @@ impl TaskSemaphore {
                     task_id: task_id.to_string(),
                     at: now,
                     hb: now,
+                    context_tokens,
                 };
                 if let Ok(json) = serde_json::to_string(&lease) {
                     let _ = write_all(&mut f, json.as_bytes());
@@ -298,6 +342,7 @@ impl TaskSemaphore {
                     task_id: task_id.to_string(),
                     at: now,
                     hb: now,
+                    context_tokens,
                 };
                 if let Ok(json) = serde_json::to_string(&lease) {
                     let _ = write_all(&mut f, json.as_bytes());
@@ -336,12 +381,57 @@ impl TaskSemaphore {
     }
 
     /// Acquire a slot lease, waiting (FIFO) until one is available.
+    ///
+    /// This is the token-budget-free variant; equivalent to
+    /// [`Self::acquire_with_tokens`] with `initial_tokens = 0` and no
+    /// token-budget enforcement.
     pub async fn acquire(&self, task_id: &str) -> SlotLease {
+        self.acquire_with_tokens(task_id, 0).await
+    }
+
+    /// Acquire a slot lease with an explicit initial context-token value,
+    /// enforcing the token-budget constraint when one is configured.
+    ///
+    /// When `pool_capacity_tokens > 0` and at least one live lease exists,
+    /// the claim is refused (and the caller re-queues / polls) unless:
+    ///
+    /// ```text
+    ///   sum over all live leases L of (per_slot_state_tokens + L.context_tokens)
+    ///   + per_slot_state_tokens + initial_tokens
+    ///   <= pool_capacity_tokens
+    /// ```
+    ///
+    /// When `pool_capacity_tokens == 0` the token-budget check is bypassed
+    /// entirely (original slot-count-only semantics).
+    pub async fn acquire_with_tokens(&self, task_id: &str, initial_tokens: u32) -> SlotLease {
         loop {
             // Fast path: no alien tenant, try to claim a free slot.
             if !self.alien_tenant_active() {
                 for i in 0..self.inner.max_slots {
-                    if let ClaimOutcome::Claimed(lease) = self.try_claim(i, task_id) {
+                    // Token-budget gate: when a budget is configured and there
+                    // is at least one live lease, the new claim must not push
+                    // the committed total over the pool capacity.
+                    if self.inner.pool_capacity_tokens > 0 {
+                        let live = self.list_slots();
+                        if !live.is_empty() {
+                            let committed: u64 = live
+                                .iter()
+                                .map(|l| {
+                                    (self.inner.per_slot_state_tokens as u64)
+                                        + (l.context_tokens as u64)
+                                })
+                                .sum();
+                            let new_total = committed
+                                + (self.inner.per_slot_state_tokens as u64)
+                                + (initial_tokens as u64);
+                            if new_total > (self.inner.pool_capacity_tokens as u64) {
+                                // Budget exceeded — skip this slot for now.
+                                continue;
+                            }
+                        }
+                    }
+                    if let ClaimOutcome::Claimed(lease) = self.try_claim(i, task_id, initial_tokens)
+                    {
                         return lease;
                     }
                 }
@@ -369,6 +459,34 @@ impl TaskSemaphore {
                 w.channels.remove(&id);
             }
             // Loop: re-check the fast path.
+        }
+    }
+
+    /// Update the `context_tokens` field of an existing live lease on disk.
+    ///
+    /// This is a read-modify-write on the lease file; it is safe for
+    /// single-tenant-per-slot use. If the lease is absent or not owned by
+    /// this process the update is silently ignored (no-op).
+    pub fn update_context_tokens(&self, task_id: &str, context_tokens: u32) {
+        let me = std::process::id() as u32;
+        for i in 0..self.inner.max_slots {
+            let Some(lease) = self.read_lease(i) else {
+                continue;
+            };
+            if lease.tenant != me {
+                continue;
+            }
+            if !lease.task_id.is_empty() && lease.task_id != task_id {
+                continue;
+            }
+            let updated = Lease {
+                context_tokens,
+                ..lease
+            };
+            let path = self.slot_path(i);
+            if let Ok(json) = serde_json::to_string(&updated) {
+                let _ = fs::write(&path, json);
+            }
         }
     }
 
@@ -1039,9 +1157,12 @@ mod tests {
 
         // Now parent should be able to acquire immediately
         let lease = rt().block_on(async {
-            tokio::time::timeout(Duration::from_secs(5), sem.acquire("parent_task_after_drain"))
-                .await
-                .expect("parent acquire should succeed after drain")
+            tokio::time::timeout(
+                Duration::from_secs(5),
+                sem.acquire("parent_task_after_drain"),
+            )
+            .await
+            .expect("parent acquire should succeed after drain")
         });
         assert_eq!(lease.task_id, "parent_task_after_drain");
         assert_eq!(sem.release(&lease), ReleaseResult::Released);
@@ -1059,12 +1180,14 @@ mod tests {
             task_id: "crashed_1".into(),
             at: 1000,
             hb: 1000,
+            context_tokens: 0,
         };
         let dead_lease_3 = Lease {
             tenant: 99999999,
             task_id: "crashed_3".into(),
             at: 1000,
             hb: 1000,
+            context_tokens: 0,
         };
         fs::write(
             sem.slot_path(1),
@@ -1093,5 +1216,219 @@ mod tests {
         sem.release(&l2);
         sem.release(&l3);
         assert_eq!(sem.list_slots().len(), 0);
+    }
+
+    // ------------------------------------------------------------------
+    // Token-budget tests
+    // ------------------------------------------------------------------
+
+    /// A lease acquired via the plain `acquire` path must have
+    /// `context_tokens == 0` (default).
+    #[test]
+    fn context_tokens_default_zero_on_acquire() {
+        let state = tmp_state();
+        let sem = TaskSemaphore::new(&state, 1);
+        let sem_c = sem.clone();
+        let lease = rt().block_on(async move { sem_c.acquire("t1").await });
+        let on_disk = sem.read_lease(lease.index).unwrap();
+        assert_eq!(on_disk.context_tokens, 0);
+        let _ = sem.release(&lease);
+    }
+
+    /// A `Lease` JSON written before `context_tokens` existed must
+    /// deserialize with `context_tokens == 0` (backward compat).
+    #[test]
+    fn context_tokens_backward_compat_deserialization() {
+        let json = r#"{"tenant":123,"task_id":"t","at":1000,"hb":1000}"#;
+        let lease: Lease = serde_json::from_str(json).unwrap();
+        assert_eq!(lease.context_tokens, 0);
+        assert_eq!(lease.task_id, "t");
+    }
+
+    /// `update_context_tokens` must persist the new value to disk.
+    #[test]
+    fn update_context_tokens_persists_to_disk() {
+        let state = tmp_state();
+        let sem = TaskSemaphore::new(&state, 2);
+        let sem_c = sem.clone();
+        let lease = rt().block_on(async move { sem_c.acquire("task_a").await });
+        assert_eq!(sem.read_lease(lease.index).unwrap().context_tokens, 0);
+
+        sem.update_context_tokens("task_a", 42);
+        let updated = sem.read_lease(lease.index).unwrap();
+        assert_eq!(updated.context_tokens, 42);
+
+        // A non-matching task_id must NOT modify this lease.
+        sem.update_context_tokens("other_task", 99);
+        let unchanged = sem.read_lease(lease.index).unwrap();
+        assert_eq!(
+            unchanged.context_tokens, 42,
+            "non-matching task_id must not overwrite"
+        );
+
+        let _ = sem.release(&lease);
+    }
+
+    /// With `pool_capacity_tokens = 100` and `per_slot_state_tokens = 10`:
+    /// - First acquire (no live lease) → gate bypassed, claim succeeds.
+    /// - Second acquire with `initial_tokens = 50`:
+    ///   committed = 10 + 50 = 60; new_total = 60 + 10 + 50 = 120 > 100
+    ///   → must be BLOCKED (times out).
+    #[test]
+    fn with_token_budget_blocks_when_over_capacity() {
+        let state = tmp_state();
+        let sem = TaskSemaphore::with_poll_interval(&state, 4, 50).with_token_budget(100, 10);
+        let rt = rt();
+
+        // First acquire: no live leases → gate bypassed.
+        let sem_c1 = sem.clone();
+        let l1 = rt.block_on(async move {
+            tokio::time::timeout(
+                Duration::from_millis(500),
+                sem_c1.acquire_with_tokens("task_a", 50),
+            )
+            .await
+            .expect("first acquire should succeed (no live leases yet)")
+        });
+        assert_eq!(sem.list_slots().len(), 1);
+
+        // Second acquire: 1 live lease (context_tokens=50).
+        // committed = 10 + 50 = 60
+        // new_total = 60 + 10 + 50 = 120 > 100 → BLOCKED
+        let sem_c2 = sem.clone();
+        let blocked = rt.block_on(async move {
+            tokio::time::timeout(
+                Duration::from_millis(200),
+                sem_c2.acquire_with_tokens("task_b", 50),
+            )
+            .await
+        });
+        assert!(
+            blocked.is_err(),
+            "second acquire must be blocked: 120 > 100 (pool_capacity)"
+        );
+
+        let _ = sem.release(&l1);
+        assert_eq!(sem.list_slots().len(), 0);
+    }
+
+    /// With `pool_capacity_tokens = 100` and `per_slot_state_tokens = 10`:
+    /// - First acquire with `initial_tokens = 50` → 60 committed.
+    /// - Second acquire with `initial_tokens = 20`:
+    ///   committed = 10 + 50 = 60; new_total = 60 + 10 + 20 = 90 <= 100
+    ///   → must SUCCEED.
+    #[test]
+    fn with_token_budget_allows_when_under_capacity() {
+        let state = tmp_state();
+        let sem = TaskSemaphore::with_poll_interval(&state, 4, 50).with_token_budget(100, 10);
+        let rt = rt();
+
+        let sem_c1 = sem.clone();
+        let l1 = rt.block_on(async move {
+            tokio::time::timeout(
+                Duration::from_millis(500),
+                sem_c1.acquire_with_tokens("task_a", 50),
+            )
+            .await
+            .expect("first acquire should succeed")
+        });
+        assert_eq!(sem.list_slots().len(), 1);
+
+        // 60 committed + 10 (per_slot) + 20 (initial) = 90 <= 100 → OK
+        let sem_c2 = sem.clone();
+        let l2 = rt.block_on(async move {
+            tokio::time::timeout(
+                Duration::from_millis(500),
+                sem_c2.acquire_with_tokens("task_b", 20),
+            )
+            .await
+            .expect("second acquire should succeed: 90 <= 100")
+        });
+        assert_eq!(sem.list_slots().len(), 2);
+
+        // Verify the persisted context_tokens values.
+        let slot_a = sem.read_lease(l1.index).unwrap();
+        let slot_b = sem.read_lease(l2.index).unwrap();
+        assert_eq!(slot_a.context_tokens, 50);
+        assert_eq!(slot_b.context_tokens, 20);
+
+        sem.release(&l1);
+        sem.release(&l2);
+        assert_eq!(sem.list_slots().len(), 0);
+    }
+
+    /// When `pool_capacity_tokens == 0` (default), the token-budget gate is
+    /// disabled and `acquire_with_tokens` behaves identically to `acquire`.
+    #[test]
+    fn zero_pool_capacity_disables_token_gate() {
+        let state = tmp_state();
+        // Default: pool_capacity_tokens = 0 → gate disabled.
+        let sem = TaskSemaphore::with_poll_interval(&state, 4, 50);
+        let rt = rt();
+
+        // Acquire with a large initial_tokens value — should succeed
+        // because the gate is disabled (pool_capacity == 0).
+        let sem_c1 = sem.clone();
+        let l1 = rt.block_on(async move {
+            tokio::time::timeout(
+                Duration::from_millis(500),
+                sem_c1.acquire_with_tokens("task_a", 999_999),
+            )
+            .await
+            .expect("should succeed when gate is disabled")
+        });
+        let sem_c2 = sem.clone();
+        let l2 = rt.block_on(async move {
+            tokio::time::timeout(
+                Duration::from_millis(500),
+                sem_c2.acquire_with_tokens("task_b", 999_999),
+            )
+            .await
+            .expect("second should also succeed when gate is disabled")
+        });
+        assert_eq!(sem.list_slots().len(), 2);
+
+        sem.release(&l1);
+        sem.release(&l2);
+    }
+
+    /// `update_context_tokens` followed by a second acquire must reflect the
+    /// updated token cost in the budget gate.
+    #[test]
+    fn update_context_tokens_affects_budget_gate() {
+        let state = tmp_state();
+        let sem = TaskSemaphore::with_poll_interval(&state, 4, 50).with_token_budget(100, 10);
+        let rt = rt();
+
+        // First acquire with 20 initial tokens → committed = 10+20 = 30.
+        let sem_c1 = sem.clone();
+        let l1 = rt.block_on(async move {
+            tokio::time::timeout(
+                Duration::from_millis(500),
+                sem_c1.acquire_with_tokens("task_a", 20),
+            )
+            .await
+            .expect("first acquire")
+        });
+
+        // Bump context_tokens to 80 → committed = 10+80 = 90.
+        sem.update_context_tokens("task_a", 80);
+
+        // Second acquire with 20 initial tokens:
+        // new_total = 90 + 10 + 20 = 120 > 100 → BLOCKED.
+        let sem_c2 = sem.clone();
+        let blocked = rt.block_on(async move {
+            tokio::time::timeout(
+                Duration::from_millis(200),
+                sem_c2.acquire_with_tokens("task_b", 20),
+            )
+            .await
+        });
+        assert!(
+            blocked.is_err(),
+            "second acquire must be blocked after context_tokens update: 120 > 100"
+        );
+
+        let _ = sem.release(&l1);
     }
 }

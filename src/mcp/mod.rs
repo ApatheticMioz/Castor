@@ -404,10 +404,7 @@ impl CastorMcpServer {
         let state = StateDir::from_config(&loaded.config);
         let _ = state.ensure();
         let registry = crate::task::registry::TaskRegistry::new(&state);
-        let sem = TaskSemaphore::new(
-            &state,
-            loaded.config.max_concurrent_tasks as usize,
-        );
+        let sem = TaskSemaphore::new(&state, loaded.config.max_concurrent_tasks as usize);
 
         match params.action.as_str() {
             "list" => {

@@ -8,12 +8,14 @@
 //!
 //! The worker:
 //! 1. Loads the [`JobSpec`].
-//! 2. Acquires an execution slot from [`TaskSemaphore`].
-//! 3. Transitions the task status to `Executing` in [`TaskRegistry`] and records its PID.
-//! 4. Sets up the session [`EventLogger`], indexes relevant skills, and prepares [`CompositeExecutor`].
-//! 5. Drives [`crate::runner::run_session`].
-//! 6. Mirrors terminal status (`Completed` or `Failed`) to [`TaskRegistry`].
-//! 7. Releases the slot lease on both success and failure.
+//! 2. Runs the DGI gatekeeper classification; a rejected dispatch fails
+//!    fast before any lease is held.
+//! 3. Acquires a token-budgeted execution slot from [`TaskSemaphore`].
+//! 4. Transitions the task status to `Executing` in [`TaskRegistry`] and records its PID.
+//! 5. Sets up the session [`EventLogger`], indexes relevant skills, and prepares [`CompositeExecutor`].
+//! 6. Drives [`crate::runner::run_session`].
+//! 7. Mirrors terminal status (`Completed` or `Failed`) to [`TaskRegistry`].
+//! 8. Releases the slot lease on both success and failure.
 
 use serde::{Deserialize, Serialize};
 use serde_json::json;
@@ -126,23 +128,12 @@ pub async fn run_job_with_engine(
 ) -> Result<String, String> {
     let registry = TaskRegistry::new(state);
     let max_slots = config.max_concurrent_tasks as usize;
-    let sem = TaskSemaphore::new(state, max_slots);
+    let max_ctx = config.max_context.unwrap_or(0);
+    let sem = TaskSemaphore::new(state, max_slots).with_token_budget(max_ctx, max_ctx / 6);
 
-    // 1. Acquire execution slot.
-    let lease = sem.acquire(&spec.task_id).await;
-
-    // 2. Transition status to Executing and stamp worker PID.
-    let now = now_epoch_ms();
-    let _ = registry
-        .update(&spec.task_id, |r| {
-            r.status = TaskStatus::Executing;
-            r.pid = Some(std::process::id());
-            r.started_at = Some(now);
-            r.heartbeat = now;
-        })
-        .await;
-
-    // Classify the dispatch using the serving engine or an advisory offline heuristic.
+    // 1. DGI gatekeeper: classify the dispatch BEFORE committing to a slot
+    //    lease. A rejected dispatch never holds a lease (no release
+    //    bookkeeping needed) and cannot block other waiters in the FIFO queue.
     if config.base_url.is_some() && config.model.is_some() {
         let lc = crate::engine::EngineLifecycle::new(config, state);
         let dgi = if !lc.canary().await {
@@ -189,12 +180,26 @@ pub async fn run_job_with_engine(
             let _ = registry
                 .transition(&spec.task_id, TaskStatus::Failed, Some(reject_msg.clone()))
                 .await;
-            let _ = sem.release(&lease);
             return Err(reject_msg);
         }
     }
 
-    // 3. Initialize EventLogger and record session start.
+    // 2. Acquire execution slot (token-budgeted).
+    let initial_tokens = (spec.prompt.chars().count() / 4) as u32;
+    let lease = sem.acquire_with_tokens(&spec.task_id, initial_tokens).await;
+
+    // 3. Transition status to Executing and stamp worker PID.
+    let now = now_epoch_ms();
+    let _ = registry
+        .update(&spec.task_id, |r| {
+            r.status = TaskStatus::Executing;
+            r.pid = Some(std::process::id());
+            r.started_at = Some(now);
+            r.heartbeat = now;
+        })
+        .await;
+
+    // 4. Initialize EventLogger and record session start.
     let logger = EventLogger::new(state, &spec.session_id);
     // The effective tier is recorded on session_start (null when unset) so
     // the session ledger is self-explanatory: null = "server default applied".
@@ -210,7 +215,7 @@ pub async fn run_job_with_engine(
     let host_raw_path = crate::platform::to_host_path(&spec.cwd);
     let workspace_root = find_workspace_root(&host_raw_path);
 
-    // 4. Discover and index skills.
+    // 5. Discover and index skills.
     let skill_dirs = [
         workspace_root.join(".agents").join("skills"),
         workspace_root.join("skills"),
@@ -227,7 +232,7 @@ pub async fn run_job_with_engine(
     };
     let skills_index = skills::render_index(&active_skills);
 
-    // 5. Build system prompt.
+    // 6. Build system prompt.
     let system_prompt = format!(
         "You are Castor, an autonomous senior peer programmer pairing with the Lead Architect. Working directory: {}\n\n\
 Peer Programming Invariants:\n\
@@ -245,7 +250,7 @@ Secondary docs and markdown notes are reference ledgers. Do not write historical
         skills_index
     );
 
-    // 6. Initialize optional extensions and composite tool executor.
+    // 7. Initialize optional extensions and composite tool executor.
     let ext_bridge = if let Some(ref exts) = spec.extensions {
         ExtensionBridge::spawn(exts).await.ok()
     } else {
@@ -282,8 +287,11 @@ Secondary docs and markdown notes are reference ledgers. Do not write historical
     options.workspace = Some(workspace_root.clone());
     options.reasoning_effort = spec.reasoning_effort.clone();
     options.probe_budget = config.probe_budget;
+    // 0 when unset → the session-history watermark is disabled (zero behavior
+    // change for callers that don't configure a context budget).
+    options.max_context = max_ctx as usize;
 
-    // 7. Run session loop.
+    // 8. Run session loop.
     let outcome = runner::run_session(
         engine,
         &executor,
@@ -296,7 +304,7 @@ Secondary docs and markdown notes are reference ledgers. Do not write historical
     )
     .await;
 
-    // 8. Transition terminal status and release slot.
+    // 9. Transition terminal status and release slot.
     match outcome {
         Ok(session_res) => {
             let terminal_status = if session_res.status == "failed" {
