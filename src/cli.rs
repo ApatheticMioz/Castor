@@ -122,6 +122,9 @@ pub enum Command {
         /// Maximum slots (default 1)
         #[arg(long, default_value = "1")]
         max_slots: usize,
+        /// Hold duration in seconds (default 3)
+        #[arg(long, default_value = "3")]
+        hold_secs: u64,
     },
     /// (internal) background worker process for a dispatched task
     #[command(name = "__worker", hide = true)]
@@ -711,13 +714,14 @@ pub async fn run_with(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
             state_dir,
             task_id,
             max_slots,
+            hold_secs,
         } => {
             let state = state::StateDir::new(state_dir);
             let _ = state.ensure();
             let sem = task::semaphore::TaskSemaphore::new(&state, max_slots);
             let lease = sem.acquire(&task_id).await;
             println!("HELD");
-            tokio::time::sleep(std::time::Duration::from_secs(3)).await;
+            tokio::time::sleep(std::time::Duration::from_secs(hold_secs)).await;
             let _ = sem.release(&lease);
         }
         Command::__EngineSupervisor {

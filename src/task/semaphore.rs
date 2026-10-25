@@ -987,6 +987,8 @@ mod tests {
                 .arg(format!("child_task_{i}"))
                 .arg("--max-slots")
                 .arg("4")
+                .arg("--hold-secs")
+                .arg("10")
                 .stdout(std::process::Stdio::piped())
                 .stderr(std::process::Stdio::null())
                 .spawn()
