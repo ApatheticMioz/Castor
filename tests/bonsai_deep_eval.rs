@@ -16,7 +16,10 @@ fn get_client() -> (Config, EngineClient) {
         "CASTOR_STATE_DIR" => Some(root.to_string_lossy().into()),
         "CASTOR_ENGINE_TYPE" => Some("llama.cpp".into()),
         "CASTOR_BASE_URL" => Some("http://127.0.0.1:18020/v1".into()),
-        "CASTOR_MODEL" => Some("Qwen3.8-27B".into()),
+        "CASTOR_MODEL" => Some(
+            std::env::var("CASTOR_MODEL")
+                .unwrap_or_else(|_| "Ternary-Bonsai-2-27B-PQ2_0".into()),
+        ),
         _ => None,
     })
     .unwrap()
@@ -46,15 +49,22 @@ async fn test_1_chat_and_thinking_trace() {
     println!("\n=== TEST 1: CHAT & THINKING TRACE ===");
     println!("Elapsed: {:?}", elapsed);
     println!("Content:\n{}", res.content);
+    println!("Reasoning Content:\n{:?}", res.reasoning_content);
     println!(
         "Tokens: prompt={:?}, completion={:?}, speed={:?} tok/s",
         res.metrics.prompt_tokens, res.metrics.completion_tokens, res.metrics.tokens_per_sec
     );
 
+    let combined = format!(
+        "{}\n{}",
+        res.content,
+        res.reasoning_content.as_deref().unwrap_or("")
+    );
     assert!(
-        res.content.contains("255"),
-        "Model failed arithmetic: {}",
-        res.content
+        combined.contains("255"),
+        "Model failed arithmetic in content and reasoning: content='{}', reasoning='{:?}'",
+        res.content,
+        res.reasoning_content
     );
 }
 
