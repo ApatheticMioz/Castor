@@ -109,10 +109,20 @@ impl EngineLifecycle {
             return false;
         };
         ids.iter().any(|m| {
-            m.get("id")
+            let id_match = m
+                .get("id")
                 .and_then(|i| i.as_str())
                 .map(|s| s.eq_ignore_ascii_case(model))
-                .unwrap_or(false)
+                .unwrap_or(false);
+            let alias_match = m
+                .get("aliases")
+                .and_then(|a| a.as_str())
+                .map(|s| {
+                    s.split(|c: char| c.is_whitespace() || c == ',')
+                        .any(|alias| alias.eq_ignore_ascii_case(model))
+                })
+                .unwrap_or(false);
+            id_match || alias_match
         })
     }
 
@@ -450,10 +460,18 @@ pub(crate) async fn llama_readiness(
                 .as_array()
                 .ok_or_else(|| format!("missing model list from {url}: {body}"))?;
             if !models.iter().any(|entry| {
-                entry["id"]
+                let id_match = entry["id"]
                     .as_str()
                     .map(|s| s.eq_ignore_ascii_case(model))
-                    .unwrap_or(false)
+                    .unwrap_or(false);
+                let alias_match = entry["aliases"]
+                    .as_str()
+                    .map(|s| {
+                        s.split(|c: char| c.is_whitespace() || c == ',')
+                            .any(|alias| alias.eq_ignore_ascii_case(model))
+                    })
+                    .unwrap_or(false);
+                id_match || alias_match
             }) {
                 return Err(format!(
                     "configured model {model:?} not listed at {url}: {body}; set llama-server --alias to match CASTOR_MODEL"

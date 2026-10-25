@@ -1,8 +1,6 @@
 #!/bin/bash
-# vLLM + DFlash2 + KVarN, CTX=huge: 245,760 context, ~77 tok/s. DEFAULT config.
-# Serves the 1:1 Symmetric Uncensored Qwen3.8-27B (AutoRound) via HyperQwen.
-# Port: 18020 (sanitizer proxy on 18022 -> 18020).
-# NOTE: Mutually exclusive with scripts/main/ (both need full 24 GB GPU).
+# vLLM + DFlash2 + KVarN, CTX=huge: 245,760 context.
+# Serves the 1:1 Symmetric Uncensored Qwen3.8-27B (AutoRound) via HyperQwen on port 18020.
 set -e
 pkill -9 -f 'vllm serve' 2>/dev/null || true
 pkill -9 -f EngineCore 2>/dev/null || true
@@ -19,7 +17,8 @@ export VISION=1
 export PYTORCH_CUDA_ALLOC_CONF=expandable_segments:False
 export VLLM_WSL2_ENABLE_PIN_MEMORY=1
 export VLLM_DFLASH2_LOOKUP_ADAPTIVE=0
-export MAX_SEQS=1
+export EMBED_UVA=${EMBED_UVA:-1}
+export MAX_SEQS=${MAX_SEQS:-1}
 export REQ_METRICS=1
 
 # Reasoning default: medium effort

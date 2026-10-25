@@ -73,8 +73,7 @@ echo ===================================================================
   -lcd .scratch\bonsai_dynamic_lookup.bin ^
   --host 127.0.0.1 ^
   --port %PORT% ^
-  --alias qwen3.8-27b ^
-  --alias Ternary-Bonsai-2-27B-PQ2_0 ^
+  --alias qwen3.8-27b,Ternary-Bonsai-2-27B-PQ2_0 ^
   --jinja ^
   -ngl 99 ^
   -ngld 99 ^

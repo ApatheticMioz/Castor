@@ -213,7 +213,7 @@ pub fn builtin_profiles() -> std::collections::HashMap<String, PartialProfile> {
             base_url: Some("http://127.0.0.1:18020/v1".to_string()),
             api_key: None,
             engine_type: Some("llama_cpp".to_string()),
-            launch_command: Some("scripts\\bonsai\\start_bonsai_8gb.bat".to_string()),
+            launch_command: Some("cmd /c scripts\\bonsai\\start_bonsai_8gb.bat".to_string()),
             stop_command: Some("taskkill /F /IM llama-server.exe".to_string()),
             max_context: Some(8192),
             ports: Some(PartialPorts {
@@ -238,7 +238,7 @@ pub fn builtin_profiles() -> std::collections::HashMap<String, PartialProfile> {
             base_url: Some("http://127.0.0.1:18020/v1".to_string()),
             api_key: None,
             engine_type: Some("llama_cpp".to_string()),
-            launch_command: Some("scripts\\bonsai\\start_bonsai_12gb.bat".to_string()),
+            launch_command: Some("cmd /c scripts\\bonsai\\start_bonsai_12gb.bat".to_string()),
             stop_command: Some("taskkill /F /IM llama-server.exe".to_string()),
             max_context: Some(65536),
             ports: Some(PartialPorts {
@@ -263,7 +263,7 @@ pub fn builtin_profiles() -> std::collections::HashMap<String, PartialProfile> {
             base_url: Some("http://127.0.0.1:18020/v1".to_string()),
             api_key: None,
             engine_type: Some("llama_cpp".to_string()),
-            launch_command: Some("scripts\\bonsai\\start_bonsai_16gb.bat".to_string()),
+            launch_command: Some("cmd /c scripts\\bonsai\\start_bonsai_16gb.bat".to_string()),
             stop_command: Some("taskkill /F /IM llama-server.exe".to_string()),
             max_context: Some(131072),
             ports: Some(PartialPorts {
@@ -1391,7 +1391,7 @@ mod tests {
         );
         assert_eq!(
             res.config.launch_command.as_deref(),
-            Some(r"scripts\bonsai\start_bonsai_12gb.bat")
+            Some(r"cmd /c scripts\bonsai\start_bonsai_12gb.bat")
         );
         assert_eq!(
             res.config.stop_command.as_deref(),
@@ -1422,7 +1422,7 @@ mod tests {
         assert_eq!(res.config.max_concurrent_tasks, 1);
         assert_eq!(
             res.config.launch_command.as_deref(),
-            Some(r"scripts\bonsai\start_bonsai_8gb.bat")
+            Some(r"cmd /c scripts\bonsai\start_bonsai_8gb.bat")
         );
     }
 
@@ -1442,7 +1442,7 @@ mod tests {
         assert_eq!(res.config.max_concurrent_tasks, 1);
         assert_eq!(
             res.config.launch_command.as_deref(),
-            Some(r"scripts\bonsai\start_bonsai_16gb.bat")
+            Some(r"cmd /c scripts\bonsai\start_bonsai_16gb.bat")
         );
     }
 

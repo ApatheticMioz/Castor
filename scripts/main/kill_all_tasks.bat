@@ -4,8 +4,6 @@ echo =======================================================
 echo [kill_all_tasks] Emergency Qwen ^& Castor Task Killer
 echo =======================================================
 
-:: Derive the WSL /mnt/<drive>/... equivalent of the repo root from this script's location.
-:: This script lives at <repo-root>\scripts\main\, so the repo root is two levels up.
 set "SCRIPT_DIR=%~dp0"
 if "%SCRIPT_DIR:~-1%"=="\" set "SCRIPT_DIR=%SCRIPT_DIR:~0,-1%"
 for %%I in ("%SCRIPT_DIR%\..\..") do set "REPO_ROOT=%%~fI"

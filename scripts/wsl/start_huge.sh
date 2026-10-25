@@ -8,19 +8,13 @@ cd ~/qwen-serving
 export SPEC=dflash2
 export CTX=huge
 export PREFIX_CACHE=1
-# Vision enabled via CPU-offloaded vision tower (VISION_OFFLOAD=1). Pinned in host RAM; zero VRAM penalty on 245K context pool.
+# Vision configuration: CPU-offloaded vision tower (VISION_OFFLOAD=1 pinned in host RAM).
 export VISION=1
 export PYTORCH_CUDA_ALLOC_CONF=expandable_segments:False
 export VLLM_WSL2_ENABLE_PIN_MEMORY=1
-export VLLM_DFLASH2_LOOKUP_ADAPTIVE=0  # Pins verify block length to preserve prefix-cache performance.
-# Set MAX_SEQS=1 for single-user pair programming (MAX_CONCURRENT_TASKS=1).
-# Setting MAX_SEQS=1 eliminates unused multi-stream CUDA graphs and recurrent state
-# reservations, reclaiming non-KV VRAM headroom.
-# This completely prevents WSL2 PCIe host-backing and dxgkio_escape deadlocks
-# during massive chunked prefills while preserving the full 245,760 context window.
-export MAX_SEQS=1
-# Maximum Intelligence: Pristine W4A16 (unquantized activations).
-# Per-request usage & timing metrics: enables usage reporting & prompt-tokens details
+export VLLM_DFLASH2_LOOKUP_ADAPTIVE=0
+export EMBED_UVA=${EMBED_UVA:-1}
+export MAX_SEQS=${MAX_SEQS:-1}
 export REQ_METRICS=1
 # Server-side reasoning default: medium effort when no per-request override is sent.
 export EXTRA_ARGS='--default-chat-template-kwargs {"reasoning_effort":"medium"}'

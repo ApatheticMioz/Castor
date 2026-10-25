@@ -1,6 +1,5 @@
 #!/bin/bash
-# vLLM + DFlash2, CTX=fast: 57,344 context, ~107-130 tok/s, no KVarN.
-# NOT the default - prefer start_huge.sh unless a confirmed latency-critical loop needs this.
+# vLLM + DFlash2, CTX=fast: 57,344 context, ~107-130 tok/s.
 set -e
 pkill -9 -f 'vllm serve' 2>/dev/null || true
 pkill -9 -f EngineCore 2>/dev/null || true
