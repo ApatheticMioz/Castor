@@ -215,7 +215,7 @@ pub fn builtin_profiles() -> std::collections::HashMap<String, PartialProfile> {
             engine_type: Some("llama_cpp".to_string()),
             launch_command: Some("scripts\\bonsai\\start_bonsai_12gb.bat".to_string()),
             stop_command: Some("taskkill /F /IM llama-server.exe".to_string()),
-            max_context: Some(32768),
+            max_context: Some(65536),
             ports: Some(PartialPorts {
                 engine: Some(18020),
                 status: None,
@@ -1347,7 +1347,7 @@ mod tests {
             res.config.stop_command.as_deref(),
             Some("taskkill /F /IM llama-server.exe")
         );
-        assert_eq!(res.config.max_context, Some(32768));
+        assert_eq!(res.config.max_context, Some(65536));
         assert_eq!(res.config.max_concurrent_tasks, 1);
         // profile pins the engine port
         assert_eq!(

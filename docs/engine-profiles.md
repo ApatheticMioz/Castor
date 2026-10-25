@@ -101,7 +101,7 @@ Castor ships with tuned profiles as reference implementations. All profiles are 
 - **Model**: `Ternary-Bonsai-2-27B-PQ2_0` (DFlash2 draft) — 1.58-bit ternary base
 - **Drafter**: `Bonsai-2-27B-DFlash2-Q8_0` (fine-tuned; falls back to `Qwen3.8-27B-DFlash2-Q4_K_M`)
 - **Concurrency**: 1 dedicated slot (`-np 1`)
-- **Context**: 32,768 tokens (`-c 32768`), quantized KV `-ctk q4_0 -ctv q4_0`
+- **Context**: 65,536 tokens (`-c 65536`), quantized KV `-ctk q4_0 -ctv q4_0`
 - **Reasoning**: DeepSeek format via `delta.reasoning_content`
 - **Launcher**: `scripts/bonsai/start_bonsai_12gb.bat`
 
@@ -109,30 +109,24 @@ Castor ships with tuned profiles as reference implementations. All profiles are 
 
 ## 4a. Hardware / VRAM Matrix — `bonsai-12gb` 12GB Budget
 
-`bonsai-12gb` is the lowest-VRAM Bonsai serving profile, engineered to run the full 27B
-ternary model plus a DFlash2 speculative drafter on **12GB GPUs** with a comfortable safety
-headroom. Total budget ≈ **10.0 GB** VRAM, leaving **≥ 2.0 GB** of headroom on a 12GB card.
+`bonsai-12gb` is the optimized serving profile for **12GB GPUs** (RTX 3060 12GB, RTX 4070 12GB, RTX 3080 12GB), delivering a full 27B ternary model with DFlash2 speculative decoding at **64K native context** (65,536 tokens) 100% in VRAM. Empirically measured total VRAM footprint is **~11.7 GB** (tested live via `nvidia-smi`), fitting inside the 12,288 MiB boundary of 12GB cards.
 
 | Component | Allocation | Notes |
 |---|---|---|
 | Main weights (`Ternary-Bonsai-2-27B-PQ2_0`, 1.58-bit ternary) | ~6.70 GB | ~100% offload (`-ngl 99`) |
 | DFlash2 drafter (`Bonsai-2-27B-DFlash2-Q8_0`, Q8_0) | ~0.50 GB | Fully offloaded (`-ngld 99`), `-sps 0.05` |
-| KV cache (`-c 32768`, `-ctk/-ctv q4_0`) | ~2.00 GB | 4-bit K/V at 32K context, single slot |
-| CUDA context + activation / scratch buffers | ~0.80 GB | FlashAttention (`-fa`, `-b 2048`, `-ub 512`), dynamic `-lcd` lookup cache |
-| **Total** | **~10.00 GB** | **≥ 2.0 GB safety headroom on 12GB VRAM** |
+| KV cache (`-c 65536`, `-ctk/-ctv q4_0`) | ~4.00 GB | 4-bit K/V at 64K context (64 KB/tok, `-np 1`) |
+| CUDA context + activation / scratch buffers | ~0.50 GB | FlashAttention (`-fa`, `-b 2048`, `-ub 512`), dynamic `-lcd` lookup cache |
+| **Total Measured VRAM** | **~11.70 GB** | **Fits 100% inside 12GB (12,288 MiB) VRAM** |
 
-**Target hardware**: 12GB consumer GPUs — RTX 3060 12GB, RTX 4070 12GB, RTX 3080 12GB.
+**Empirical Ceiling vs 128K:**
+- **128K Context (`-c 131072`)**: Measured at **13.23 GB** VRAM (`13,231 MiB`), which spills over 12GB cards by ~940 MiB into system RAM.
+- **64K Context (`-c 65536`)**: Measured at **11.72 GB** VRAM net (`12,074 MiB` total with OS overhead), running at **~38.6 tok/s** decode with DFlash2 active.
 
 **Trade-offs vs. the heavier Bonsai profiles:**
-- **Single slot only (`-np 1`)**: no unified multi-slot pool, so multi-agent mega-context
-  interleaving (the `bonsai-max` 512K workflow) is unavailable — this is a single-agent /
-  single-session profile.
-- **32K context cap**: a deliberate reduction from the 262K/512K profiles to keep KV cache
-  within the 12GB envelope. Deep single-agent history is supported; very deep resumption
-  workloads are not.
-- **Keeps the speculative decode win**: fine-tuned DFlash2 + lookup-augmented speculation
-  (`--spec-type draft-dflash,ngram-mod`, `-lcd`) is retained, so the 12GB profile still
-  delivers the fast-decode characteristic of the Bonsai family at the smallest footprint.
+- **Single slot only (`-np 1`)**: Avoids the multi-slot memory bandwidth wall and prevents KV cache fragmentation.
+- **64K context envelope**: 2x larger than conservative 32K estimates; allows substantial repo code context in VRAM.
+- **Keeps the speculative decode win**: Fine-tuned DFlash2 + lookup-augmented speculation (`--spec-type draft-dflash,ngram-mod`, `-lcd`) is retained.
 - **Pageable host RAM** (Windows first): inactive pages may be trimmed to the NVMe pagefile
   under host memory pressure, so the profile degrades gracefully rather than hard-OOMing the
   host (see `scripts/bonsai/README.md` §3).

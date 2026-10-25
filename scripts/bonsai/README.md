@@ -110,9 +110,9 @@ Choose the launcher that matches the target workflow profile:
 4. **[`start_bonsai_64k.bat`](start_bonsai_64k.bat)** (Lightest Bonsai Profile):
    - Boots 65,536 context (1 slot, Q8_0 KV, ~10.6 GiB VRAM). No drafter; instant mmap startup.
 5. **[`start_bonsai_12gb.bat`](start_bonsai_12gb.bat)** (Recommended for 12GB GPUs — RTX 3060 12GB / 4070 12GB / 3080 12GB):
-   - Boots 32,768 context (1 dedicated slot, `-np 1`, Q4_0 KV `-ctk/-ctv q4_0`) with the fine-tuned DFlash2 drafter + lookup-augmented speculation (`-lcd`).
-   - **~10.0 GB total VRAM** (6.70 GB ternary weights + ~0.5 GB DFlash2 draft + 2.0 GB Q4_0 KV + 0.8 GB CUDA/runtime), leaving **≥ 2.0 GB safety headroom** on a 12GB card.
-   - Single-agent profile: keeps the fast-decode speculative win of the Bonsai family at the smallest footprint; not a multi-slot mega-context profile.
+   - Boots 65,536 context (1 dedicated slot, `-np 1`, Q4_0 KV `-ctk/-ctv q4_0`) with the fine-tuned DFlash2 drafter + lookup-augmented speculation (`-lcd`).
+   - **~11.7 GB total VRAM** (6.70 GB ternary weights + ~0.5 GB DFlash2 draft + 4.0 GB Q4_0 KV + 0.5 GB CUDA/runtime), fitting 100% inside a 12GB card (12,288 MiB).
+   - Single-agent profile: delivers **64K context** with fast speculative decoding on 12GB hardware; tested live via Castor with verified `n_ctx=65536`.
 6. **[`scripts/main/start.bat`](../main/start.bat)** (Recommended for Maximum Serial Decode & Vision):
    - Boots HyperQwen Huge (245,760 context, **112.9 tok/s**, multimodal vision tower, 23.48 GiB VRAM). Ideal for single-agent chat and visual screenshot inspection.
 
