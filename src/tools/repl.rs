@@ -132,7 +132,8 @@ impl ReplProcess {
                 .current_dir(workspace)
                 .stdin(std::process::Stdio::piped())
                 .stdout(std::process::Stdio::piped())
-                .stderr(std::process::Stdio::null());
+                .stderr(std::process::Stdio::null())
+                .kill_on_drop(true);
 
             let mut child = match cmd.spawn() {
                 Ok(c) => c,
@@ -185,23 +186,36 @@ impl ReplProcess {
         let payload = serde_json::json!({"code": code}).to_string();
         // The Python driver reads line-by-line (waits for \n).
         let payload = format!("{payload}\n");
-        self.stdin
-            .write_all(payload.as_bytes())
-            .await
-            .map_err(|e| format!("write to REPL stdin: {e}"))?;
-        self.stdin
-            .flush()
-            .await
-            .map_err(|e| format!("flush REPL stdin: {e}"))?;
+        // On a write/flush I/O error the child is gone (pipe broken); kill
+        // it explicitly before the error propagates so no zombie lingers.
+        if let Err(e) = self.stdin.write_all(payload.as_bytes()).await {
+            let _ = self.child.start_kill();
+            return Err(format!("write to REPL stdin: {e}"));
+        }
+        if let Err(e) = self.stdin.flush().await {
+            let _ = self.child.start_kill();
+            return Err(format!("flush REPL stdin: {e}"));
+        }
 
         let line = tokio::time::timeout(Duration::from_secs(30), self.stdout_lines.next_line())
             .await
-            .map_err(|_| "REPL eval timed out after 30s".to_string())?;
+            // Timeout: the child is stuck (e.g. a long-running eval); kill it
+            // explicitly before dropping so the process does not outlive us.
+            .map_err(|_| {
+                let _ = self.child.start_kill();
+                "REPL eval timed out after 30s".to_string()
+            })?;
 
         let line = match line {
             Ok(Some(l)) => l,
-            Ok(None) => return Err("REPL process closed (EOF)".to_string()),
-            Err(e) => return Err(format!("read from REPL stdout: {e}")),
+            Ok(None) => {
+                let _ = self.child.start_kill();
+                return Err("REPL process closed (EOF)".to_string());
+            }
+            Err(e) => {
+                let _ = self.child.start_kill();
+                return Err(format!("read from REPL stdout: {e}"));
+            }
         };
 
         let v: serde_json::Value = serde_json::from_str(&line)

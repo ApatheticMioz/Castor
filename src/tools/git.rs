@@ -198,16 +198,26 @@ pub async fn git_commit(
         ));
     }
     let root = root(policy);
+    let has_paths = paths.is_some_and(|ps| !ps.is_empty());
 
-    if let Some(ps) = paths
-        && !ps.is_empty()
-    {
+    if has_paths {
+        // Paths provided: stage only those, then commit ONLY those paths
+        // using `--only -- <paths>` so pre-staged index files outside `paths`
+        // can NEVER sneak into the commit.
+        let ps = paths.unwrap();
+        let rel_paths: Vec<String> = ps
+            .iter()
+            .map(|p| -> Result<String, GitError> {
+                let resolved = resolve_write(policy, p)?;
+                Ok(rel_to_root(root, &resolved))
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+
         let mut add_cmd = tokio::process::Command::new("git");
         add_cmd.current_dir(root);
         add_cmd.arg("add").arg("--");
-        for p in ps {
-            let resolved = resolve_write(policy, p)?;
-            add_cmd.arg(rel_to_root(root, &resolved));
+        for p in &rel_paths {
+            add_cmd.arg(p);
         }
         let out = add_cmd
             .output()
@@ -217,6 +227,68 @@ pub async fn git_commit(
             let stderr = String::from_utf8_lossy(&out.stderr).into_owned();
             return Err(GitError::Execution(format!("git add failed: {stderr}")));
         }
+
+        let mut commit_cmd = tokio::process::Command::new("git");
+        commit_cmd.current_dir(root);
+        commit_cmd
+            .arg("commit")
+            .arg("-m")
+            .arg(message)
+            .arg("--only")
+            .arg("--");
+        for p in &rel_paths {
+            commit_cmd.arg(p);
+        }
+        let out = commit_cmd
+            .output()
+            .await
+            .map_err(|e| GitError::Execution(e.to_string()))?;
+        let stdout = String::from_utf8_lossy(&out.stdout).into_owned();
+        let stderr = String::from_utf8_lossy(&out.stderr).into_owned();
+        let mut text = String::new();
+        if !out.status.success() {
+            use std::fmt::Write;
+            let _ = writeln!(text, "(exit code {})", out.status.code().unwrap_or(-1));
+        }
+        if !stdout.is_empty() {
+            text.push_str(&stdout);
+        }
+        if !stderr.is_empty() {
+            if !text.is_empty() && !text.ends_with('\n') {
+                text.push('\n');
+            }
+            text.push_str("stderr:\n");
+            text.push_str(&stderr);
+        }
+        if text.is_empty() {
+            text = "(nothing to commit)".to_string();
+        }
+        return Ok(text);
+    }
+
+    // No paths provided: validate ALL staged files against the sandbox
+    // write-policy before committing. Reject if nothing is staged or if
+    // any staged path fails policy validation.
+    let mut diff_cmd = tokio::process::Command::new("git");
+    diff_cmd.current_dir(root);
+    diff_cmd.arg("diff").arg("--cached").arg("--name-only");
+    let out = diff_cmd
+        .output()
+        .await
+        .map_err(|e| GitError::Execution(e.to_string()))?;
+    let stdout = String::from_utf8_lossy(&out.stdout).into_owned();
+    let staged: Vec<String> = stdout
+        .lines()
+        .map(|l| l.trim().to_string())
+        .filter(|l| !l.is_empty())
+        .collect();
+
+    if staged.is_empty() {
+        return Err(GitError::InvalidArgs("nothing staged to commit".into()));
+    }
+
+    for p in &staged {
+        let _ = resolve_write(policy, p)?;
     }
 
     let mut commit_cmd = tokio::process::Command::new("git");
@@ -353,5 +425,60 @@ mod tests {
         let _ = fs::remove_dir_all(&dir);
         let err = git_commit(&policy, "", None).await.unwrap_err();
         assert!(matches!(err, GitError::InvalidArgs(_)));
+    }
+
+    #[tokio::test]
+    async fn git_commit_does_not_include_pre_staged_files_outside_paths() {
+        let (dir, policy) = temp_git_repo();
+        fs::write(dir.join("target.txt"), "target\n").unwrap();
+        fs::write(dir.join("sneaky.txt"), "sneaky\n").unwrap();
+
+        // Pre-stage BOTH files in the index directly (simulating a
+        // pre-existing index state outside of `git_commit`'s control).
+        let run = |args: &[&str]| {
+            let out = std::process::Command::new("git")
+                .current_dir(&dir)
+                .args(args)
+                .output()
+                .expect("git should be available");
+            assert!(
+                out.status.success(),
+                "git {} failed: {}",
+                args.join(" "),
+                String::from_utf8_lossy(&out.stderr)
+            );
+        };
+        run(&["add", "--", "target.txt", "sneaky.txt"]);
+
+        // Commit ONLY target.txt. sneaky.txt is pre-staged but not in paths.
+        let out = git_commit(&policy, "partial commit", Some(&["target.txt".to_string()]))
+            .await
+            .unwrap();
+        assert!(
+            out.contains("1 file changed") || out.contains("commit"),
+            "got: {out}"
+        );
+
+        // Verify sneaky.txt was NOT committed: it must still be untracked/staged.
+        let log = git_log(&policy, Some(5), None).await.unwrap();
+        assert!(log.contains("partial commit"), "got: {log}");
+
+        // The HEAD commit must contain only target.txt.
+        let out = std::process::Command::new("git")
+            .current_dir(&dir)
+            .args(["ls-tree", "--name-only", "HEAD"])
+            .output()
+            .expect("git should be available");
+        let tree = String::from_utf8_lossy(&out.stdout).into_owned();
+        assert!(
+            tree.contains("target.txt"),
+            "target.txt should be in HEAD: {tree}"
+        );
+        assert!(
+            !tree.contains("sneaky.txt"),
+            "sneaky.txt (pre-staged, outside paths) must NOT be in HEAD: {tree}"
+        );
+
+        let _ = fs::remove_dir_all(&dir);
     }
 }

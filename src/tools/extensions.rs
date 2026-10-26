@@ -575,8 +575,11 @@ for line in sys.stdin:
 
     /// Integration test: spawns the real `scripts/motion/motion_mcp_server.py`
     /// via ExtensionBridge, verifies both tools are discovered with correct
-    /// schemas, then calls `score_frames` on a temp fixture to assert the
-    /// visual-fitness score.
+    /// schemas, then performs a true end-to-end render-and-score:
+    ///   1. `render_scene` generates real PNG frames (we assert the `\x89PNG`
+    ///      magic bytes on disk).
+    ///   2. `score_frames` is run on those rendered frames and must report a
+    ///      healthy fitness score.
     #[tokio::test]
     async fn motion_mcp_server_tools_discovered_and_scored() {
         let script = std::path::Path::new("scripts/motion/motion_mcp_server.py");
@@ -605,30 +608,70 @@ for line in sys.stdin:
             "score_frames schema should have frame_dir or frame_files"
         );
 
-        // Create a temp frame fixture with non-trivial (deterministic) bytes.
-        let dir = std::env::temp_dir().join(format!(
-            "castor_motion_fixture_{}_{}",
+        // Where render_scene will write its output MP4 (and temp frame dir).
+        let work_dir = std::env::temp_dir().join(format!(
+            "castor_motion_e2e_{}_{}",
             std::process::id(),
             std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
                 .unwrap()
                 .as_nanos()
         ));
-        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::create_dir_all(&work_dir).unwrap();
+        let mp4_path = work_dir.join("out.mp4").display().to_string();
 
-        // 256 "pixels" of 3 bytes each = 768 bytes of deterministic pattern.
-        let mut frame_data = Vec::new();
-        for i in 0..256u32 {
-            frame_data.push((i * 7 + 13) as u8);
-            frame_data.push((i * 11 + 29) as u8);
-            frame_data.push((i * 3 + 41) as u8);
+        // (1) Render a small scene. We do not pass `html_path`, so the
+        //     server falls back to deterministic keyframe generation, which
+        //     writes real PNG frames (IHDR + zlib IDAT + IEND).
+        let render_args = serde_json::json!({
+            "output_mp4": mp4_path,
+            "duration_s": 0.5,
+        })
+        .to_string();
+        let render_result = bridge.call(&render.name, &render_args).await.unwrap();
+
+        let rv: serde_json::Value =
+            serde_json::from_str(&render_result).expect("render_scene result should be JSON");
+        assert_eq!(
+            rv["ok"], true,
+            "render_scene should report ok, got: {render_result}"
+        );
+        assert!(
+            rv["frames_generated"].as_u64().unwrap_or(0) > 0,
+            "render_scene should generate at least one frame, got: {render_result}"
+        );
+
+        // Grab the frame dir the server created and verify the frames on
+        // disk are genuine PNG files (leading \x89PNG magic bytes).
+        let frame_dir = rv["frame_dir"]
+            .as_str()
+            .expect("render_scene result should include frame_dir")
+            .to_string();
+        let frames: Vec<std::path::PathBuf> = {
+            let mut v: Vec<std::path::PathBuf> = std::fs::read_dir(&frame_dir)
+                .expect("frame_dir should be readable")
+                .filter_map(|e| e.ok())
+                .map(|e| e.path())
+                .filter(|p| p.extension().and_then(|x| x.to_str()) == Some("png"))
+                .collect();
+            v.sort();
+            v
+        };
+        assert!(
+            !frames.is_empty(),
+            "expected at least one rendered .png frame, got: {frame_dir}"
+        );
+        for f in &frames {
+            let head = std::fs::read(f).unwrap_or_default();
+            assert!(
+                head.len() >= 8 && &head[0..8] == b"\x89PNG\r\n\x1a\n",
+                "frame {f:?} does not start with the PNG magic bytes (\\x89PNG\\r\\n\\x1a\\n)"
+            );
         }
-        std::fs::write(dir.join("frame_0000.png"), &frame_data).unwrap();
 
-        // Call score_frames on the fixture.
-        let full_score_name = score.name.clone();
-        let args_json = serde_json::json!({"frame_dir": dir.display().to_string()}).to_string();
-        let result = bridge.call(&full_score_name, &args_json).await.unwrap();
+        // (2) Score the frames we just rendered.
+        let score_args = serde_json::json!({"frame_dir": frame_dir}).to_string();
+        let result = bridge.call(&score.name, &score_args).await.unwrap();
 
         let v: serde_json::Value =
             serde_json::from_str(&result).expect("score_frames result should be JSON");
@@ -651,6 +694,7 @@ for line in sys.stdin:
         );
 
         bridge.shutdown_all().await;
-        let _ = std::fs::remove_dir_all(&dir);
+        let _ = std::fs::remove_dir_all(&work_dir);
+        let _ = std::fs::remove_dir_all(&frame_dir);
     }
 }

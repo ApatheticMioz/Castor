@@ -21,6 +21,7 @@ import json
 import os
 import math
 import struct
+import zlib
 import hashlib
 import subprocess
 import tempfile
@@ -50,9 +51,8 @@ def _err(id, code: int, message: str) -> None:
 
 def _deterministic_keyframe_png(width: int, height: int, t: float, seed: int) -> bytes:
     """
-    Generate a deterministic 24-bit PNG-like frame (raw RGB bytes, no PNG
-    compression — we write a minimal BMP-style header + raw pixel data so
-    the file is a valid image and non-trivial entropy is achievable).
+    Generate a deterministic 24-bit frame as raw RGB bytes (no PNG
+    compression — the caller writes the PNG container via `_write_raw_frame`).
 
     The pixel values are derived from a seeded PRNG + t so every frame is
     unique but fully reproducible.
@@ -86,34 +86,35 @@ def _deterministic_keyframe_png(width: int, height: int, t: float, seed: int) ->
 
 
 def _write_raw_frame(path: Path, w: int, h: int, rgb: bytes) -> None:
-    """Write a minimal valid BMP file (uncompressed, 24-bit)."""
-    import time as _time  # only for deterministic file writing, not for logic
+    """Write a valid, standards-compliant 24-bit PNG file.
 
-    row_size = (w * 3 + 3) & ~3  # BMP rows padded to 4 bytes
-    data_size = row_size * h
-    file_size = 54 + data_size
-    # BMP header
-    header = bytearray()
-    header += b"BM"
-    header += struct.pack("<I", file_size)
-    header += struct.pack("<II", 0, 0)
-    header += struct.pack("<I", 54)
-    # DIB header
-    header += struct.pack("<I", 40)
-    header += struct.pack("<i", w)
-    header += struct.pack("<i", -h)  # top-down
-    header += struct.pack("<H", 1)
-    header += struct.pack("<H", 24)
-    header += struct.pack("<I", 0)
-    header += struct.pack("<I", data_size)
-    header += struct.pack("<ii", 0, 0)
-    header += struct.pack("<II", 0, 0)
-    # Pixel data (bottom-up in standard BMP, but we use top-down via negative height)
+    Layout: 8-byte signature + IHDR + IDAT (zlib-compressed raw scanlines)
+    + IEND. Built purely from the stdlib `struct` and `zlib` modules — no
+    third-party image library required.
+    """
+
+    def _chunk(tag: bytes, data: bytes) -> bytes:
+        # length (big-endian) + tag + data + CRC32 over (tag + data).
+        crc = zlib.crc32(tag + data) & 0xFFFFFFFF
+        return struct.pack(">I", len(data)) + tag + data + struct.pack(">I", crc)
+
+    # IHDR: width, height, bit-depth=8, color-type=2 (RGB), compression=0,
+    # filter=0 (none), interlace=0.
+    ihdr = struct.pack(">IIBBBBB", w, h, 8, 2, 0, 0, 0)
+
+    # Build raw scanlines: each row prefixed with the "None" filter byte (0).
+    raw = bytearray()
     for y in range(h):
-        row = bytearray(rgb[y * w * 3:(y + 1) * w * 3])
-        row += b"\x00" * (row_size - len(row))
-        header += bytes(row)
-    path.write_bytes(bytes(header))
+        raw.append(0)  # filter type 0 (None) per scanline
+        raw += rgb[y * w * 3:(y + 1) * w * 3]
+    idat_data = zlib.compress(bytes(raw))
+
+    # PNG signature: \x89PNG\r\n\x1a\n
+    png = b"\x89PNG\r\n\x1a\n"
+    png += _chunk(b"IHDR", ihdr)
+    png += _chunk(b"IDAT", idat_data)
+    png += _chunk(b"IEND", b"")
+    path.write_bytes(png)
 
 
 def _try_playwright_capture(html_path: str, total_frames: int, out_dir: Path, width: int, height: int) -> bool:
@@ -208,17 +209,12 @@ def _render_scene(args: dict) -> str:
         used_playwright = _try_playwright_capture(html_path, total_frames, out_dir, width, height)
 
     if not used_playwright:
-        # Deterministic keyframe generation (dry-run / test mode)
+        # Deterministic keyframe generation (dry-run / test mode).
+        # Each frame is a real, standards-compliant PNG (IHDR + zlib IDAT + IEND).
         for frame in range(total_frames):
             t = frame / fps
             rgb = _deterministic_keyframe_png(width, height, t, seed)
-            # Write as BMP for now (PNG would be ideal but requires zlib)
-            _write_raw_frame(out_dir / f"frame_{frame:04d}.bmp", width, height, rgb)
-        # Also write .png-named copies (content is BMP but name is .png for ffmpeg compatibility)
-        for f in out_dir.glob("*.bmp"):
-            png = f.with_suffix(".png")
-            png.write_bytes(f.read_bytes())
-            f.unlink()
+            _write_raw_frame(out_dir / f"frame_{frame:04d}.png", width, height, rgb)
 
     # Try FFmpeg encode
     encoded = _try_ffmpeg_encode(out_dir, output_mp4, fps)
@@ -228,6 +224,7 @@ def _render_scene(args: dict) -> str:
         "frames_generated": total_frames,
         "playwright_used": used_playwright,
         "ffmpeg_encoded": encoded,
+        "frame_dir": str(out_dir),
         "output_mp4": output_mp4,
         "output_exists": Path(output_mp4).is_file() if encoded else False,
     }
@@ -310,8 +307,9 @@ def _score_frames(args: dict) -> str:
         return json.dumps({"ok": False, "fitness": 0.0, "entropy": avg_entropy,
                            "nan_free": False, "reason": "NaN or undefined in frame data"})
 
-    # Degenerate: entropy < 0.1 bits/byte → nearly uniform/blank
-    if normalized < 0.01:
+    # Degenerate: entropy < 0.1 bits/byte → nearly uniform/blank.
+    # `normalized` is avg_entropy/8.0, so 0.1 bits/byte == 0.1/8.0 normalized.
+    if normalized < 0.1 / 8.0:
         return json.dumps({"ok": False, "fitness": 0.0, "entropy": avg_entropy,
                            "nan_free": True, "reason": "degenerate: near-zero entropy"})
 

@@ -623,6 +623,50 @@ impl TaskSemaphore {
         false
     }
 
+    /// Release this worker's held slot, wait (up to `max_wait`) until no
+    /// *older* lease remains in the pool, then re-acquire the slot.
+    ///
+    /// This is the **true cooperative yield handoff** (Issues #23 / #28): a
+    /// younger worker that triggered the yield gate does not merely drop its
+    /// lease and immediately re-claim it (that would let it win its own slot
+    /// back in the very next FIFO turn). Instead it parks in a short polling
+    /// loop until every strictly-older lease has been released, guaranteeing
+    /// the older worker makes real progress before this one resumes.
+    ///
+    /// `old_lease` is the currently-held lease. Its `at` timestamp (`old_at`)
+    /// is read *before* releasing it (defaulting to `u64::MAX` if the record is
+    /// already gone) so the wait condition can compare against it.
+    pub async fn yield_to_older_and_reacquire(
+        &self,
+        old_lease: &SlotLease,
+        task_id: &str,
+        context_tokens: u32,
+        max_wait: Duration,
+    ) -> SlotLease {
+        let old_at = self
+            .read_lease(old_lease.index)
+            .map(|l| l.at)
+            .unwrap_or(u64::MAX);
+        let _ = self.release(old_lease);
+
+        // Cooperatively wait until no strictly-older lease is still held, so
+        // the older worker gets to make progress before we re-acquire.
+        let start = std::time::Instant::now();
+        loop {
+            let older = self.list_slots().iter().any(|other| {
+                other.task_id != task_id
+                    && (other.at < old_at
+                        || (other.at == old_at && other.task_id.as_str() < task_id))
+            });
+            if !older || start.elapsed() >= max_wait {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(25)).await;
+        }
+
+        self.acquire_with_tokens(task_id, context_tokens).await
+    }
+
     /// Deterministic slot status distinguishing same-tenant vs alien-tenant
     /// holders (for status reporting / wait advisories).
     pub fn slot_status(&self, current_tenant: u32) -> SlotStatus {

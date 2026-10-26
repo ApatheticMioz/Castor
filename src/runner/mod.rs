@@ -597,47 +597,80 @@ const WORKSPACE_SKELETON_MAX_ENTRIES: usize = 40;
 /// stays byte-for-byte stable for a given source tree.
 const WORKSPACE_SKELETON_IGNORED: &[&str] = &[".git", "target", "node_modules", ".scratch"];
 
-/// Issue #15: build a compact, deterministic `[Workspace Skeleton]` block that
-/// lists the top-level entry names of `workspace` in sorted lexicographical
-/// order.
+/// Fixed allowlist of the canonical top-level manifest / contract files the
+/// skeleton may surface. Any *other* top-level file is ignored so that
+/// arbitrary untracked artifacts (e.g. `random_output.mp4`) never leak into the
+/// prefix, keeping it byte-for-byte stable for a given source tree.
+const WORKSPACE_SKELETON_MANIFESTS: &[&str] = &[
+    "Cargo.toml",
+    "package.json",
+    "pyproject.toml",
+    "AGENTS.md",
+    "CLAUDE.md",
+    "GEMINI.md",
+    "README.md",
+];
+
+/// Issue #15: build a compact, deterministic `[Workspace Skeleton]` block.
 ///
 /// The block is intentionally tiny and *pure* (a function of the workspace's
-/// top-level names alone — no timestamps, no mtimes, no sizes) so that every
-/// session started in the same workspace prepends an identical prefix to its
-/// system prompt. A byte-identical prefix is what lets 96%+ of the KV cache
+/// stable top-level shape alone — no timestamps, no mtimes, no sizes) so that
+/// every session started in the same workspace prepends an identical prefix to
+/// its system prompt. A byte-identical prefix is what lets 96%+ of the KV cache
 /// hit on Turn 1 across concurrent sessions.
 ///
-/// Rules:
-/// - Top-level entries only (no recursion).
-/// - `.git` / `target` / `node_modules` / `.scratch` are ignored (build state).
-/// - Sorted lexicographically by name, so the order is independent of the OS
-///   directory-enumeration order.
-/// - Capped at [`WORKSPACE_SKELETON_MAX_ENTRIES`] entries; a trailing
-///   `(N more…)` marker is emitted when the list is truncated so the model can
-///   still learn the workspace is large.
+/// Rules (Finding 4 — hardening against untracked-artifact drift):
+/// - **Directories**: every *non-hidden* top-level directory is listed with a
+///   trailing `/` (e.g. `src/`). Hidden dirs (any `.` prefix) and the build
+///   dirs in [`WORKSPACE_SKELETON_IGNORED`] are excluded.
+/// - **Files**: only the canonical manifest / contract files in
+///   [`WORKSPACE_SKELETON_MANIFESTS`] are listed. Every other top-level file
+///   (including arbitrary untracked output) is dropped.
+/// - Each section is sorted lexicographically, so the order is independent of
+///   the OS directory-enumeration order; directories come first, then the
+///   canonical manifests.
+/// - The directory section is capped at [`WORKSPACE_SKELETON_MAX_ENTRIES`]; a
+///   trailing `(N more…)` marker is emitted when it is truncated.
 /// - If the directory cannot be read, an empty skeleton (header only) is
 ///   returned so the prefix is still well-defined (deterministic, never a
 ///   crash) and still identical for the same workspace.
 pub fn build_workspace_skeleton(workspace: &std::path::Path) -> String {
     let mut out = String::from("[Workspace Skeleton]\n");
-    let mut names: Vec<String> = match std::fs::read_dir(workspace) {
-        Ok(iter) => iter
-            .filter_map(|e| e.ok())
-            .map(|e| e.file_name().to_string_lossy().into_owned())
-            .filter(|n| !WORKSPACE_SKELETON_IGNORED.contains(&n.as_str()))
-            .collect(),
-        Err(_) => return out,
-    };
-    names.sort();
-    names.dedup();
-    let total = names.len();
-    let shown = names.iter().take(WORKSPACE_SKELETON_MAX_ENTRIES);
-    for n in shown {
-        out.push_str(&format!("- {n}\n"));
+    let mut dirs: Vec<String> = Vec::new();
+    let mut files: Vec<String> = Vec::new();
+    if let Ok(iter) = std::fs::read_dir(workspace) {
+        for entry in iter.filter_map(|e| e.ok()) {
+            let name = entry.file_name().to_string_lossy().into_owned();
+            let is_hidden = name.starts_with('.');
+            let is_dir = entry.file_type().map(|ft| ft.is_dir()).unwrap_or(false);
+            if is_dir {
+                // Keep only stable, non-hidden source dirs; drop hidden and
+                // build-state dirs (`.git`, `.scratch`, `target`, …).
+                if !is_hidden && !WORKSPACE_SKELETON_IGNORED.contains(&name.as_str()) {
+                    dirs.push(name);
+                }
+            } else if WORKSPACE_SKELETON_MANIFESTS.contains(&name.as_str()) {
+                files.push(name);
+            }
+        }
     }
-    if total > WORKSPACE_SKELETON_MAX_ENTRIES {
-        let more = total - WORKSPACE_SKELETON_MAX_ENTRIES;
-        out.push_str(&format!("({more} more…)\n"));
+    dirs.sort();
+    dirs.dedup();
+    files.sort();
+    files.dedup();
+    // Deterministic ordering: non-hidden source dirs (trailing `/`) first,
+    // then the canonical manifest / contract files. Both sections are
+    // independently sorted, so the whole block is a pure function of the
+    // workspace's stable top-level shape.
+    for d in dirs.iter().take(WORKSPACE_SKELETON_MAX_ENTRIES) {
+        out.push_str(&format!("- {d}/\n"));
+    }
+    let more_dirs = dirs.len().saturating_sub(WORKSPACE_SKELETON_MAX_ENTRIES);
+    for f in &files {
+        out.push_str(&format!("- {f}\n"));
+    }
+    if more_dirs > 0 {
+        out.push_str(&format!("({more_dirs} more…)\n"));
     }
     out
 }
@@ -1615,10 +1648,20 @@ impasse, state your findings and ask for alignment rather than continuing to re-
                     "turn_tokens": turn_tokens,
                     "reason": "pool_yield_gate",
                 }));
-                // Release the held lease and re-acquire one so the slot is
-                // handed to a younger / more cache-efficient worker.
-                let _ = ctx.sem.release(&old);
-                let new_lease = ctx.sem.acquire_with_tokens(&ctx.task_id, turn_tokens).await;
+                // True cooperative yield handoff (Issues #23 / #28): release
+                // the held slot, wait (up to 30s) until no *older* lease
+                // remains so the older worker makes real progress, then
+                // re-acquire. This prevents the younger worker from winning its
+                // own slot back in the very next FIFO turn.
+                let new_lease = ctx
+                    .sem
+                    .yield_to_older_and_reacquire(
+                        &old,
+                        &ctx.task_id,
+                        turn_tokens,
+                        std::time::Duration::from_secs(30),
+                    )
+                    .await;
                 if let Ok(mut slot) = ctx.lease.lock() {
                     *slot = new_lease;
                 }
@@ -1817,6 +1860,57 @@ mod tests {
             name: name.into(),
             description: format!("{name} tool"),
             parameters: serde_json::json!({"type": "object"}),
+        }
+    }
+
+    /// A recording engine that stamps a wall-clock [`std::time::Instant`] per
+    /// `chat` call (in addition to recording calls) so a test can order
+    /// external events (e.g. an older lease release) against the turn calls.
+    struct TimedEngine {
+        responses: tokio::sync::Mutex<VecDeque<Completion>>,
+        call_times: tokio::sync::Mutex<Vec<std::time::Instant>>,
+    }
+
+    /// A completion carrying the low cache-hit-ratio metrics that trip the
+    /// yield gate: `cached = 0` over a large `prompt`.
+    fn timed_comp(content: &str, tool_calls: Vec<ToolCall>) -> Completion {
+        let finish = if tool_calls.is_empty() {
+            "stop"
+        } else {
+            "tool_calls"
+        };
+        Completion {
+            content: content.into(),
+            reasoning_content: None,
+            tool_calls,
+            finish_reason: Some(finish.into()),
+            metrics: Metrics {
+                ttft_ms: None,
+                total_ms: 1.0,
+                tokens_per_sec: None,
+                prompt_tokens: Some(20_000),
+                cached_tokens: Some(0),
+                completion_tokens: None,
+                reasoning_tokens: None,
+            },
+        }
+    }
+
+    #[async_trait]
+    impl ChatEngine for TimedEngine {
+        async fn chat(
+            &self,
+            _messages: &[Message],
+            _tools: &[ToolSchema],
+            _stream: bool,
+            _reasoning_effort: Option<&str>,
+        ) -> Result<Completion, EngineError> {
+            self.call_times.lock().await.push(std::time::Instant::now());
+            self.responses
+                .lock()
+                .await
+                .pop_front()
+                .ok_or_else(|| EngineError::Malformed("no scripted response".into()))
         }
     }
 
@@ -2823,20 +2917,45 @@ mod tests {
                 "skeleton must not list ignored entry `{ignored}`:\n{a}"
             );
         }
-        // Present entries are listed and in sorted lexicographical order.
+        // Present non-hidden source dirs are listed with a trailing `/` and in
+        // sorted lexicographical order; canonical manifests are listed after
+        // them (also sorted).
         let lines: Vec<String> = a
             .lines()
             .skip(1) // drop the header
             .filter(|l| l.starts_with("- "))
             .map(str::to_owned)
             .collect();
-        // The exact expected sorted set of surviving (non-ignored) entries.
-        let mut expected = ["Cargo.toml", "Makefile", "aaa.txt", "src", "zzz.txt"];
-        expected.sort();
-        let expected_sorted: Vec<String> = expected.iter().map(|n| format!("- {n}")).collect();
+        // The exact expected: source dirs first (with trailing `/`, sorted),
+        // then the canonical manifest (sorted).
+        let mut dirs_expected = ["src".to_string()];
+        dirs_expected.sort();
+        let mut files_expected = ["Cargo.toml".to_string()];
+        files_expected.sort();
+        let expected: Vec<String> = dirs_expected
+            .iter()
+            .map(|n| format!("- {n}/"))
+            .chain(files_expected.iter().map(|n| format!("- {n}")))
+            .collect();
         assert_eq!(
-            lines, expected_sorted,
-            "entries must be sorted lexicographically:\n{a}"
+            lines, expected,
+            "entries must be dirs (trailing `/`) then manifests, each sorted:\n{a}"
+        );
+
+        // Finding 4: creating an arbitrary untracked file in the workspace
+        // root must NOT change the skeleton — it is not a canonical manifest,
+        // so the prefix stays 100% byte-identical.
+        let before = build_workspace_skeleton(&dir);
+        std::fs::write(dir.join("random_output.mp4"), "binary").unwrap();
+        std::fs::write(dir.join("scratch_note.txt"), "note").unwrap();
+        let after = build_workspace_skeleton(&dir);
+        assert_eq!(
+            before, after,
+            "skeleton must be byte-identical when arbitrary untracked files are added:\n{before}\n--\n{after}"
+        );
+        assert!(
+            !after.contains("random_output.mp4") && !after.contains("scratch_note.txt"),
+            "arbitrary untracked top-level files must never leak into the skeleton:\n{after}"
         );
 
         let _ = std::fs::remove_dir_all(&dir);
@@ -3408,5 +3527,116 @@ mod tests {
                 .any(|e| e["type"] == "turn_stall_retry" && e["reason"] == "timeout"),
             "expected a timeout stall event: {events:?}"
         );
+    }
+
+    /// Finding 5 — true cooperative yield handoff, end-to-end.
+    ///
+    /// An *older* worker (spawned task) grabs a slot and releases it ~80ms
+    /// later. The session runs as a *younger* worker (a 2nd slot, single
+    /// tenant) with a low cache-hit ratio. On Turn 1 the yield gate fires;
+    /// the runner must release its own slot, **wait until the older lease is
+    /// actually freed**, and only then re-acquire and run Turn 2. We prove the
+    /// wait by asserting the older release instant lands strictly between the
+    /// Turn-1 and Turn-2 engine calls.
+    #[tokio::test]
+    async fn cooperative_yield_waits_for_older_lease_before_next_turn() {
+        use crate::task::semaphore::TaskSemaphore;
+
+        let state = tmp_state();
+        let state_root = state.root().to_path_buf();
+        let logger = logger_for(&state);
+        // Two slots so the older and younger worker can hold one each; the
+        // short poll interval keeps the acquire wait tight.
+        let sem = TaskSemaphore::with_poll_interval(&state, 2, 5);
+
+        // The older worker: claim a slot, hold it 80ms, then release it.
+        let older_release_at: std::sync::Arc<std::sync::Mutex<Option<std::time::Instant>>> =
+            std::sync::Arc::new(std::sync::Mutex::new(None));
+        let rel = older_release_at.clone();
+        let sem_old = sem.clone();
+        let older = tokio::spawn(async move {
+            let lease = sem_old.acquire_with_tokens("task_old", 0).await;
+            tokio::time::sleep(std::time::Duration::from_millis(80)).await;
+            let _ = sem_old.release(&lease);
+            *rel.lock().unwrap() = Some(std::time::Instant::now());
+        });
+
+        // Give the older worker a clear head start so its `at` is strictly
+        // earlier (right-of-way ordering by acquisition timestamp).
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+
+        // The younger worker (this session) claims the 2nd slot.
+        let younger = sem.acquire_with_tokens("task_young", 0).await;
+        let ctx = LeaseYieldContext {
+            sem: std::sync::Arc::new(sem.clone()),
+            lease: std::sync::Arc::new(std::sync::Mutex::new(younger)),
+            task_id: "task_young".into(),
+            min_eviction_detect_tokens: 100,
+            cache_hit_yield_ratio: 0.20,
+        };
+        let options = SessionOptions::with_state(state).with_lease_context(ctx);
+
+        // A recording engine that stamps an `Instant` per `chat` call, so we
+        // can order the older release against the two turn calls.
+        let engine = TimedEngine {
+            responses: tokio::sync::Mutex::new(
+                vec![
+                    timed_comp("", vec![tc("c1", "bash", "{\"cmd\":\"ls\"}")]),
+                    timed_comp("All done.", Vec::new()),
+                ]
+                .into(),
+            ),
+            call_times: tokio::sync::Mutex::new(Vec::new()),
+        };
+        let executor = MockExecutor::new(vec!["file1\nfile2".into()]);
+
+        let res = run_session(
+            &engine,
+            &executor,
+            &logger,
+            "sys",
+            "do the thing",
+            &[tool_schema("bash")],
+            3,
+            Some(&options),
+        )
+        .await
+        .unwrap();
+        let _ = older.await;
+
+        // The session completed its 2 turns (the final landed on turn 2, a
+        // non-last turn of the 3-turn budget, so the status is a clean
+        // "completed" — not "completed_budget_exhausted").
+        assert_eq!(res.status, "completed");
+        assert_eq!(res.turns, 2);
+
+        // The yield gate fired exactly once (the younger, low-cache worker on
+        // Turn 1) and was logged.
+        let events = logger.read_all();
+        assert!(
+            events.iter().any(|e| e["type"] == "cooperative_yield"),
+            "expected a cooperative_yield event: {events:?}"
+        );
+
+        // The older release must land strictly between the Turn-1 and Turn-2
+        // calls — i.e. the younger worker actually waited on the older lease
+        // (it did not just drop and immediately re-claim its own slot).
+        let call_times = engine.call_times.lock().await.clone();
+        assert_eq!(
+            call_times.len(),
+            2,
+            "expected exactly two engine calls: {call_times:?}"
+        );
+        let older_release_at = older_release_at.lock().unwrap();
+        let Some(older_release_at) = older_release_at.as_ref() else {
+            panic!("older worker never released its lease");
+        };
+        assert!(
+            call_times[0] < *older_release_at && *older_release_at <= call_times[1],
+            "older release must be waited on between turn 1 ({:?}) and turn 2 ({:?})",
+            call_times[0],
+            call_times[1]
+        );
+        let _ = std::fs::remove_dir_all(&state_root);
     }
 }
