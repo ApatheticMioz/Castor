@@ -543,6 +543,86 @@ impl TaskSemaphore {
         out
     }
 
+    /// Decide whether a held [`SlotLease`] should yield its slot back to the
+    /// pool so a newer / more cache-efficient worker can proceed.
+    ///
+    /// This is the DRY core of the slot-yield gate (Issues #23 / #28).
+    /// `cache_hit_yield_ratio` and `min_eviction_tokens` are injected by the
+    /// caller from [`crate::config::Config`] so this method stays free of any
+    /// config dependency (and trivially unit-testable).
+    ///
+    /// Rules:
+    /// - A solo worker (`slots.len() <= 1`) never yields.
+    /// - The **oldest** active lease has right-of-way to finish and never
+    ///   yields (right-of-way by acquisition timestamp, tie-broken by
+    ///   `task_id`).
+    /// - Otherwise a younger worker yields when **either** condition holds:
+    ///   - **A (empirical cache eviction)**: `cached`/`prompt` are both known,
+    ///     `prompt >= min_eviction_tokens` (> 0), and the cache hit ratio
+    ///     `cached / prompt < cache_hit_yield_ratio`.
+    ///   - **B (physical pool overcommit)**: the pool token budget is enabled
+    ///     (`pool_capacity_tokens > 0`) and the committed total
+    ///     `sum(per_slot_state_tokens + lease.context_tokens)` exceeds it.
+    pub fn should_yield(
+        &self,
+        lease: &SlotLease,
+        _context_tokens: u32,
+        cached_tokens: Option<u32>,
+        prompt_tokens: Option<u32>,
+        min_eviction_tokens: u32,
+        cache_hit_yield_ratio: f64,
+    ) -> bool {
+        let slots = self.list_slots();
+        if slots.len() <= 1 {
+            // Solo worker: no one to yield to, and no contention.
+            return false;
+        }
+
+        // This lease's acquisition timestamp (from its persisted record).
+        let my_at = self
+            .read_lease(lease.index)
+            .map(|l| l.at)
+            .unwrap_or(u64::MAX);
+
+        // Right-of-way: yield only if at least one other active lease is
+        // *older* than this one. If this is the oldest, it gets to finish.
+        let is_younger = slots.iter().any(|other| {
+            other.task_id != lease.task_id
+                && (other.at < my_at || (other.at == my_at && other.task_id < lease.task_id))
+        });
+        if !is_younger {
+            return false;
+        }
+
+        // Condition A: empirical cache eviction.
+        if let (Some(cached), Some(prompt)) = (cached_tokens, prompt_tokens)
+            && prompt >= min_eviction_tokens
+            && min_eviction_tokens > 0
+        {
+            let hit_ratio = (cached as f64) / (prompt as f64);
+            if hit_ratio < cache_hit_yield_ratio {
+                return true;
+            }
+        }
+
+        // Condition B: physical token pool overcommit.
+        if self.inner.pool_capacity_tokens > 0 {
+            let committed: u32 = slots
+                .iter()
+                .map(|l| {
+                    self.inner
+                        .per_slot_state_tokens
+                        .saturating_add(l.context_tokens)
+                })
+                .sum();
+            if committed > self.inner.pool_capacity_tokens {
+                return true;
+            }
+        }
+
+        false
+    }
+
     /// Deterministic slot status distinguishing same-tenant vs alien-tenant
     /// holders (for status reporting / wait advisories).
     pub fn slot_status(&self, current_tenant: u32) -> SlotStatus {
@@ -1430,5 +1510,70 @@ mod tests {
         );
 
         let _ = sem.release(&l1);
+    }
+
+    // ------------------------------------------------------------------
+    // `should_yield` (slot-yield gate, Issues #23 / #28)
+    // ------------------------------------------------------------------
+
+    /// A solo worker (only one active lease) never yields.
+    #[test]
+    fn should_yield_solo_never_yields() {
+        let state = tmp_state();
+        let sem = TaskSemaphore::with_poll_interval(&state, 1, 50);
+        let a = rt().block_on(sem.acquire_with_tokens("a", 0));
+        // Even with a pathological cache ratio, a solo worker keeps its slot.
+        assert!(!sem.should_yield(&a, 0, Some(0), Some(1000), 100, 0.20));
+    }
+
+    /// The oldest active lease has right-of-way and never yields, even when
+    /// its cache ratio is poor.
+    #[test]
+    fn should_yield_oldest_never_yields() {
+        let state = tmp_state();
+        let sem = TaskSemaphore::with_poll_interval(&state, 2, 50);
+        let a = rt().block_on(sem.acquire_with_tokens("a", 0)); // oldest
+        let _b = rt().block_on(sem.acquire_with_tokens("b", 0));
+        // `a` is the oldest active lease → right-of-way → no yield.
+        assert!(!sem.should_yield(&a, 0, Some(0), Some(1000), 100, 0.20));
+    }
+
+    /// A younger lease with a low empirical cache-hit ratio yields (Condition A).
+    #[test]
+    fn should_yield_younger_low_cache_hit_ratio_yields() {
+        let state = tmp_state();
+        let sem = TaskSemaphore::with_poll_interval(&state, 2, 50);
+        let _a = rt().block_on(sem.acquire_with_tokens("a", 0));
+        let b = rt().block_on(sem.acquire_with_tokens("b", 0)); // younger
+        // pool disabled (no with_token_budget) → Condition A drives the result.
+        // hit_ratio = 100/1000 = 0.10 < 0.20 → yield.
+        assert!(sem.should_yield(&b, 0, Some(100), Some(1000), 100, 0.20));
+    }
+
+    /// A younger lease with a healthy cache-hit ratio and no pool overcommit
+    /// does NOT yield.
+    #[test]
+    fn should_yield_younger_healthy_cache_does_not_yield() {
+        let state = tmp_state();
+        let sem = TaskSemaphore::with_poll_interval(&state, 2, 50);
+        let _a = rt().block_on(sem.acquire_with_tokens("a", 0));
+        let b = rt().block_on(sem.acquire_with_tokens("b", 0)); // younger
+        // hit_ratio = 500/1000 = 0.50 >= 0.20 → no Condition A;
+        // pool disabled → no Condition B → no yield.
+        assert!(!sem.should_yield(&b, 0, Some(500), Some(1000), 100, 0.20));
+    }
+
+    /// A younger lease that overcommits the physical token pool yields
+    /// (Condition B).
+    #[test]
+    fn should_yield_younger_pool_overcommit_yields() {
+        let state = tmp_state();
+        let sem = TaskSemaphore::with_poll_interval(&state, 2, 50).with_token_budget(50, 10);
+        let _a = rt().block_on(sem.acquire_with_tokens("a", 0));
+        let b = rt().block_on(sem.acquire_with_tokens("b", 0)); // younger
+        // Grow `b`'s context so committed = (10+0) + (10+100) = 120 > 50.
+        sem.update_context_tokens("b", 100);
+        // No cached/prompt → Condition A skipped; Condition B (120 > 50) → yield.
+        assert!(sem.should_yield(&b, 0, None, None, 0, 0.20));
     }
 }

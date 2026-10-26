@@ -348,7 +348,7 @@ impl EngineLifecycle {
     pub(crate) fn shell_command(cmd: &str) -> Command {
         // When running under WSL, bare `cmd`/`taskkill` are resolved through
         // Windows interop; add the explicit `.exe` so the right binary is found.
-        let cmd = if is_wsl() {
+        let normalized = if is_wsl() {
             wsl_normalize(cmd)
         } else {
             cmd.to_string()
@@ -356,12 +356,16 @@ impl EngineLifecycle {
         #[cfg(windows)]
         {
             let mut c = Command::new("cmd");
-            c.raw_arg(format!("/d /s /c \"{cmd}\""));
+            c.raw_arg(format!("/d /s /c \"{normalized}\""));
             c.creation_flags(0x08000000);
             c
         }
-        #[cfg(not(windows))]
+        #[cfg(unix)]
         {
+            // On WSL2/Linux, never invoke `sh -c "wsl ..."`: strip any leading
+            // `wsl`/`wsl.exe` interop wrapper so the inner command runs directly
+            // (e.g. `wsl -d Ubuntu -- bash -lc "pkill vllm"` -> `bash -lc "pkill vllm"`).
+            let cmd = crate::platform::strip_wsl_wrapper(&normalized);
             let mut c = Command::new("sh");
             c.arg("-c").arg(cmd);
             c
@@ -447,6 +451,25 @@ pub(crate) async fn llama_readiness(
             .await
             .map_err(|e| format!("reading upstream HTTP {status} body from {url}: {e}"))?;
         if !status.is_success() {
+            // llama.cpp serves `/health`; vLLM/OpenAI do not. If the configured
+            // `/health` 404s but `/models` actively serves a model, the endpoint
+            // is an OpenAI-compatible server, not llama.cpp — emit an actionable
+            // mismatch diagnostic.
+            if endpoint == "health"
+                && status == reqwest::StatusCode::NOT_FOUND
+                && let Some(serve) = probe_serving_models(config, client).await
+            {
+                return Err(format!(
+                    "{url} returned 404 on /health but {}/models is actively serving \
+                     {serve} — this is an OpenAI/vLLM endpoint, not llama.cpp. \
+                     Set CASTOR_ENGINE_TYPE=vllm and CASTOR_MODEL={serve}.",
+                    config
+                        .base_url
+                        .as_deref()
+                        .map(|b| b.trim_end_matches('/'))
+                        .unwrap_or("<base_url>"),
+                ));
+            }
             return Err(format!("upstream HTTP {status} from {url}: {body}"));
         }
         let value: Value = serde_json::from_str(&body)
@@ -480,6 +503,37 @@ pub(crate) async fn llama_readiness(
         }
     }
     Ok(())
+}
+
+/// Probe the configured `/models` endpoint and, if it is actively serving
+/// models, return a display string for them (comma-joined ids, or the
+/// `data[0].id`). Returns `None` when `/models` is not a successful model
+/// list (e.g. it is also a 404 or unreachable), in which case the caller
+/// falls back to its original error.
+async fn probe_serving_models(config: &Config, client: &reqwest::Client) -> Option<String> {
+    let url = api_url(config, "models").ok()?;
+    let mut request = client.get(&url);
+    if let Some(key) = &config.api_key {
+        request = request.bearer_auth(key);
+    }
+    let response = request.send().await.ok()?;
+    if response.status() != reqwest::StatusCode::OK {
+        return None;
+    }
+    let body = response.text().await.ok()?;
+    let value: Value = serde_json::from_str(&body).ok()?;
+    let data = value["data"].as_array()?;
+    if data.is_empty() {
+        return None;
+    }
+    let ids: Vec<&str> = data
+        .iter()
+        .filter_map(|entry| entry["id"].as_str())
+        .collect();
+    if ids.is_empty() {
+        return None;
+    }
+    Some(ids.join(", "))
 }
 
 #[cfg(test)]
@@ -571,6 +625,14 @@ mod tests {
             openalex_api_key: None,
             boot_timeout_secs: 180,
             probe_budget: 4,
+            dgi_reject_margin: 1.5,
+            dgi_bypass_warm_session: false,
+            reasoning_open_tag: concat!("<th", "ink>").to_string(),
+            reasoning_close_tag: concat!("</th", "ink>").to_string(),
+            cache_hit_yield_ratio: 0.20,
+            min_eviction_detect_tokens: 13056,
+            turn_timeout_secs: 600,
+            max_turn_reasoning_tokens: 16384,
             state_dir: state.root().to_path_buf(),
         }
     }
@@ -603,6 +665,69 @@ mod tests {
             let _ = axum::serve(listener, app).await;
         });
         (format!("http://127.0.0.1:{}", addr.port()), addr.port())
+    }
+
+    /// Mock OpenAI/vLLM-style engine: `/v1/health` 404s (not a llama.cpp
+    /// endpoint) while `/v1/models` returns 200 listing `models`.
+    async fn start_openai_mock(models: Vec<String>) -> String {
+        let app = Router::new()
+            .route(
+                "/v1/health",
+                get(|| async { (axum::http::StatusCode::NOT_FOUND, "no /health").into_response() }),
+            )
+            .route(
+                "/v1/models",
+                get(move || {
+                    let models = models.clone();
+                    async move {
+                        Json(json!({
+                            "data": models.iter().map(|id| json!({"id": id})).collect::<Vec<_>>()
+                        }))
+                        .into_response()
+                    }
+                }),
+            );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            let _ = axum::serve(listener, app).await;
+        });
+        format!("http://127.0.0.1:{}", addr.port())
+    }
+
+    #[tokio::test]
+    async fn llama_readiness_reports_vllm_when_health_404_models_serve() {
+        let state = tmp_state();
+        let base = start_openai_mock(vec!["qwen3-27b".into()]).await;
+        let mut cfg = test_config(&state, None, None);
+        cfg.engine_type = Some("llama.cpp".into());
+        cfg.model = Some("some-llama-model".into());
+        cfg.base_url = Some(format!("{base}/v1"));
+
+        let client = reqwest::Client::builder()
+            .timeout(Duration::from_secs(5))
+            .build()
+            .unwrap();
+        let err = llama_readiness(&cfg, &client).await.unwrap_err();
+
+        // `/health` 404s but `/models` is serving an OpenAI/vLLM model: the
+        // diagnostic names the actual model and the corrective env settings.
+        assert!(
+            err.contains("404 on /health"),
+            "expected 404-on-/health note, got: {err}"
+        );
+        assert!(
+            err.contains("qwen3-27b"),
+            "expected actual model named, got: {err}"
+        );
+        assert!(
+            err.contains("CASTOR_ENGINE_TYPE=vllm"),
+            "expected vLLM engine_type advice, got: {err}"
+        );
+        assert!(
+            err.contains("CASTOR_MODEL=qwen3-27b"),
+            "expected CASTOR_MODEL advice, got: {err}"
+        );
     }
 
     #[tokio::test]

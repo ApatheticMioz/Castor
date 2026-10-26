@@ -135,33 +135,41 @@ pub async fn run_job_with_engine(
     //    lease. A rejected dispatch never holds a lease (no release
     //    bookkeeping needed) and cannot block other waiters in the FIFO queue.
     if config.base_url.is_some() && config.model.is_some() {
-        let lc = crate::engine::EngineLifecycle::new(config, state);
-        let dgi = if !lc.canary().await {
-            crate::mcp::dgi::evaluate(&spec.prompt)
+        let dgi = if crate::mcp::dgi::warm_session_bypass(config, state, &spec.session_id) {
+            tracing::debug!(
+                session_id = %spec.session_id,
+                "[dgi] warm-session bypass: admitting without probe"
+            );
+            crate::mcp::dgi::DgiVerdict::Admit
         } else {
-            let probe_timeout_secs = std::env::var("CASTOR_DGI_TIMEOUT_SECS")
-                .ok()
-                .and_then(|v| v.parse::<u64>().ok())
-                .unwrap_or(30);
-            let http = reqwest::Client::builder()
-                .timeout(std::time::Duration::from_secs(probe_timeout_secs))
-                .build()
-                .unwrap_or_default();
-            match crate::mcp::dgi::evaluate_configured_model_probe(config, &spec.prompt, &http)
-                .await
-            {
-                Ok(v) => v,
-                Err(err) => {
-                    tracing::warn!(
-                        error = %err,
-                        "[dgi] warning: dispatch classification probe failed ({err}). \
-                         Falling back to soft heuristic."
-                    );
-                    let fallback = crate::mcp::dgi::evaluate(&spec.prompt);
-                    if matches!(fallback, crate::mcp::dgi::DgiVerdict::Admit) {
-                        crate::mcp::dgi::DgiVerdict::Review(0)
-                    } else {
-                        fallback
+            let lc = crate::engine::EngineLifecycle::new(config, state);
+            if !lc.canary().await {
+                crate::mcp::dgi::evaluate(&spec.prompt)
+            } else {
+                let probe_timeout_secs = std::env::var("CASTOR_DGI_TIMEOUT_SECS")
+                    .ok()
+                    .and_then(|v| v.parse::<u64>().ok())
+                    .unwrap_or(30);
+                let http = reqwest::Client::builder()
+                    .timeout(std::time::Duration::from_secs(probe_timeout_secs))
+                    .build()
+                    .unwrap_or_default();
+                match crate::mcp::dgi::evaluate_configured_model_probe(config, &spec.prompt, &http)
+                    .await
+                {
+                    Ok(v) => v,
+                    Err(err) => {
+                        tracing::warn!(
+                            error = %err,
+                            "[dgi] warning: dispatch classification probe failed ({err}). \
+                             Falling back to soft heuristic."
+                        );
+                        let fallback = crate::mcp::dgi::evaluate(&spec.prompt);
+                        if matches!(fallback, crate::mcp::dgi::DgiVerdict::Admit) {
+                            crate::mcp::dgi::DgiVerdict::Review(0)
+                        } else {
+                            fallback
+                        }
                     }
                 }
             }
@@ -185,8 +193,12 @@ pub async fn run_job_with_engine(
     }
 
     // 2. Acquire execution slot (token-budgeted).
-    let initial_tokens = (spec.prompt.chars().count() / 4) as u32;
+    // Include any resumed-history tokens so the slot's initial budget
+    // reflects the true working set (history + new prompt).
+    let resumed_tokens = runner::resumed_history_tokens(state, &spec.session_id, Some(max_ctx));
+    let initial_tokens = ((spec.prompt.chars().count() / 4) as u32).saturating_add(resumed_tokens);
     let lease = sem.acquire_with_tokens(&spec.task_id, initial_tokens).await;
+    let shared_lease = std::sync::Arc::new(std::sync::Mutex::new(lease));
 
     // 3. Transition status to Executing and stamp worker PID.
     let now = now_epoch_ms();
@@ -271,7 +283,8 @@ Secondary docs and markdown notes are reference ledgers. Do not write historical
             let _ = registry
                 .transition(&spec.task_id, TaskStatus::Failed, Some(err_msg.clone()))
                 .await;
-            let _ = sem.release(&lease);
+            let guard = shared_lease.lock().unwrap();
+            let _ = sem.release(&guard);
             return Err(err_msg);
         }
     };
@@ -283,13 +296,25 @@ Secondary docs and markdown notes are reference ledgers. Do not write historical
     // under the state dir's `.scratch/`. The per-session reasoning-effort
     // tier (validated at dispatch) is threaded into the runner so every
     // engine call in the session carries it.
-    let mut options = runner::SessionOptions::with_state(state.clone());
+    let mut options = runner::SessionOptions::with_state(state.clone())
+        .with_reasoning_tags(
+            config.reasoning_open_tag.clone(),
+            config.reasoning_close_tag.clone(),
+        )
+        .with_turn_watchdog(config.turn_timeout_secs, config.max_turn_reasoning_tokens);
     options.workspace = Some(workspace_root.clone());
     options.reasoning_effort = spec.reasoning_effort.clone();
     options.probe_budget = config.probe_budget;
     // 0 when unset → the session-history watermark is disabled (zero behavior
     // change for callers that don't configure a context budget).
     options.max_context = max_ctx as usize;
+    options = options.with_lease_context(runner::LeaseYieldContext {
+        sem: std::sync::Arc::new(sem.clone()),
+        lease: shared_lease.clone(),
+        task_id: spec.task_id.clone(),
+        min_eviction_detect_tokens: config.min_eviction_detect_tokens,
+        cache_hit_yield_ratio: config.cache_hit_yield_ratio,
+    });
 
     // 8. Run session loop.
     let outcome = runner::run_session(
@@ -319,7 +344,8 @@ Secondary docs and markdown notes are reference ledgers. Do not write historical
                     Some(session_res.final_text.clone()),
                 )
                 .await;
-            let _ = sem.release(&lease);
+            let guard = shared_lease.lock().unwrap();
+            let _ = sem.release(&guard);
             Ok(session_res.final_text)
         }
         Err(e) => {
@@ -327,7 +353,8 @@ Secondary docs and markdown notes are reference ledgers. Do not write historical
             let _ = registry
                 .transition(&spec.task_id, TaskStatus::Failed, Some(err_msg.clone()))
                 .await;
-            let _ = sem.release(&lease);
+            let guard = shared_lease.lock().unwrap();
+            let _ = sem.release(&guard);
             Err(err_msg)
         }
     }

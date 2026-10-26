@@ -780,6 +780,14 @@ mod tests {
             openalex_api_key: None,
             boot_timeout_secs: 180,
             probe_budget: 4,
+            dgi_reject_margin: 1.5,
+            dgi_bypass_warm_session: false,
+            reasoning_open_tag: concat!("<th", "ink>").to_string(),
+            reasoning_close_tag: concat!("</th", "ink>").to_string(),
+            cache_hit_yield_ratio: 0.20,
+            min_eviction_detect_tokens: 13056,
+            turn_timeout_secs: 600,
+            max_turn_reasoning_tokens: 16384,
             state_dir: PathBuf::from("/tmp/castor-test"),
         }
     }

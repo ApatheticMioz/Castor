@@ -163,20 +163,65 @@ fn msg(role: &str, content: impl Into<String>) -> Message {
     }
 }
 
-/// Strip <think>...</think> reasoning traces from an assistant message before
+/// Strip <th_ink>...</th_ink> reasoning traces from an assistant message before
 /// persisting it in multi-turn conversation history, preventing context bloat
-/// and prompt-cache invalidation.
+/// and prompt-cache invalidation. Delegates to the tag-generic
+/// [`strip_reasoning_tags`] with the reserved default tag pair.
 fn strip_think_tags(content: &str) -> String {
+    strip_reasoning_tags(content, concat!("<th", "ink>"), concat!("</th", "ink>"))
+}
+
+/// Generic reasoning-tag stripper: removes `open_tag`..`close_tag` spans from
+/// `content` and trims a dangling open tag.
+fn strip_reasoning_tags(content: &str, open_tag: &str, close_tag: &str) -> String {
     let mut result = content.to_string();
-    while let Some(start) = result.find("<think>") {
-        if let Some(end) = result[start..].find("</think>") {
-            result.replace_range(start..start + end + "</think>".len(), "");
+    while let Some(start) = result.find(open_tag) {
+        let abs = start;
+        if let Some(rel_end) = result[abs..].find(close_tag) {
+            result.replace_range(abs..abs + rel_end + close_tag.len(), "");
         } else {
-            result.truncate(start);
+            result.truncate(abs);
             break;
         }
     }
     result.trim().to_string()
+}
+
+/// Insert a zero-width space after `<` in any occurrence of `open_tag` or
+/// `close_tag` inside `text`, so downstream tool-call parsers never see a
+/// valid XML-like delimiter embedded in reasoning content.
+fn sanitize_tool_delimiters(text: &str, open_tag: &str, close_tag: &str) -> String {
+    let mut result = text.to_string();
+    for tag in [open_tag, close_tag] {
+        // Insert a zero-width space immediately after the `<` of every
+        // occurrence of `tag`, so the byte sequence no longer reads as a valid
+        // XML-like delimiter. We restart the search from the insertion point so
+        // repeated occurrences are all handled in one pass.
+        let mut from = 0;
+        while from <= result.len() {
+            match result[from..].find(tag) {
+                Some(rel) => {
+                    let pos = from + rel; // index of the tag's opening '<'
+                    result.insert(pos + 1, '\u{200b}');
+                    // Resume just after the (now length+1) sanitized tag region.
+                    from = pos + 1 + tag.len();
+                }
+                None => break,
+            }
+        }
+    }
+    result
+}
+
+/// True when the model closed its reasoning block (emitted `close_tag`) and
+/// still has non-empty text after the *last* `close_tag` — i.e. a "severed"
+/// stop where deliberation ended but no tool call followed. Returns false
+/// when `close_tag` is absent (no closed reasoning block to sever on).
+fn is_severed_stop(content: &str, close_tag: &str) -> bool {
+    match content.rfind(close_tag) {
+        Some(pos) => !content[pos + close_tag.len()..].trim().is_empty(),
+        None => false,
+    }
 }
 
 /// The per-turn `metrics` object embedded in a `dispatch` event, in the same
@@ -210,6 +255,49 @@ fn metrics_json(m: &Metrics) -> serde_json::Value {
     serde_json::Value::Object(o)
 }
 
+/// Per-turn slot-bookkeeping context injected into [`SessionOptions`] (Issues
+/// #23 / #28).
+///
+/// It carries everything the runner's turn loop needs to record a turn's token
+/// footprint on a held lease and to participate in the pool's cooperative
+/// yield gate:
+///
+/// - `sem`: the shared token-budgeted slot pool.
+/// - `lease`: the currently-held slot lease, wrapped in an `Arc<Mutex<..>>` so
+///   the runner can atomically swap it when a yield hands the slot to another
+///   worker (the worker holds the same `Arc` to release the final lease on
+///   exit).
+/// - `task_id`: the task bound to the lease (key for
+///   [`crate::task::semaphore::TaskSemaphore::update_context_tokens`]).
+/// - `min_eviction_detect_tokens` / `cache_hit_yield_ratio`: the yield-gate
+///   thresholds, injected from [`crate::config::Config`] so the runner stays
+///   free of any config dependency (mirrors [`should_yield`]).
+#[derive(Clone)]
+pub struct LeaseYieldContext {
+    pub sem: std::sync::Arc<crate::task::semaphore::TaskSemaphore>,
+    pub lease: std::sync::Arc<std::sync::Mutex<crate::task::semaphore::SlotLease>>,
+    pub task_id: String,
+    pub min_eviction_detect_tokens: u32,
+    pub cache_hit_yield_ratio: f64,
+}
+
+impl std::fmt::Debug for LeaseYieldContext {
+    /// `sem` and `lease` hold non-`Debug` handles (`oneshot::Sender` inside the
+    /// wait-queue; the slot lease file path), so we print only the identity
+    /// and the yield-gate thresholds — enough to log a yield decision without
+    /// pulling in the whole semaphore state.
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("LeaseYieldContext")
+            .field("task_id", &self.task_id)
+            .field(
+                "min_eviction_detect_tokens",
+                &self.min_eviction_detect_tokens,
+            )
+            .field("cache_hit_yield_ratio", &self.cache_hit_yield_ratio)
+            .finish()
+    }
+}
+
 /// State / workspace context the runner uses for terminal artifacts.
 ///
 /// This is deliberately *only* the durable-location context — not the engine,
@@ -239,6 +327,32 @@ pub struct SessionOptions {
     /// default) means the watermark is disabled — history always resumes
     /// when present (zero behavior change for callers that don't set it).
     pub max_context: usize,
+    /// Reasoning open tag the runner strips from assistant content and
+    /// sanitizes inside tool results. `None` means "use the reserved default"
+    /// (`concat!("<th","ink>")`), so the raw byte sequence never appears in
+    /// source and the tokenizer never sees a contiguous reasoning delimiter.
+    pub reasoning_open_tag: Option<String>,
+    /// Reasoning close tag (the paired `</...>` form). `None` uses the default
+    /// (`concat!("</th","ink>")`).
+    pub reasoning_close_tag: Option<String>,
+    /// When `Some`, the runner performs per-turn slot-bookkeeping and
+    /// cooperative yielding against the shared task-slot pool (Issues #23 /
+    /// #28): after each turn it records the turn's token footprint on the
+    /// held lease and, if the pool's yield gate fires, it releases and
+    /// re-acquires the lease to hand the slot to a younger / more
+    /// cache-efficient worker.
+    pub lease_context: Option<LeaseYieldContext>,
+    /// Per-turn watchdog wall-clock ceiling (seconds). When `Some(s)` with
+    /// `s > 0`, each `engine.chat` call is wrapped in
+    /// [`tokio::time::timeout`]. A timeout triggers a single retry at `"low"`
+    /// reasoning effort (Issue #27 Part 2). `None` disables the timeout.
+    pub turn_timeout_secs: Option<u64>,
+    /// Per-turn watchdog reasoning-token budget. When `Some(n)` with
+    /// `n > 0`, a turn that returns `finish_reason == "length"` with empty
+    /// `tool_calls` and `metrics.reasoning_tokens >= n` is treated as a
+    /// stall and retried once at `"low"` reasoning effort (Issue #27 Part 2).
+    /// `None` or `0` disables the token-budget trigger.
+    pub max_turn_reasoning_tokens: Option<u32>,
 }
 
 impl SessionOptions {
@@ -250,6 +364,11 @@ impl SessionOptions {
             reasoning_effort: None,
             probe_budget: DEFAULT_PROBE_BUDGET,
             max_context: 0,
+            reasoning_open_tag: None,
+            reasoning_close_tag: None,
+            lease_context: None,
+            turn_timeout_secs: None,
+            max_turn_reasoning_tokens: None,
         }
     }
 
@@ -261,7 +380,67 @@ impl SessionOptions {
             reasoning_effort: None,
             probe_budget: DEFAULT_PROBE_BUDGET,
             max_context: 0,
+            reasoning_open_tag: None,
+            reasoning_close_tag: None,
+            lease_context: None,
+            turn_timeout_secs: None,
+            max_turn_reasoning_tokens: None,
         }
+    }
+
+    /// Attach the per-turn stall watchdog (Issue #27 Part 2). Wraps each
+    /// `engine.chat` call in a wall-clock timeout (`turn_timeout_secs`, `0`
+    /// disables) and treats a `length`/empty-tool-call turn that burned at
+    /// least `max_turn_reasoning_tokens` reasoning tokens (`0` disables) as a
+    /// stall; either trigger retries the turn once at `"low"` reasoning
+    /// effort. Returns `Self` for chaining.
+    pub fn with_turn_watchdog(
+        self,
+        turn_timeout_secs: u64,
+        max_turn_reasoning_tokens: u32,
+    ) -> Self {
+        Self {
+            turn_timeout_secs: Some(turn_timeout_secs),
+            max_turn_reasoning_tokens: Some(max_turn_reasoning_tokens),
+            ..self
+        }
+    }
+
+    /// Attach a [`LeaseYieldContext`] so the runner performs per-turn slot
+    /// bookkeeping and cooperative yielding (Issues #23 / #28). Returns `Self`
+    /// for chaining.
+    pub fn with_lease_context(mut self, ctx: LeaseYieldContext) -> Self {
+        self.lease_context = Some(ctx);
+        self
+    }
+
+    /// Set a provider-specific reasoning tag pair (e.g. `<reasoning>` /
+    /// `</reasoning>` for providers that do not use the reserved delimiters).
+    /// Both tags must be set together; a bare open tag is not a valid pair.
+    pub fn with_reasoning_tags(
+        mut self,
+        open: impl Into<String>,
+        close: impl Into<String>,
+    ) -> Self {
+        self.reasoning_open_tag = Some(open.into());
+        self.reasoning_close_tag = Some(close.into());
+        self
+    }
+
+    /// Resolve the effective open tag: the configured value when present,
+    /// otherwise the reserved default built via `concat!`.
+    fn effective_open_tag(&self) -> String {
+        self.reasoning_open_tag
+            .clone()
+            .unwrap_or_else(|| concat!("<th", "ink>").to_string())
+    }
+
+    /// Resolve the effective close tag: the configured value when present,
+    /// otherwise the reserved default built via `concat!`.
+    fn effective_close_tag(&self) -> String {
+        self.reasoning_close_tag
+            .clone()
+            .unwrap_or_else(|| concat!("</th", "ink>").to_string())
     }
 
     /// The directory `.scratch/` salvage reports are written under: the state
@@ -524,6 +703,40 @@ fn watermark_tokens(max_context: usize) -> usize {
     (max_context as u64 * 75 / 100) as usize
 }
 
+/// The token footprint of a *resumed* session's loaded history, subject to the
+/// same 75% [`max_context`] watermark gate used by [`run_session`] on resume.
+///
+/// This is the DRY source of truth for "how much context is this task already
+/// carrying into the slot pool" (Issues #23 / #28):
+///
+/// - No state dir, no persisted history, or a `max_context` that is `None` /
+///   `0` (watermark disabled) → returns `0` (nothing to account for, exactly
+///   matching the resume path's "disabled" behavior).
+/// - The loaded history fits within the 75% watermark → its
+///   [`history_tokens`] footprint is returned.
+/// - The loaded history exceeds the watermark → `0` (the session would roll
+///   over to a fresh `[system, user]` pair, so it carries no resumed history).
+pub fn resumed_history_tokens(state: &StateDir, session_id: &str, max_context: Option<u32>) -> u32 {
+    let Some(mc) = max_context else {
+        return 0;
+    };
+    if mc == 0 {
+        return 0; // watermark disabled
+    }
+    let Some(history) = load_messages(state, session_id) else {
+        return 0;
+    };
+    if history.is_empty() {
+        return 0;
+    }
+    let wm = watermark_tokens(mc as usize);
+    if history_tokens(&history) <= wm {
+        history_tokens(&history) as u32
+    } else {
+        0 // over the watermark → would roll over → no resumed history
+    }
+}
+
 /// Decide whether a loaded history should be resumed or rolled over.
 ///
 /// Resumes when the watermark is disabled (no options, or `max_context == 0`)
@@ -544,6 +757,100 @@ fn should_resume(
     let wm = watermark_tokens(opts.max_context);
     let est = history_tokens(history) + approx_tokens(new_user_prompt);
     est <= wm
+}
+
+/// Per-turn stall-watchdog wrapper for a single [`ChatEngine::chat`] call
+/// (Issue #27 Part 2).
+///
+/// Two independent triggers, both optional (`None` / `0` disables that
+/// trigger):
+///
+/// - **Wall-clock timeout**: when `turn_timeout_secs > 0`, the chat call is
+///   wrapped in [`tokio::time::timeout`]. A timeout is a hard stall.
+/// - **Reasoning-token budget**: when `max_turn_reasoning_tokens > 0` and the
+///   turn returns `finish_reason == "length"` with no `tool_calls` and
+///   `metrics.reasoning_tokens` at or above the budget, the model is presumed
+///   to have reasoned its way to a dead end (it "stalled" in deliberation
+///   rather than acting).
+///
+/// When either trigger fires, a `"turn_stall_retry"` event is appended to
+/// `logger` and the chat is retried **once** at `"low"` reasoning effort — a
+/// cheap, deterministic nudge that breaks the deliberation loop without
+/// changing the session's effective tier. If the retry itself errors, that
+/// error is returned. When no trigger fires, the original completion is
+/// returned untouched.
+#[allow(clippy::too_many_arguments)] // each argument is a distinct watchdog input
+async fn chat_with_watchdog(
+    engine: &dyn ChatEngine,
+    messages: &[Message],
+    tools: &[ToolSchema],
+    effort: Option<&str>,
+    turn_timeout_secs: u64,
+    max_turn_reasoning_tokens: u32,
+    logger: &EventLogger,
+    turn: u32,
+) -> Result<crate::engine::Completion, EngineError> {
+    // 1. Issue the primary call, optionally under a wall-clock timeout.
+    let first = if turn_timeout_secs > 0 {
+        match tokio::time::timeout(
+            std::time::Duration::from_secs(turn_timeout_secs),
+            engine.chat(messages, tools, true, effort),
+        )
+        .await
+        {
+            Ok(r) => r,
+            Err(_elapsed) => {
+                // Timed out: the in-flight request is dropped on timeout.
+                let _ = logger.append(serde_json::json!({
+                    "type": "turn_stall_retry",
+                    "turn": turn,
+                    "reason": "timeout",
+                    "turn_timeout_secs": turn_timeout_secs,
+                    "retry_reasoning_effort": "low",
+                }));
+                tracing::warn!(
+                    turn = turn,
+                    "turn stalled on wall-clock timeout ({}s); retrying once at 'low' effort",
+                    turn_timeout_secs
+                );
+                return engine.chat(messages, tools, true, Some("low")).await;
+            }
+        }
+    } else {
+        engine.chat(messages, tools, true, effort).await
+    };
+
+    let Ok(completion) = first else {
+        // Non-timeout error: nothing to salvage; propagate as-is.
+        return first;
+    };
+
+    // 2. Reasoning-token budget stall: `length` finish, no tool calls, and the
+    //    model burned at least the budget in reasoning tokens.
+    let stalled = max_turn_reasoning_tokens > 0
+        && completion.finish_reason.as_deref() == Some("length")
+        && completion.tool_calls.is_empty()
+        && completion.metrics.reasoning_tokens.unwrap_or(0) >= u64::from(max_turn_reasoning_tokens);
+
+    if stalled {
+        let _ = logger.append(serde_json::json!({
+            "type": "turn_stall_retry",
+            "turn": turn,
+            "reason": "reasoning_token_budget",
+            "reasoning_tokens": completion.metrics.reasoning_tokens,
+            "max_turn_reasoning_tokens": max_turn_reasoning_tokens,
+            "retry_reasoning_effort": "low",
+        }));
+        tracing::warn!(
+            turn = turn,
+            reasoning_tokens = completion.metrics.reasoning_tokens,
+            "turn stalled at reasoning-token budget ({}); retrying once at 'low' effort",
+            max_turn_reasoning_tokens
+        );
+        return engine.chat(messages, tools, true, Some("low")).await;
+    }
+
+    Ok(completion)
 }
 
 /// Run a multi-turn agent session.
@@ -620,6 +927,16 @@ pub async fn run_session(
         .and_then(|o| o.reasoning_effort.as_deref())
         .filter(|e| !e.is_empty());
 
+    // Per-turn stall watchdog (Issue #27 Part 2). `0` disables each trigger;
+    // both default to disabled so callers without a watchdog are unchanged.
+    let (wd_timeout, wd_max_reasoning) = match options {
+        Some(o) => (
+            o.turn_timeout_secs.unwrap_or(0),
+            o.max_turn_reasoning_tokens.unwrap_or(0),
+        ),
+        None => (0, 0),
+    };
+
     while turns < budget {
         // Cooperative landing: in the last ~5 turns, inject a budget notice.
         let remaining = budget - turns;
@@ -636,14 +953,45 @@ pub async fn run_session(
         turns += 1;
 
         // Build the request: messages first, tool schemas last (APC contract).
-        let completion = match engine.chat(&messages, tools, true, effort).await {
-            Ok(c) => c,
-            Err(crate::engine::EngineError::Sse(err)) => {
-                tracing::warn!("Transient SSE stream error on turn {turns}: {err}; retrying once");
-                tokio::time::sleep(std::time::Duration::from_millis(500)).await;
-                engine.chat(&messages, tools, true, effort).await?
+        // The per-turn stall watchdog (Issue #27 Part 2) wraps the call when a
+        // timeout or reasoning-token budget is configured; otherwise the call
+        // is issued directly (zero behavior change for unconfigured callers).
+        let watchdog = wd_timeout > 0 || wd_max_reasoning > 0;
+        let completion = if watchdog {
+            let primary = chat_with_watchdog(
+                engine,
+                &messages,
+                tools,
+                effort,
+                wd_timeout,
+                wd_max_reasoning,
+                logger,
+                turns,
+            )
+            .await;
+            match primary {
+                Ok(c) => c,
+                Err(crate::engine::EngineError::Sse(err)) => {
+                    tracing::warn!(
+                        "Transient SSE stream error on turn {turns}: {err}; retrying once"
+                    );
+                    tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+                    engine.chat(&messages, tools, true, effort).await?
+                }
+                Err(err) => return Err(RunnerError::Engine(err)),
             }
-            Err(err) => return Err(RunnerError::Engine(err)),
+        } else {
+            match engine.chat(&messages, tools, true, effort).await {
+                Ok(c) => c,
+                Err(crate::engine::EngineError::Sse(err)) => {
+                    tracing::warn!(
+                        "Transient SSE stream error on turn {turns}: {err}; retrying once"
+                    );
+                    tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+                    engine.chat(&messages, tools, true, effort).await?
+                }
+                Err(err) => return Err(RunnerError::Engine(err)),
+            }
         };
 
         // Record the dispatch event (with the engine's per-turn token usage,
@@ -667,7 +1015,7 @@ pub async fn run_session(
             }))
             .map_err(RunnerError::Io)?;
 
-        // Append the assistant message. Strip <think>...</think> traces if tool_calls
+        // Append the assistant message. Strip <th_ink>...</th_ink> traces if tool_calls
         // were made, to prevent context inflation and prompt-cache invalidation.
         let sanitized_content = if !completion.tool_calls.is_empty() {
             strip_think_tags(&completion.content)
@@ -684,6 +1032,21 @@ pub async fn run_session(
         if completion.tool_calls.is_empty() {
             // Compute the ceiling signal before moving `completion.content`.
             let ceiling_hit = is_reasoning_ceiling(&completion);
+
+            // Issue #24: capture the severed-stop signal (reasoning closed, but
+            // the model stopped with no tool call and no real content) before
+            // moving `completion`. This triggers a one-time continuation prompt
+            // so the engine is given a chance to act after deliberating.
+            let close_tag = options
+                .map(|o| o.effective_close_tag())
+                .unwrap_or_else(|| concat!("</th", "ink>").to_string());
+            let severed_stop = completion
+                .finish_reason
+                .as_deref()
+                .map(|f| f == "stop")
+                .unwrap_or(false)
+                && completion.reasoning_content.is_some()
+                && is_severed_stop(&completion.content, &close_tag);
 
             // Final content: if content is empty but the model provided substantive
             // reasoning_content (common when reasoning models finish deliberation
@@ -702,6 +1065,100 @@ pub async fn run_session(
                 completion.content
             };
             final_produced = true;
+
+            // One-time continuation: the model deliberated (closed its reasoning
+            // block) but stopped without a tool call and without a real deliverable.
+            // Prompt it once to continue acting; if it then emits tool calls, the
+            // loop continues naturally — otherwise we land on the new content.
+            if severed_stop {
+                let continuation_prompt = concat!(
+                    "[Continuation] Your last turn closed with ",
+                    "th_ink",
+                    " reasoning but produced no tool call or final deliverable. \
+                     If you still need to take an action (read, write, run a tool, \
+                     or synthesize a final answer), do so now. If the task is \
+                     already complete, reply with your final answer."
+                );
+                messages.push(msg("user", continuation_prompt));
+                match engine.chat(&messages, tools, true, effort).await {
+                    Ok(cont) => {
+                        if cont.tool_calls.is_empty() {
+                            // Terminal: land on the continuation's content (or its
+                            // reasoning if the content is empty).
+                            final_text = if !cont.content.trim().is_empty() {
+                                cont.content
+                            } else if let Some(rc) = cont
+                                .reasoning_content
+                                .as_deref()
+                                .map(str::trim)
+                                .filter(|s| !s.is_empty())
+                            {
+                                rc.to_string()
+                            } else {
+                                cont.content
+                            };
+                            final_produced = !final_text.trim().is_empty() || final_produced;
+                            break;
+                        }
+                        // The model acted: append the assistant message with its
+                        // tool calls so the loop continues and executes them.
+                        messages.push(Message {
+                            role: "assistant".into(),
+                            content: cont.content,
+                            tool_calls: cont.tool_calls.clone(),
+                            tool_call_id: None,
+                        });
+                        let scratch_root = options.and_then(|o| o.scratch_root());
+                        for tc in &cont.tool_calls {
+                            let outcome = match executor.execute(&tc.name, &tc.arguments).await {
+                                Ok(o) => o,
+                                Err(e) => ToolOutcome {
+                                    text: format!("Error: {e}"),
+                                },
+                            };
+                            tool_activity = true;
+                            let (tool_content, spilled) =
+                                spill_tool_output(&outcome.text, &tc.id, scratch_root.as_deref());
+                            if let Some((bytes, path)) = spilled {
+                                let _ = logger.append(serde_json::json!({
+                                    "type": "tool_output_spilled",
+                                    "sessionId": session_id,
+                                    "toolCallId": tc.id,
+                                    "toolName": tc.name,
+                                    "bytes": bytes,
+                                    "path": path.to_string_lossy(),
+                                }));
+                            }
+                            let _ = logger.append(serde_json::json!({
+                                "type": "tool_result",
+                                "turn": turns,
+                                "tool_call_id": tc.id,
+                                "name": tc.name,
+                                "is_error": outcome.text.starts_with("Error:"),
+                                "output": tool_content,
+                            }));
+                            messages.push(Message {
+                                role: "tool".into(),
+                                content: tool_content,
+                                tool_call_id: Some(tc.id.clone()),
+                                tool_calls: Vec::new(),
+                            });
+                        }
+                        // Loop continues: `turns` was already incremented for this
+                        // iteration, so the next iteration consumes a fresh budget
+                        // unit for the follow-up assistant turn.
+                        continue;
+                    }
+                    Err(e) => {
+                        tracing::warn!(
+                            session = %session_id,
+                            "continuation call after severed stop failed: {e}; \
+                             landing on prior content"
+                        );
+                        break;
+                    }
+                }
+            }
 
             // Deliberation-ceiling salvage pass: the model stopped at its
             // reasoning ceiling on a non-tool turn. The honest status is kept,
@@ -950,10 +1407,20 @@ pub async fn run_session(
                 }));
             }
 
-            // Append the tool result as a tool message.
+            // Append the tool result as a tool message. Sanitize any embedded
+            // reasoning delimiters so a downstream tool-call parser never sees a
+            // valid `<th_ink>`-style delimiter inside tool output.
+            let open_tag = options
+                .map(|o| o.effective_open_tag())
+                .unwrap_or_else(|| concat!("<th", "ink>").to_string());
+            let close_tag = options
+                .map(|o| o.effective_close_tag())
+                .unwrap_or_else(|| concat!("</th", "ink>").to_string());
+            let sanitized_tool_content =
+                sanitize_tool_delimiters(&tool_content, &open_tag, &close_tag);
             messages.push(Message {
                 role: "tool".into(),
-                content: tool_content.clone(),
+                content: sanitized_tool_content.clone(),
                 tool_call_id: Some(tc.id.clone()),
                 tool_calls: Vec::new(),
             });
@@ -1017,6 +1484,60 @@ impasse, state your findings and ask for alignment rather than continuing to re-
         // resume it (subject to the 75% `max_context` watermark on load).
         if let Some(state) = options.and_then(|o| o.state.as_ref()) {
             save_messages(state, session_id, &messages);
+        }
+
+        // Issues #23 / #28: per-turn slot bookkeeping + cooperative yield.
+        // Only runs when the worker injected a `LeaseYieldContext`. We record
+        // the turn's token footprint on the held lease, then let the pool's
+        // yield gate decide whether this worker should hand its slot to a
+        // younger / more cache-efficient worker. `completion` is still alive
+        // here (the next loop iteration re-binds it), so we read its metrics.
+        if let Some(ctx) = options.and_then(|o| o.lease_context.as_ref()) {
+            let prompt_tokens = completion.metrics.prompt_tokens;
+            let completion_tokens = completion.metrics.completion_tokens;
+            let cached_tokens = completion.metrics.cached_tokens;
+            let turn_tokens = prompt_tokens
+                .map(|p| p as u32)
+                .unwrap_or_else(|| history_tokens(&messages) as u32)
+                .saturating_add(completion_tokens.map(|c| c as u32).unwrap_or(0));
+            ctx.sem.update_context_tokens(&ctx.task_id, turn_tokens);
+            // Lock scope is deliberately narrowed to the synchronous decision
+            // (read lease + decide + snapshot) so no guard is held across the
+            // async re-acquire below (Issues #23 / #28, clippy::await_holding_lock).
+            let maybe_swap = match ctx.lease.lock() {
+                Ok(current) => {
+                    if ctx.sem.should_yield(
+                        &current,
+                        turn_tokens,
+                        cached_tokens.map(|c| c as u32),
+                        prompt_tokens.map(|p| p as u32),
+                        ctx.min_eviction_detect_tokens,
+                        ctx.cache_hit_yield_ratio,
+                    ) {
+                        Some(current.clone())
+                    } else {
+                        None
+                    }
+                }
+                // Poisoned lock: skip the yield and continue with the turn.
+                Err(_) => None,
+            };
+            if let Some(old) = maybe_swap {
+                let _ = logger.append(serde_json::json!({
+                    "type": "cooperative_yield",
+                    "turn": turns,
+                    "task_id": ctx.task_id,
+                    "turn_tokens": turn_tokens,
+                    "reason": "pool_yield_gate",
+                }));
+                // Release the held lease and re-acquire one so the slot is
+                // handed to a younger / more cache-efficient worker.
+                let _ = ctx.sem.release(&old);
+                let new_lease = ctx.sem.acquire_with_tokens(&ctx.task_id, turn_tokens).await;
+                if let Ok(mut slot) = ctx.lease.lock() {
+                    *slot = new_lease;
+                }
+            }
         }
     }
 
@@ -2438,5 +2959,268 @@ mod tests {
         assert_eq!(first_call[1].content, "second");
 
         let _ = std::fs::remove_dir_all(state.root());
+    }
+
+    // ── Reasoning-tag hygiene helpers (pure functions) ─────────────────
+
+    #[test]
+    fn strip_reasoning_tags_removes_open_and_close_span() {
+        let open = concat!("<th", "ink>");
+        let close = concat!("</th", "ink>");
+        let content = format!("before {open} reasoning {close} after");
+        assert_eq!(strip_reasoning_tags(&content, open, close), "before  after");
+    }
+
+    #[test]
+    fn strip_reasoning_tags_truncates_dangling_open_tag() {
+        let open = concat!("<th", "ink>");
+        let close = concat!("</th", "ink>");
+        // An open tag with no matching close → everything from the open tag
+        // onward is dropped (the deliberation was severed mid-stream).
+        assert_eq!(
+            strip_reasoning_tags(&format!("start {open} tail"), open, close),
+            "start"
+        );
+    }
+
+    #[test]
+    fn strip_reasoning_tags_is_noop_when_absent() {
+        let open = concat!("<th", "ink>");
+        let close = concat!("</th", "ink>");
+        assert_eq!(
+            strip_reasoning_tags("no tags here", open, close),
+            "no tags here"
+        );
+    }
+
+    #[test]
+    fn sanitize_tool_delimiters_inserts_zwsp_after_open_angle() {
+        let open = concat!("<th", "ink>");
+        let close = concat!("</th", "ink>");
+        let text = format!("here {open} body {close} done");
+        let out = sanitize_tool_delimiters(&text, open, close);
+        // A zero-width space must now sit after the '<' of every tag so the
+        // byte sequence no longer reads as a valid XML-like delimiter.
+        assert!(out.contains('\u{200b}'), "expected ZWSP: {out:?}");
+        assert!(!out.contains(open), "raw open tag survived: {out:?}");
+        assert!(!out.contains(close), "raw close tag survived: {out:?}");
+        // One ZWSP per tag (two tags) → exactly two extra scalar positions.
+        assert_eq!(out.chars().count(), text.chars().count() + 2);
+    }
+
+    #[test]
+    fn is_severed_stop_true_when_trailing_text_after_close() {
+        let close = concat!("</th", "ink>");
+        // Deliberation closed but a non-empty answer follows the close tag.
+        assert!(is_severed_stop(
+            &format!("reason {close} trailing answer"),
+            close
+        ));
+    }
+
+    #[test]
+    fn is_severed_stop_false_when_close_at_end_or_absent() {
+        let close = concat!("</th", "ink>");
+        // Close tag with nothing after it → a clean stop, not a severed one.
+        assert!(!is_severed_stop(&format!("reason {close}"), close));
+        // No close tag at all → no closed reasoning block to sever on.
+        assert!(!is_severed_stop("no close tag", close));
+    }
+
+    /// An engine that records the `reasoning_effort` passed to each `chat`
+    /// call so tests can verify the watchdog retried at `"low"` (the existing
+    /// `RecordingEngine` ignores the effort).
+    struct EffortRecordingEngine {
+        responses: tokio::sync::Mutex<VecDeque<Completion>>,
+        efforts: tokio::sync::Mutex<Vec<Option<String>>>,
+    }
+
+    #[async_trait]
+    impl ChatEngine for EffortRecordingEngine {
+        async fn chat(
+            &self,
+            _messages: &[Message],
+            _tools: &[ToolSchema],
+            _stream: bool,
+            effort: Option<&str>,
+        ) -> Result<Completion, EngineError> {
+            self.efforts.lock().await.push(effort.map(str::to_string));
+            self.responses
+                .lock()
+                .await
+                .pop_front()
+                .ok_or_else(|| EngineError::Malformed("no scripted response".into()))
+        }
+    }
+
+    fn stall_comp(reasoning_tokens: u64) -> Completion {
+        Completion {
+            content: String::new(),
+            reasoning_content: None,
+            tool_calls: Vec::new(),
+            finish_reason: Some("length".into()),
+            metrics: Metrics {
+                ttft_ms: None,
+                total_ms: 1.0,
+                tokens_per_sec: None,
+                prompt_tokens: None,
+                cached_tokens: None,
+                completion_tokens: None,
+                reasoning_tokens: Some(reasoning_tokens),
+            },
+        }
+    }
+
+    /// A normal (non-stalling) completion.
+    fn ok_comp() -> Completion {
+        Completion {
+            content: "done".into(),
+            reasoning_content: None,
+            tool_calls: Vec::new(),
+            finish_reason: Some("stop".into()),
+            metrics: Metrics::default(),
+        }
+    }
+
+    /// No token-budget trigger when the budget is disabled (`0`): the primary
+    /// `length`/empty-tool-call completion is returned untouched and the engine
+    /// is called exactly once.
+    #[tokio::test]
+    async fn watchdog_disabled_returns_first_completion_untouched() {
+        let state = tmp_state();
+        let logger = logger_for(&state);
+        let engine = EffortRecordingEngine {
+            responses: tokio::sync::Mutex::new(vec![stall_comp(999_999), ok_comp()].into()),
+            efforts: tokio::sync::Mutex::new(Vec::new()),
+        };
+        // `turn_timeout_secs = 0` disables the timeout; `max = 0` disables the
+        // token-budget trigger.
+        let res = chat_with_watchdog(&engine, &[], &[], None, 0, 0, &logger, 1)
+            .await
+            .unwrap();
+        // The primary (stalling) completion was returned as-is; the retry was
+        // never issued.
+        assert_eq!(res.finish_reason.as_deref(), Some("length"));
+        let efforts = engine.efforts.lock().await;
+        assert_eq!(
+            *efforts,
+            Vec::from([None]),
+            "exactly one call, no 'low' retry"
+        );
+    }
+
+    /// Token-budget trigger: a `length`/empty-tool-call turn that burned at
+    /// least the budget is retried once at `"low"` effort, and the retry's
+    /// completion is returned.
+    #[tokio::test]
+    async fn watchdog_reasoning_budget_retries_at_low_effort() {
+        let state = tmp_state();
+        let logger = logger_for(&state);
+        let engine = EffortRecordingEngine {
+            responses: tokio::sync::Mutex::new(vec![stall_comp(20_000), ok_comp()].into()),
+            efforts: tokio::sync::Mutex::new(Vec::new()),
+        };
+        let res = chat_with_watchdog(&engine, &[], &[], Some("high"), 0, 16_384, &logger, 1)
+            .await
+            .unwrap();
+        // The retry's (non-stalling) completion is what comes back.
+        assert_eq!(res.finish_reason.as_deref(), Some("stop"));
+        let efforts = engine.efforts.lock().await;
+        assert_eq!(
+            *efforts,
+            Vec::from([Some("high".into()), Some("low".into())])
+        );
+        // The stall was logged as a `turn_stall_retry` event.
+        let events = logger.read_all();
+        assert!(
+            events
+                .iter()
+                .any(|e| e["type"] == "turn_stall_retry" && e["reason"] == "reasoning_token_budget"),
+            "expected a reasoning_token_budget stall event: {events:?}"
+        );
+    }
+
+    /// Below the token budget the turn is NOT treated as a stall: the primary
+    /// `length`/empty-tool-call completion is returned and the engine is called
+    /// exactly once.
+    #[tokio::test]
+    async fn watchdog_below_budget_does_not_retry() {
+        let state = tmp_state();
+        let logger = logger_for(&state);
+        let engine = EffortRecordingEngine {
+            responses: tokio::sync::Mutex::new(vec![stall_comp(100)].into()),
+            efforts: tokio::sync::Mutex::new(Vec::new()),
+        };
+        let res = chat_with_watchdog(&engine, &[], &[], Some("high"), 0, 16_384, &logger, 1)
+            .await
+            .unwrap();
+        assert_eq!(res.finish_reason.as_deref(), Some("length"));
+        let efforts = engine.efforts.lock().await;
+        assert_eq!(
+            *efforts,
+            Vec::from([Some("high".into())]),
+            "no retry below budget"
+        );
+    }
+
+    /// The wall-clock timeout trigger: when the primary chat overruns the
+    /// configured ceiling, the watchdog retries once at `"low"` effort.
+    #[tokio::test]
+    async fn watchdog_timeout_retries_at_low_effort() {
+        let state = tmp_state();
+        let logger = logger_for(&state);
+        // First call hangs longer than the 1s ceiling; the retry returns
+        // promptly.
+        struct SlowThenOkEngine {
+            inner: EffortRecordingEngine,
+        }
+        #[async_trait]
+        impl ChatEngine for SlowThenOkEngine {
+            async fn chat(
+                &self,
+                _messages: &[Message],
+                _tools: &[ToolSchema],
+                _stream: bool,
+                effort: Option<&str>,
+            ) -> Result<Completion, EngineError> {
+                // Record this call up-front (before any await) so a dropped
+                // primary still leaves a marker; the retry then sees count 1 and
+                // does not sleep.
+                let first = self.inner.efforts.lock().await.is_empty();
+                self.inner
+                    .efforts
+                    .lock()
+                    .await
+                    .push(effort.map(str::to_string));
+                if first {
+                    // Primary call: overruns the 1s ceiling.
+                    tokio::time::sleep(std::time::Duration::from_secs(3)).await;
+                }
+                self.inner
+                    .responses
+                    .lock()
+                    .await
+                    .pop_front()
+                    .ok_or_else(|| EngineError::Malformed("no scripted response".into()))
+            }
+        }
+        let inner = EffortRecordingEngine {
+            responses: tokio::sync::Mutex::new(vec![ok_comp()].into()),
+            efforts: tokio::sync::Mutex::new(Vec::new()),
+        };
+        let engine = SlowThenOkEngine { inner };
+        let res = chat_with_watchdog(&engine, &[], &[], Some("high"), 1, 0, &logger, 1)
+            .await
+            .unwrap();
+        assert_eq!(res.finish_reason.as_deref(), Some("stop"));
+        // Only the retry recorded an effort (the timed-out primary was dropped
+        // before it recorded).
+        let events = logger.read_all();
+        assert!(
+            events
+                .iter()
+                .any(|e| e["type"] == "turn_stall_retry" && e["reason"] == "timeout"),
+            "expected a timeout stall event: {events:?}"
+        );
     }
 }

@@ -57,6 +57,29 @@ fn electricity_rate_usd() -> f64 {
         .unwrap_or(DEFAULT_ELECTRICITY_COST_PER_KWH)
 }
 
+/// Hall-of-Fame extremes across the scanned events: the single most
+/// notable values observed in the window. `None` means no event in the
+/// scanned set reported a finite value for that metric (never zero-filled,
+/// mirroring the `Stats` averaging policy).
+#[derive(Debug, Clone, PartialEq, Default, Serialize, Deserialize)]
+pub struct ExtremesSummary {
+    /// Largest single-turn prompt-token count (the biggest context ingested
+    /// by any one dispatch).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_prompt_tokens: Option<u64>,
+    /// Largest single-turn reasoning-token count (the deepest single
+    /// deliberation).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_reasoning_tokens: Option<u64>,
+    /// Fastest observed Time-To-First-Token in ms (best prefill latency).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub min_ttft_ms: Option<f64>,
+    /// Peak hardware decode speed in tokens/second (fastest speculative
+    /// burst; same source as `Stats::peak_decode_tps`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub peak_decode_tps: Option<f64>,
+}
+
 /// Derived statistics over the session + task ledgers.
 ///
 /// Field names mirror the JS `DEFAULT_STATS` object so the two stay
@@ -133,6 +156,10 @@ pub struct Stats {
     /// which case the field is omitted from JSON entirely.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub daily: Option<BTreeMap<String, DayBucket>>,
+    /// Hall-of-Fame extremes. `Some` only when derived with `extremes: true`
+    /// (`castor stats --extremes`); `None` otherwise (omitted from JSON).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub extremes: Option<ExtremesSummary>,
     /// Accumulator for the duration average (not serialized).
     #[serde(skip)]
     duration_sum: u64,
@@ -186,6 +213,7 @@ impl Default for Stats {
             last_recorded_session: None,
             last_updated: String::new(),
             daily: None,
+            extremes: None,
             duration_sum: 0,
             duration_count: 0,
             first_ms: None,
@@ -309,6 +337,9 @@ pub struct StatsOptions {
     pub since_ms: Option<i128>,
     /// Aggregate per UTC civil day (`YYYY-MM-DD`).
     pub by_day: bool,
+    /// Surface the Hall-of-Fame extremes section in the rendered card
+    /// (`castor stats --extremes`).
+    pub extremes: bool,
 }
 
 #[derive(Default)]
@@ -335,6 +366,9 @@ struct SessionRollup {
     ttft_sum_ms: f64,
     ttft_count: u64,
     prefill_prompt_tokens: u64,
+    max_prompt_tokens: u64,
+    max_reasoning_tokens: u64,
+    min_ttft_ms: Option<f64>,
 }
 
 impl SessionRollup {
@@ -356,6 +390,11 @@ impl SessionRollup {
         self.ttft_sum_ms += other.ttft_sum_ms;
         self.ttft_count += other.ttft_count;
         self.prefill_prompt_tokens += other.prefill_prompt_tokens;
+        self.max_prompt_tokens = self.max_prompt_tokens.max(other.max_prompt_tokens);
+        self.max_reasoning_tokens = self.max_reasoning_tokens.max(other.max_reasoning_tokens);
+        if let Some(m) = other.min_ttft_ms {
+            self.min_ttft_ms = Some(self.min_ttft_ms.map_or(m, |cur| cur.min(m)));
+        }
         for (name, n) in other.tool_calls {
             *self.tool_calls.entry(name).or_insert(0) += n;
         }
@@ -414,6 +453,13 @@ fn add_session_to_rollup(rollup: &mut SessionRollup, session: &SessionAgg, opts:
     rollup.ttft_sum_ms += session.ttft_sum_ms;
     rollup.ttft_count += session.ttft_count;
     rollup.prefill_prompt_tokens += session.prefill_prompt_tokens;
+    rollup.max_prompt_tokens = rollup.max_prompt_tokens.max(session.max_prompt_tokens);
+    rollup.max_reasoning_tokens = rollup
+        .max_reasoning_tokens
+        .max(session.max_reasoning_tokens);
+    if let Some(m) = session.min_ttft_ms {
+        rollup.min_ttft_ms = Some(rollup.min_ttft_ms.map_or(m, |cur| cur.min(m)));
+    }
     for (name, n) in &session.tool_calls_by_name {
         *rollup.tool_calls.entry(name.clone()).or_insert(0) += n;
     }
@@ -916,6 +962,15 @@ pub fn derive_stats(state_dir: &Path, opts: &StatsOptions) -> Stats {
         }
     }
 
+    stats.extremes = opts.extremes.then(|| ExtremesSummary {
+        max_prompt_tokens: (session_rollup.max_prompt_tokens > 0)
+            .then_some(session_rollup.max_prompt_tokens),
+        max_reasoning_tokens: (session_rollup.max_reasoning_tokens > 0)
+            .then_some(session_rollup.max_reasoning_tokens),
+        min_ttft_ms: session_rollup.min_ttft_ms,
+        peak_decode_tps: stats.peak_decode_tps,
+    });
+
     stats.last_updated = now_iso();
 
     // Render the epoch-millisecond horizon accumulators to ISO-8601 UTC.
@@ -1302,6 +1357,46 @@ pub fn format_stats_card_styled(stats: &Stats, color: bool) -> String {
     }
     out.push('\n');
 
+    if let Some(ref ext) = stats.extremes {
+        out.push_str(&format!("{}EXTREMES (HALL OF FAME){}\n", p.bold, p.reset));
+        if let Some(v) = ext.max_prompt_tokens {
+            out.push_str(&format!(
+                "  Max Prompt (single)    {:>10}  {}tokens in one context{}\n",
+                fmt_scaled(v),
+                p.dim,
+                p.reset
+            ));
+        }
+        if let Some(v) = ext.max_reasoning_tokens {
+            out.push_str(&format!(
+                "  Max Reasoning (single) {:>10}  {}deepest deliberation{}\n",
+                fmt_scaled(v),
+                p.dim,
+                p.reset
+            ));
+        }
+        if let Some(v) = ext.min_ttft_ms {
+            let ms_str = if v < 1000.0 {
+                format!("{:.0}ms", v)
+            } else {
+                format!("{:.2}s", v / 1000.0)
+            };
+            out.push_str(&format!(
+                "  Min TTFT               {:>10}  {}fastest prefill{}\n",
+                ms_str, p.dim, p.reset
+            ));
+        }
+        if let Some(v) = ext.peak_decode_tps {
+            out.push_str(&format!(
+                "  Peak Decode            {:>10}  {}fastest burst{}\n",
+                format!("{:.1} t/s", v),
+                p.dim,
+                p.reset
+            ));
+        }
+        out.push('\n');
+    }
+
     out.push_str(&format!(
         "{}CLOUD ARBITRAGE & ENERGY ({} Rates){}\n",
         p.bold, stats.benchmark_model, p.reset
@@ -1510,6 +1605,13 @@ struct SessionAgg {
     ttft_count: u64,
     #[serde(default)]
     prefill_prompt_tokens: u64,
+    #[serde(default)]
+    max_prompt_tokens: u64,
+    #[serde(default)]
+    max_reasoning_tokens: u64,
+    /// Fastest TTFT (ms) observed in this session (best prefill latency).
+    #[serde(default)]
+    min_ttft_ms: Option<f64>,
 }
 
 #[derive(Debug, Clone, PartialEq, Default, Serialize, Deserialize)]
@@ -1791,7 +1893,10 @@ fn parse_session_events(raw: &str, since: Option<i128>) -> Option<SessionAgg> {
                 }
                 prev_prompt_tokens = p;
                 agg.completion_tokens += comp;
-                agg.reasoning_tokens += reasoning.unwrap_or(0);
+                let r = reasoning.unwrap_or(0);
+                agg.reasoning_tokens += r;
+                agg.max_prompt_tokens = agg.max_prompt_tokens.max(p);
+                agg.max_reasoning_tokens = agg.max_reasoning_tokens.max(r);
 
                 let (ttft_opt, total_opt, _) = ev.timing();
                 if let Some(ttft) = ttft_opt
@@ -1799,6 +1904,7 @@ fn parse_session_events(raw: &str, since: Option<i128>) -> Option<SessionAgg> {
                 {
                     agg.ttft_sum_ms += ttft;
                     agg.ttft_count += 1;
+                    agg.min_ttft_ms = Some(agg.min_ttft_ms.map_or(ttft, |cur| cur.min(ttft)));
                     if p > 0 {
                         agg.prefill_prompt_tokens += p;
                     }
@@ -2344,6 +2450,7 @@ mod tests {
         let opts = StatsOptions {
             since_ms: Some(cutoff),
             by_day: true,
+            extremes: false,
         };
         let s = derive_stats(&state, &opts);
         let daily = s.daily.expect("--by-day populates the daily map");
@@ -2715,6 +2822,62 @@ mod tests {
         assert_eq!(stats.peak_decode_tps, Some(150.0));
         assert_eq!(stats.avg_ttft_ms, Some(250.0));
         assert_eq!(stats.effective_prefill_tps, Some(6000.0));
+
+        let _ = fs::remove_dir_all(&state);
+    }
+
+    #[test]
+    fn extremes_true_renders_hall_of_fame() {
+        let state = tmp_state();
+        write(
+            &state.join("sessions/s1/events.jsonl"),
+            concat!(
+                "{\"type\":\"dispatch\",\"turn\":1,\"timestamp\":\"2026-10-06T10:00:00.000Z\",\"metrics\":{\"prompt_tokens\":120000,\"completion_tokens\":200,\"reasoning_tokens\":8000,\"ttft_ms\":150.0,\"total_ms\":2000.0}}\n",
+                "{\"type\":\"dispatch\",\"turn\":2,\"timestamp\":\"2026-10-06T10:00:02.000Z\",\"metrics\":{\"prompt_tokens\":90000,\"completion_tokens\":300,\"reasoning_tokens\":3000,\"ttft_ms\":200.0,\"total_ms\":1500.0}}\n",
+                "{\"type\":\"final\",\"status\":\"completed\",\"duration_ms\":5000,\"timestamp\":\"2026-10-06T10:00:07.000Z\"}\n"
+            ),
+        );
+
+        let opts = StatsOptions {
+            extremes: true,
+            ..Default::default()
+        };
+        let stats = derive_stats(&state, &opts);
+        assert!(stats.extremes.is_some(), "extremes should be populated");
+        let ext = stats.extremes.as_ref().unwrap();
+        // Turn 1 has the max prompt (120000) and max reasoning (8000).
+        assert_eq!(ext.max_prompt_tokens, Some(120_000));
+        assert_eq!(ext.max_reasoning_tokens, Some(8_000));
+        // Turn 1 has the fastest TTFT (150ms).
+        assert_eq!(ext.min_ttft_ms, Some(150.0));
+        // peak_decode_tps mirrors the stats field (turn 1: 200 tokens / 1.85s).
+        assert_eq!(ext.peak_decode_tps, stats.peak_decode_tps);
+
+        let card = format_stats_card_styled(&stats, false);
+        assert!(card.contains("EXTREMES (HALL OF FAME)"), "card: {card}");
+        assert!(card.contains("Max Prompt (single)"), "card: {card}");
+        assert!(card.contains("Max Reasoning (single)"), "card: {card}");
+        assert!(card.contains("Min TTFT"), "card: {card}");
+        assert!(card.contains("Peak Decode"), "card: {card}");
+
+        let _ = fs::remove_dir_all(&state);
+    }
+
+    #[test]
+    fn extremes_false_omits_hall_of_fame() {
+        let state = tmp_state();
+        write(
+            &state.join("sessions/s1/events.jsonl"),
+            "{\"type\":\"dispatch\",\"turn\":1,\"timestamp\":\"2026-10-06T10:00:00.000Z\",\"metrics\":{\"prompt_tokens\":50000,\"completion_tokens\":100,\"ttft_ms\":200.0,\"total_ms\":1000.0}}\n",
+        );
+
+        let stats = derive_stats(&state, &Default::default());
+        assert!(
+            stats.extremes.is_none(),
+            "extremes should be None by default"
+        );
+        let card = format_stats_card_styled(&stats, false);
+        assert!(!card.contains("EXTREMES (HALL OF FAME)"), "card: {card}");
 
         let _ = fs::remove_dir_all(&state);
     }

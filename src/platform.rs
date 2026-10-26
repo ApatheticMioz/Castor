@@ -112,17 +112,63 @@ pub fn is_wsl() -> bool {
         .unwrap_or(false)
 }
 
+/// Strip a leading `wsl`/`wsl.exe` interop wrapper (and its options) from a
+/// command, returning the inner command to run directly.
+///
+/// `wsl` takes options *before* the command it executes: `-d`/`--distribution
+/// <name>`, `-u`/`--user <name>`, `-e`/`--exec`, and the `--` separator. This
+/// consumes the leading `wsl`/`wsl.exe` token plus any of those options so the
+/// inner command can be executed directly:
+///
+///   `wsl -d Ubuntu -- bash -lc "pkill vllm"` -> `bash -lc "pkill vllm"`
+///   `wsl -u root pkill -f vllm`              -> `pkill -f vllm`
+///   `wsl pkill -f vllm`                       -> `pkill -f vllm`
+///
+/// Commands that do not start with `wsl`/`wsl.exe` are returned unchanged.
+/// The logic is pure (no WSL detection) so it is testable on every platform.
+pub fn strip_wsl_wrapper(cmd: &str) -> String {
+    let t = cmd.trim();
+    let mut tokens: Vec<&str> = t.split_whitespace().collect();
+    let Some(first) = tokens.first().copied() else {
+        return cmd.to_string();
+    };
+    if first != "wsl" && first != "wsl.exe" {
+        return cmd.to_string();
+    }
+    tokens.remove(0);
+    while let Some(flag) = tokens.first().copied() {
+        match flag {
+            // Options that consume the following value.
+            "-d" | "--distribution" | "-u" | "--user" => {
+                tokens.remove(0);
+                if !tokens.is_empty() {
+                    tokens.remove(0);
+                }
+            }
+            // Flag-only options and the arg-separator / exec markers.
+            "-e" | "--exec" | "--" => {
+                tokens.remove(0);
+            }
+            _ => break,
+        }
+    }
+    tokens.join(" ")
+}
+
 /// Normalizes a Windows command for execution from WSL.
 ///
 /// When the process runs under WSL, a leading `cmd` or `taskkill` token is
 /// rewritten to its explicit `.exe` form
-/// (e.g. `taskkill /F /IM llama-server.exe` -> `taskkill.exe /F /IM llama-server.exe`).
-/// Otherwise the command is returned unchanged.
+/// (e.g. `taskkill /F /IM llama-server.exe` -> `taskkill.exe /F /IM llama-server.exe`),
+/// and a leading `wsl`/`wsl.exe` interop wrapper is stripped so the inner
+/// command runs directly (never `sh -c "wsl ..."`). Otherwise the command is
+/// returned unchanged.
 pub fn wsl_normalize(cmd: &str) -> String {
     if !is_wsl() {
         return cmd.to_string();
     }
-    let trimmed = cmd.trim();
+    let stripped = strip_wsl_wrapper(cmd);
+    let trimmed = stripped.trim();
     let first_end = trimmed
         .find(|c: char| c.is_whitespace())
         .unwrap_or(trimmed.len());
@@ -147,7 +193,7 @@ pub fn wsl_normalize(cmd: &str) -> String {
                 format!("taskkill.exe {rest}")
             }
         }
-        _ => cmd.to_string(),
+        _ => stripped,
     }
 }
 
@@ -215,6 +261,17 @@ mod tests {
                 wsl_normalize(r"cmd /c scripts\bonsai\start.bat"),
                 "cmd.exe /c scripts/bonsai/start.bat"
             );
+            // A `wsl` interop wrapper is stripped so the inner command runs
+            // directly rather than as `sh -c "wsl ..."`.
+            assert_eq!(
+                wsl_normalize(r#"wsl -d Ubuntu -- bash -lc "pkill vllm""#),
+                r#"bash -lc "pkill vllm""#
+            );
+            assert_eq!(wsl_normalize("wsl pkill -f vllm"), "pkill -f vllm");
+            assert_eq!(
+                wsl_normalize("wsl.exe -u root pkill -f vllm"),
+                "pkill -f vllm"
+            );
             // Non-matching commands are untouched.
             assert_eq!(wsl_normalize("nvidia-smi"), "nvidia-smi");
             assert_eq!(
@@ -226,5 +283,43 @@ mod tests {
             assert_eq!(wsl_normalize("taskkill"), "taskkill");
             assert_eq!(wsl_normalize("cmd"), "cmd");
         }
+    }
+
+    /// `strip_wsl_wrapper` is pure (no WSL detection) so it is testable on any
+    /// platform.
+    #[test]
+    fn test_strip_wsl_wrapper() {
+        // Distribution + separator: options before the inner command are dropped.
+        assert_eq!(
+            strip_wsl_wrapper(r#"wsl -d Ubuntu -- bash -lc "pkill vllm""#),
+            r#"bash -lc "pkill vllm""#
+        );
+        // Bare wrapper, no options.
+        assert_eq!(strip_wsl_wrapper("wsl pkill -f vllm"), "pkill -f vllm");
+        // `.exe` form plus a `--user <arg>` option.
+        assert_eq!(
+            strip_wsl_wrapper("wsl.exe -u root pkill -f vllm"),
+            "pkill -f vllm"
+        );
+        // Long option forms and `--exec`.
+        assert_eq!(
+            strip_wsl_wrapper("wsl --distribution Ubuntu --user root -- pkill -f vllm"),
+            "pkill -f vllm"
+        );
+        assert_eq!(
+            strip_wsl_wrapper("wsl --exec pkill -f vllm"),
+            "pkill -f vllm"
+        );
+        // A `wsl` that is merely a prefix of a longer token is left alone.
+        assert_eq!(
+            strip_wsl_wrapper("wslx -d Ubuntu -- bash -lc hi"),
+            "wslx -d Ubuntu -- bash -lc hi"
+        );
+        // A command with no wrapper is returned unchanged.
+        assert_eq!(
+            strip_wsl_wrapper("bash -lc \"pkill vllm\""),
+            "bash -lc \"pkill vllm\""
+        );
+        assert_eq!(strip_wsl_wrapper("nvidia-smi"), "nvidia-smi");
     }
 }

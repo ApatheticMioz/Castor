@@ -4,9 +4,13 @@ use clap::{Parser, Subcommand};
 
 use crate::config;
 use crate::engine;
+#[cfg(feature = "evals")]
 use crate::evals::runner::{Outcome, Variant};
+#[cfg(feature = "evo")]
 use crate::evo::lineage::Lineage;
+#[cfg(feature = "evo")]
 use crate::evo::watchdog::WatchdogVerdict;
+#[cfg(feature = "evo")]
 use crate::evo::{optimizer, watchdog};
 use crate::mcp;
 use crate::proxy;
@@ -106,6 +110,9 @@ pub enum Command {
         /// Disable colored output
         #[arg(long)]
         no_color: bool,
+        /// Surface the Hall of Fame extremes section
+        #[arg(long)]
+        extremes: bool,
     },
     /// Evo engine
     Evo {
@@ -218,6 +225,7 @@ pub fn run_clean(state_dir: &std::path::Path, yes: bool) -> Result<String, Strin
 }
 
 /// The lineage file location under the state dir.
+#[cfg(feature = "evo")]
 fn evo_lineage_path(state: &state::StateDir) -> std::path::PathBuf {
     state.evo().join("lineage.jsonl")
 }
@@ -225,6 +233,7 @@ fn evo_lineage_path(state: &state::StateDir) -> std::path::PathBuf {
 /// Resolve the evals dir: an explicit override, else the repo's `evals/`
 /// (checked relative to the current dir, then one level up for the crate
 /// layout). A missing dir is a typed, actionable error.
+#[cfg(feature = "evo")]
 fn resolve_evals_dir(override_dir: Option<&str>) -> Result<std::path::PathBuf, String> {
     if let Some(dir) = override_dir {
         let p = std::path::PathBuf::from(dir);
@@ -252,6 +261,7 @@ fn resolve_evals_dir(override_dir: Option<&str>) -> Result<std::path::PathBuf, S
 /// Run the `evo run` subcommand: score the current artifact over the evals
 /// dir, commit it into `<state>/evo/lineage.jsonl`, and return the report
 /// text to print.
+#[cfg(feature = "evo")]
 pub fn run_evo(evals_override: Option<&str>, state: &state::StateDir) -> Result<String, String> {
     let evals_dir = resolve_evals_dir(evals_override)?;
     let report =
@@ -289,6 +299,7 @@ pub fn run_evo(evals_override: Option<&str>, state: &state::StateDir) -> Result<
 
 /// Run the `evo status` subcommand: load the lineage and return the report
 /// text (head / best parent / fitness + the watchdog verdict).
+#[cfg(feature = "evo")]
 pub fn evo_status(state: &state::StateDir) -> Result<String, String> {
     let path = evo_lineage_path(state);
     let lineage = Lineage::load(&path).map_err(|e| format!("evo: {e}"))?;
@@ -320,11 +331,13 @@ pub fn evo_status(state: &state::StateDir) -> Result<String, String> {
     Ok(out)
 }
 
+#[cfg(feature = "evo")]
 fn fmt_fitness(f: Option<f64>) -> String {
     f.map(|x| format!("{x:.4}"))
         .unwrap_or_else(|| "n/a".to_string())
 }
 
+#[cfg(feature = "evo")]
 fn fmt_verdict(v: &WatchdogVerdict) -> String {
     match v {
         WatchdogVerdict::Empty => "empty (no commits yet)".to_string(),
@@ -652,11 +665,13 @@ pub async fn run_with(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
             since,
             by_day,
             no_color,
+            extremes,
         } => {
             let loaded = config::load().map_err(|e| format!("config: {e}"))?;
             let state = state::StateDir::from_config(&loaded.config);
             let mut opts = telemetry::StatsOptions {
                 by_day,
+                extremes,
                 ..Default::default()
             };
             if let Some(s) = &since {
@@ -684,30 +699,41 @@ pub async fn run_with(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
             }
         }
         Command::Evo { action } => {
-            let loaded = config::load().map_err(|e| format!("config: {e}"))?;
-            let state = state::StateDir::from_config(&loaded.config);
-            let _ = state.ensure();
-            // `run_task` builds its own current-thread tokio runtime, so the
-            // evo work must run outside the `#[tokio::main]` runtime. We
-            // spawn a plain std thread for that.
-            let (tx, rx) = std::sync::mpsc::channel();
-            std::thread::spawn(move || {
-                let result = match action {
-                    EvoAction::Run { evals } => run_evo(evals.as_deref(), &state),
-                    EvoAction::Status => evo_status(&state),
-                };
-                let _ = tx.send(result);
-            });
-            match rx.recv() {
-                Ok(Ok(text)) => print!("{text}"),
-                Ok(Err(msg)) => {
-                    eprintln!("castor: {msg}");
-                    std::process::exit(1);
+            #[cfg(feature = "evo")]
+            {
+                let loaded = config::load().map_err(|e| format!("config: {e}"))?;
+                let state = state::StateDir::from_config(&loaded.config);
+                let _ = state.ensure();
+                // `run_task` builds its own current-thread tokio runtime, so the
+                // evo work must run outside the `#[tokio::main]` runtime. We
+                // spawn a plain std thread for that.
+                let (tx, rx) = std::sync::mpsc::channel();
+                std::thread::spawn(move || {
+                    let result = match action {
+                        EvoAction::Run { evals } => run_evo(evals.as_deref(), &state),
+                        EvoAction::Status => evo_status(&state),
+                    };
+                    let _ = tx.send(result);
+                });
+                match rx.recv() {
+                    Ok(Ok(text)) => print!("{text}"),
+                    Ok(Err(msg)) => {
+                        eprintln!("castor: {msg}");
+                        std::process::exit(1);
+                    }
+                    Err(_) => {
+                        eprintln!("castor: evo worker thread panicked");
+                        std::process::exit(1);
+                    }
                 }
-                Err(_) => {
-                    eprintln!("castor: evo worker thread panicked");
-                    std::process::exit(1);
-                }
+            }
+            #[cfg(not(feature = "evo"))]
+            {
+                let _ = &action;
+                eprintln!(
+                    "castor: the `evo` subcommand requires the `evo` feature (--features evo)"
+                );
+                std::process::exit(1);
             }
         }
         Command::__SemChild {
@@ -903,8 +929,10 @@ mod tests {
 
     // --- run_evo / evo_status behavior tests ---------------------------------
 
+    #[cfg(feature = "evo")]
     static EVO_TMP: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
 
+    #[cfg(feature = "evo")]
     fn evo_tmp_dir() -> std::path::PathBuf {
         let n = EVO_TMP.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
         let p = std::env::temp_dir().join(format!("castor-evo-{}-{}", std::process::id(), n));
@@ -913,6 +941,7 @@ mod tests {
         p
     }
 
+    #[cfg(feature = "evo")]
     /// Write a minimal passing task dir (same pattern as optimizer tests).
     fn write_pass_task(task_dir: &std::path::Path) {
         std::fs::create_dir_all(task_dir.join("fixture")).unwrap();
@@ -928,6 +957,7 @@ mod tests {
         .unwrap();
     }
 
+    #[cfg(feature = "evo")]
     #[test]
     fn run_evo_appends_node_and_prints_fitness() {
         let root = evo_tmp_dir();
@@ -951,6 +981,7 @@ mod tests {
         let _ = std::fs::remove_dir_all(&root);
     }
 
+    #[cfg(feature = "evo")]
     #[test]
     fn evo_status_empty_lineage() {
         let root = evo_tmp_dir();
@@ -964,6 +995,7 @@ mod tests {
         let _ = std::fs::remove_dir_all(&root);
     }
 
+    #[cfg(feature = "evo")]
     #[test]
     fn evo_status_stalled_old() {
         let root = evo_tmp_dir();
@@ -985,6 +1017,7 @@ mod tests {
         let _ = std::fs::remove_dir_all(&root);
     }
 
+    #[cfg(feature = "evo")]
     #[test]
     fn evo_status_stalled_no_improvement() {
         let root = evo_tmp_dir();
@@ -1063,6 +1096,14 @@ mod tests {
             openalex_api_key: None,
             boot_timeout_secs: 180,
             probe_budget: 4,
+            dgi_reject_margin: 1.5,
+            dgi_bypass_warm_session: false,
+            reasoning_open_tag: concat!("<th", "ink>").to_string(),
+            reasoning_close_tag: concat!("</th", "ink>").to_string(),
+            cache_hit_yield_ratio: 0.20,
+            min_eviction_detect_tokens: 13056,
+            turn_timeout_secs: 600,
+            max_turn_reasoning_tokens: 16384,
             state_dir: state.root().to_path_buf(),
         }
     }

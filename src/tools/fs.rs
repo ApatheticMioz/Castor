@@ -503,15 +503,19 @@ impl FsExecutor {
         if matches.len() >= max_results {
             return Ok(());
         }
-        let entries = match fs::read_dir(current) {
+        let dir_iter = match fs::read_dir(current) {
             Ok(e) => e,
             Err(_) => return Ok(()),
         };
+        // Issue #15: collect the OS directory enumeration into a Vec and sort
+        // by file_name() so the fallback search order is deterministic
+        // (independent of platform directory enumeration order).
+        let mut entries: Vec<fs::DirEntry> = dir_iter.filter_map(|e| e.ok()).collect();
+        entries.sort_by_key(|e| e.file_name().to_string_lossy().into_owned());
         for entry in entries {
             if matches.len() >= max_results {
                 break;
             }
-            let entry = entry?;
             let name = entry.file_name().to_string_lossy().to_string();
             if IGNORED_DIRS.contains(&name.as_str()) || is_env_file(&name) {
                 continue;
@@ -967,6 +971,34 @@ mod tests {
         assert!(out.contains("match(es) for 'hello'"));
         assert!(out.contains("... [line truncated]"));
         assert!(out.len() < 500);
+    }
+
+    /// Issue #15: the fallback `search_code` path (filesystem walk) must return
+    /// matches in a deterministic order that is independent of the platform's
+    /// raw directory-enumeration order. `walk_search` collects each directory's
+    /// entries into a `Vec` and sorts by `file_name()` before recursing, so the
+    /// emitted order is stable (depth-first, siblings sorted).
+    #[test]
+    fn fallback_search_order_is_deterministic_sorted_by_filename() {
+        let root = test_root("search_order");
+        // Create in a non-alphabetical order so a naive enumeration-order
+        // assertion would fail; the sorted walk must still come out ordered.
+        for n in ["zeta.txt", "alpha.txt", "mid.txt"] {
+            fs::write(root.join(n), format!("line with needle-{}\n", n)).unwrap();
+        }
+        let ex = executor(&root);
+        let out = ex.fallback_search("needle", &root, 100).unwrap();
+        assert_eq!(out.lines().next().unwrap(), "3 match(es) for 'needle':");
+        let a = out.find("alpha.txt").unwrap();
+        let m = out.find("mid.txt").unwrap();
+        let z = out.find("zeta.txt").unwrap();
+        assert!(
+            a < m && m < z,
+            "expected alpha < mid < zeta (sorted by file_name), got:\n{out}"
+        );
+        // Run a second time to confirm determinism across repeated invocations.
+        let out2 = ex.fallback_search("needle", &root, 100).unwrap();
+        assert_eq!(out, out2, "fallback search order must be deterministic");
     }
 
     #[test]

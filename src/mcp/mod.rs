@@ -483,10 +483,15 @@ impl CastorMcpServer {
                     crate::task::registry::TaskStatus::Queued
                     | crate::task::registry::TaskStatus::Executing => {
                         let (wait_win, wait_wsl) = wait_commands(status_port, &rec.id);
-                        format!(
-                            "[task] id={} status={}\nWait (Windows): {}\nWait (WSL): {}",
-                            rec.id, rec.status, wait_win, wait_wsl
-                        )
+                        let mut text = format!("[task] id={} status={}", rec.id, rec.status);
+                        if let Some(live) = format_live_turn_status(&state, &rec) {
+                            text.push('\n');
+                            text.push_str(&live);
+                        }
+                        text.push_str(&format!(
+                            "\nWait (Windows): {wait_win}\nWait (WSL): {wait_wsl}"
+                        ));
+                        text
                     }
                 };
                 CallToolResult::success(vec![ContentBlock::text(text)])
@@ -702,6 +707,109 @@ pub fn wait_commands(status_port: u16, task_id: &str) -> (String, String) {
         "curl -fsS --max-time 3600 --retry 10 --retry-delay 2 --retry-connrefused --retry-all-errors --keepalive-time 30 http://127.0.0.1:{status_port}/task/{task_id}/wait?timeout_s=3600"
     );
     (win, wsl)
+}
+
+/// Build a live status line for an active (queued/executing) task from its
+/// session event ledger: elapsed seconds since dispatch, the latest turn
+/// number, the most recent dispatch's token metrics, and the last tool that
+/// ran.
+///
+/// Returns `None` when the session ledger is absent or has no `dispatch`
+/// event yet (e.g. a freshly-queued task that has not started a turn) so
+/// callers can simply omit the line.
+///
+/// Note on ground truth: the ledger (`crate::runner`) writes `dispatch`
+/// events (carrying `turn` + `metrics{prompt_tokens, cached_tokens, ttft_ms,
+/// tokens_per_sec, reasoning_tokens}` and an embedded `tool_calls[]`) and
+/// `tool_result` events (carrying a `name`); it does not write a bare
+/// `"type": "tool"` event, though one is accepted here defensively.
+pub fn format_live_turn_status(
+    state: &StateDir,
+    rec: &crate::task::registry::TaskRecord,
+) -> Option<String> {
+    let now_ms = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis() as u64)
+        .unwrap_or(0);
+    let start_ms = rec.started_at.unwrap_or(rec.created_at);
+    let elapsed_s = now_ms.saturating_sub(start_ms) / 1000;
+
+    let path = state.sessions().join(&rec.session_id).join("events.jsonl");
+    let raw = std::fs::read_to_string(&path).ok()?;
+
+    let mut turn: Option<u64> = None;
+    let mut prompt_tokens: Option<u64> = None;
+    let mut cached_tokens: Option<u64> = None;
+    let mut ttft_ms: Option<u64> = None;
+    let mut tokens_per_sec: Option<f64> = None;
+    let mut last_tool: Option<String> = None;
+
+    for line in raw.lines() {
+        let line = line.trim();
+        if line.is_empty() {
+            continue;
+        }
+        let Ok(val) = serde_json::from_str::<Value>(line) else {
+            continue;
+        };
+        match val.get("type").and_then(|v| v.as_str()) {
+            Some("dispatch") => {
+                if let Some(t) = val.get("turn").and_then(|v| v.as_u64()) {
+                    turn = Some(t);
+                }
+                let m = val.get("metrics").unwrap_or(&Value::Null);
+                if let Some(p) = m.get("prompt_tokens").and_then(|v| v.as_u64()) {
+                    prompt_tokens = Some(p);
+                }
+                if let Some(c) = m.get("cached_tokens").and_then(|v| v.as_u64()) {
+                    cached_tokens = Some(c);
+                }
+                if let Some(t) = m.get("ttft_ms").and_then(|v| v.as_u64()) {
+                    ttft_ms = Some(t);
+                }
+                if let Some(x) = m.get("tokens_per_sec").and_then(|v| v.as_f64()) {
+                    tokens_per_sec = Some(x);
+                }
+                // Fallback: a dispatch also embeds the tool calls it
+                // requested, so the last one is the running tool when a
+                // tool_result for it has not been logged yet.
+                if let Some(n) = val
+                    .get("tool_calls")
+                    .and_then(|v| v.as_array())
+                    .and_then(|a| a.last())
+                    .and_then(|o| o.get("name"))
+                    .and_then(|v| v.as_str())
+                {
+                    last_tool = Some(n.to_string());
+                }
+            }
+            // `tool_result` is the real ledger event; `tool` accepted
+            // defensively (see module doc note).
+            Some("tool_result") | Some("tool") => {
+                if let Some(n) = val.get("name").and_then(|v| v.as_str()) {
+                    last_tool = Some(n.to_string());
+                }
+            }
+            _ => {}
+        }
+    }
+
+    let turn = turn?;
+    let pt = prompt_tokens
+        .map(|n| n.to_string())
+        .unwrap_or_else(|| "-".into());
+    let ct = cached_tokens
+        .map(|n| n.to_string())
+        .unwrap_or_else(|| "-".into());
+    let ttft = ttft_ms.map(|n| n.to_string()).unwrap_or_else(|| "-".into());
+    let tps = tokens_per_sec
+        .map(|x| format!("{x:.1}"))
+        .unwrap_or_else(|| "-".into());
+    let lt = last_tool.unwrap_or_else(|| "-".into());
+    Some(format!(
+        "Live: elapsed={elapsed_s}s turn={turn}/{} prompt_tokens={pt} cached_tokens={ct} ttft_ms={ttft} tok_per_s={tps} last_tool={lt}",
+        rec.turns_budget
+    ))
 }
 
 #[cfg(test)]
@@ -1170,5 +1278,81 @@ mod tests {
         drop(stdin);
         let status = child.wait().await.expect("child wait");
         assert!(status.success());
+    }
+
+    #[test]
+    fn format_live_turn_status_surfaces_turn_tokens_ttft_tps_and_last_tool() {
+        use std::io::Write;
+
+        let dir = std::env::temp_dir().join(format!(
+            "castor_live_status_{}_{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+        let state = StateDir::new(&dir);
+
+        let session_id = "sess_live_1";
+        let session_dir = state.sessions().join(session_id);
+        std::fs::create_dir_all(&session_dir).unwrap();
+        let events = session_dir.join("events.jsonl");
+
+        // Two dispatch turns (only the last metrics must win) plus tool
+        // results; the last tool that ran must be surfaced.
+        let mut f = std::fs::File::create(&events).unwrap();
+        writeln!(
+            f,
+            r#"{{"type":"dispatch","turn":1,"metrics":{{"prompt_tokens":100,"cached_tokens":20,"ttft_ms":400,"tokens_per_sec":12.5,"reasoning_tokens":7}}}}"#
+        )
+        .unwrap();
+        writeln!(f, r#"{{"type":"tool_result","turn":2,"name":"read_file"}}"#).unwrap();
+        writeln!(
+            f,
+            r#"{{"type":"dispatch","turn":3,"metrics":{{"prompt_tokens":250,"cached_tokens":180,"ttft_ms":95,"tokens_per_sec":42.0,"reasoning_tokens":33}}}}"#
+        )
+        .unwrap();
+        writeln!(f, r#"{{"type":"tool_result","turn":4,"name":"bash"}}"#).unwrap();
+        f.flush().unwrap();
+        drop(f);
+
+        let rec = crate::task::registry::TaskRecord {
+            id: "task_live_1".into(),
+            status: crate::task::registry::TaskStatus::Executing,
+            reason: None,
+            prompt: "p".into(),
+            cwd: "/tmp".into(),
+            session_id: session_id.into(),
+            pid: None,
+            heartbeat: 0,
+            turns_budget: 8,
+            created_at: 0,
+            started_at: Some(0),
+            ended_at: None,
+        };
+
+        let line = format_live_turn_status(&state, &rec).expect("live status line");
+        assert!(line.starts_with("Live: "), "line: {line}");
+        assert!(line.contains("elapsed="), "line: {line}");
+        // Latest dispatch wins (turn 3, prompt 250, cached 180, ttft 95).
+        assert!(line.contains("turn=3/8"), "line: {line}");
+        assert!(line.contains("prompt_tokens=250"), "line: {line}");
+        assert!(line.contains("cached_tokens=180"), "line: {line}");
+        assert!(line.contains("ttft_ms=95"), "line: {line}");
+        assert!(line.contains("tok_per_s=42.0"), "line: {line}");
+        // Latest tool_result name wins.
+        assert!(line.contains("last_tool=bash"), "line: {line}");
+
+        // No ledger → None (omitted from the status response).
+        let ghost = StateDir::new(dir.join("ghost"));
+        let ghost_rec = crate::task::registry::TaskRecord {
+            session_id: "does_not_exist".into(),
+            ..rec.clone()
+        };
+        assert!(format_live_turn_status(&ghost, &ghost_rec).is_none());
+
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

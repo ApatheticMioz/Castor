@@ -70,6 +70,35 @@ pub struct Config {
     /// Consecutive non-mutating bash probes before a probe-budget advisory
     /// is injected.
     pub probe_budget: usize,
+    /// DGI gatekeeper log-odds reject margin: reject only when
+    /// `logP(OVERLOADED) - logP(ADMIT)` exceeds this (env-only).
+    pub dgi_reject_margin: f64,
+    /// DGI warm-session bypass: skip the probe for continuations that already
+    /// have a non-empty `messages.json` (env-only).
+    pub dgi_bypass_warm_session: bool,
+    /// Reasoning open tag the runner strips from assistant content and
+    /// sanitizes in tool results. Defaulting to `concat!("<th","ink>")` keeps
+    /// the literal byte sequence out of the tokenizer's special-token window
+    /// so our own reasoning never emits the reserved reasoning delimiters.
+    pub reasoning_open_tag: String,
+    /// Reasoning close tag (the paired `</...>` form of [`Self::reasoning_open_tag`]).
+    pub reasoning_close_tag: String,
+    /// Cache-hit yield ratio for the slot-yield gate: a younger worker yields
+    /// when its empirical cache hit ratio falls below this (env-only).
+    pub cache_hit_yield_ratio: f64,
+    /// Minimum prompt-token count before an empirical cache-eviction yield
+    /// check is meaningful (env-only).
+    pub min_eviction_detect_tokens: u32,
+    /// Per-turn watchdog: wall-clock ceiling (seconds) for a single engine
+    /// chat call. When exceeded, the runner retries once at `"low"`
+    /// reasoning effort. Default 600s (10 min). `0` disables the timeout.
+    /// Env: `CASTOR_TURN_TIMEOUT_SECS`.
+    pub turn_timeout_secs: u64,
+    /// Per-turn watchdog: maximum reasoning tokens before a "stall" is
+    /// declared (used with `finish_reason == "length"` and empty
+    /// `tool_calls`). Default 16384. `0` disables the token-budget trigger.
+    /// Env: `CASTOR_MAX_TURN_REASONING_TOKENS`.
+    pub max_turn_reasoning_tokens: u32,
     pub state_dir: PathBuf,
 }
 
@@ -102,6 +131,14 @@ pub struct Sources {
     pub openalex_api_key: Source,
     pub boot_timeout_secs: Source,
     pub probe_budget: Source,
+    pub dgi_reject_margin: Source,
+    pub dgi_bypass_warm_session: Source,
+    pub reasoning_open_tag: Source,
+    pub reasoning_close_tag: Source,
+    pub cache_hit_yield_ratio: Source,
+    pub min_eviction_detect_tokens: Source,
+    pub turn_timeout_secs: Source,
+    pub max_turn_reasoning_tokens: Source,
     pub state_dir: Source,
 }
 
@@ -433,6 +470,34 @@ pub fn load_with(get_env: impl Fn(&str) -> Option<String>) -> Result<LoadedConfi
             _ => Ok(None),
         }
     };
+    let env_f64 = |key: &str| -> Result<Option<f64>, ConfigError> {
+        match get_env(key) {
+            Some(v) if !v.is_empty() => {
+                v.parse::<f64>()
+                    .map(Some)
+                    .map_err(|e| ConfigError::InvalidValue {
+                        key: key.to_string(),
+                        value: v,
+                        reason: e.to_string(),
+                    })
+            }
+            _ => Ok(None),
+        }
+    };
+    let env_bool = |key: &str| -> Result<Option<bool>, ConfigError> {
+        match get_env(key) {
+            Some(v) if !v.is_empty() => match v.as_str() {
+                "1" | "true" | "yes" | "on" => Ok(Some(true)),
+                "0" | "false" | "no" | "off" => Ok(Some(false)),
+                _ => Err(ConfigError::InvalidValue {
+                    key: key.to_string(),
+                    value: v,
+                    reason: "expected a boolean (0/1, true/false, yes/no, on/off)".into(),
+                }),
+            },
+            _ => Ok(None),
+        }
+    };
 
     let env_max_context = env_u32("CASTOR_MAX_CONTEXT")?;
     let env_max_concurrent = env_u32("CASTOR_MAX_CONCURRENT_TASKS")?;
@@ -504,6 +569,40 @@ pub fn load_with(get_env: impl Fn(&str) -> Option<String>) -> Result<LoadedConfi
     let (probe_budget, src_probe_budget) =
         pick_usize(env_probe_budget, file.and_then(|f| f.probe_budget), 4);
 
+    // DGI tuning knobs: env-only settings (no config.json keys).
+    let (dgi_reject_margin, src_dgi_reject_margin) =
+        pick_f64(env_f64("CASTOR_DGI_REJECT_MARGIN")?, 1.5);
+    let (dgi_bypass_warm_session, src_dgi_bypass_warm_session) =
+        pick_bool(env_bool("CASTOR_DGI_BYPASS_WARM_SESSION")?, true);
+
+    // Reasoning tag delimiters: env-only settings (no config.json keys). The
+    // defaults are built with `concat!` so the literal ` think` byte sequence
+    // never appears contiguously anywhere in this source tree (the tokenizer
+    // would otherwise emit the reserved reasoning tokens on *our* code, which
+    // must never happen).
+    let (reasoning_open_tag, src_reasoning_open_tag) = pick_str_default(
+        env_str("CASTOR_REASONING_OPEN_TAG"),
+        None,
+        concat!("<th", "ink>").to_string(),
+    );
+    let (reasoning_close_tag, src_reasoning_close_tag) = pick_str_default(
+        env_str("CASTOR_REASONING_CLOSE_TAG"),
+        None,
+        concat!("</th", "ink>").to_string(),
+    );
+
+    // Slot-yield tuning knobs: env-only settings (no config.json keys).
+    let (cache_hit_yield_ratio, src_cache_hit_yield_ratio) =
+        pick_f64(env_f64("CASTOR_CACHE_HIT_YIELD_RATIO")?, 0.20);
+    let (min_eviction_detect_tokens, src_min_eviction_detect_tokens) =
+        pick_u32(env_u32("CASTOR_MIN_EVICTION_DETECT_TOKENS")?, None, 13056);
+
+    // Per-turn watchdog: env-only settings (no config.json keys).
+    let (turn_timeout_secs, src_turn_timeout_secs) =
+        pick_u64(env_u64("CASTOR_TURN_TIMEOUT_SECS")?, None, 600);
+    let (max_turn_reasoning_tokens, src_max_turn_reasoning_tokens) =
+        pick_u32(env_u32("CASTOR_MAX_TURN_REASONING_TOKENS")?, None, 16384);
+
     let (ports, (src_port_engine, src_port_status, src_port_proxy)) = {
         let (engine, src_port_engine) =
             pick_u16(env_port_engine, file_ports.and_then(|p| p.engine), 18020);
@@ -539,6 +638,14 @@ pub fn load_with(get_env: impl Fn(&str) -> Option<String>) -> Result<LoadedConfi
             openalex_api_key,
             boot_timeout_secs,
             probe_budget,
+            dgi_reject_margin,
+            dgi_bypass_warm_session,
+            reasoning_open_tag,
+            reasoning_close_tag,
+            cache_hit_yield_ratio,
+            min_eviction_detect_tokens,
+            turn_timeout_secs,
+            max_turn_reasoning_tokens,
             state_dir,
         },
         sources: Sources {
@@ -560,6 +667,14 @@ pub fn load_with(get_env: impl Fn(&str) -> Option<String>) -> Result<LoadedConfi
             openalex_api_key: src_openalex_api_key,
             boot_timeout_secs: src_boot_timeout_secs,
             probe_budget: src_probe_budget,
+            dgi_reject_margin: src_dgi_reject_margin,
+            dgi_bypass_warm_session: src_dgi_bypass_warm_session,
+            reasoning_open_tag: src_reasoning_open_tag,
+            reasoning_close_tag: src_reasoning_close_tag,
+            cache_hit_yield_ratio: src_cache_hit_yield_ratio,
+            min_eviction_detect_tokens: src_min_eviction_detect_tokens,
+            turn_timeout_secs: src_turn_timeout_secs,
+            max_turn_reasoning_tokens: src_max_turn_reasoning_tokens,
             state_dir: state_dir_src,
         },
         profile_name,
@@ -723,6 +838,54 @@ pub fn format_loaded(loaded: &LoadedConfig) -> String {
     );
     row(
         &mut out,
+        "dgi_reject_margin",
+        &c.dgi_reject_margin.to_string(),
+        s.dgi_reject_margin,
+    );
+    row(
+        &mut out,
+        "dgi_bypass_warm_session",
+        &c.dgi_bypass_warm_session.to_string(),
+        s.dgi_bypass_warm_session,
+    );
+    row(
+        &mut out,
+        "reasoning_open_tag",
+        &c.reasoning_open_tag,
+        s.reasoning_open_tag,
+    );
+    row(
+        &mut out,
+        "reasoning_close_tag",
+        &c.reasoning_close_tag,
+        s.reasoning_close_tag,
+    );
+    row(
+        &mut out,
+        "cache_hit_yield_ratio",
+        &c.cache_hit_yield_ratio.to_string(),
+        s.cache_hit_yield_ratio,
+    );
+    row(
+        &mut out,
+        "min_eviction_detect_tokens",
+        &c.min_eviction_detect_tokens.to_string(),
+        s.min_eviction_detect_tokens,
+    );
+    row(
+        &mut out,
+        "turn_timeout_secs",
+        &c.turn_timeout_secs.to_string(),
+        s.turn_timeout_secs,
+    );
+    row(
+        &mut out,
+        "max_turn_reasoning_tokens",
+        &c.max_turn_reasoning_tokens.to_string(),
+        s.max_turn_reasoning_tokens,
+    );
+    row(
+        &mut out,
         "state_dir",
         &c.state_dir.display().to_string(),
         s.state_dir,
@@ -819,6 +982,20 @@ fn pick_usize(env: Option<usize>, file: Option<usize>, default: usize) -> (usize
         (Some(_), _) => (env.unwrap(), Source::Env),
         (None, Some(_)) => (file.unwrap(), Source::File),
         (None, None) => (default, Source::Default),
+    }
+}
+
+fn pick_f64(env: Option<f64>, default: f64) -> (f64, Source) {
+    match env {
+        Some(v) => (v, Source::Env),
+        None => (default, Source::Default),
+    }
+}
+
+fn pick_bool(env: Option<bool>, default: bool) -> (bool, Source) {
+    match env {
+        Some(v) => (v, Source::Env),
+        None => (default, Source::Default),
     }
 }
 
@@ -1275,6 +1452,100 @@ mod tests {
         assert_eq!(
             (l.config.ports.proxy, l.sources.port_proxy),
             (8888, Source::File)
+        );
+    }
+
+    #[test]
+    fn dgi_reject_margin_env_and_default() {
+        let l = load_case(&[("CASTOR_DGI_REJECT_MARGIN", "2.25")], None);
+        assert_eq!(
+            (l.config.dgi_reject_margin, l.sources.dgi_reject_margin),
+            (2.25, Source::Env)
+        );
+        let l = load_case(&[], None);
+        assert_eq!(
+            (l.config.dgi_reject_margin, l.sources.dgi_reject_margin),
+            (1.5, Source::Default)
+        );
+        let dir = tmp_dir();
+        let err = load_with_env(&[
+            ("CASTOR_STATE_DIR", &dir.display().to_string()),
+            ("CASTOR_DGI_REJECT_MARGIN", "not-a-float"),
+        ])
+        .unwrap_err();
+        match err {
+            ConfigError::InvalidValue { key, .. } => {
+                assert_eq!(key, "CASTOR_DGI_REJECT_MARGIN");
+            }
+            other => panic!("expected InvalidValue, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn dgi_bypass_warm_session_env_and_default() {
+        let l = load_case(&[("CASTOR_DGI_BYPASS_WARM_SESSION", "false")], None);
+        assert_eq!(
+            (
+                l.config.dgi_bypass_warm_session,
+                l.sources.dgi_bypass_warm_session
+            ),
+            (false, Source::Env)
+        );
+        let l = load_case(&[("CASTOR_DGI_BYPASS_WARM_SESSION", "1")], None);
+        assert_eq!(
+            (
+                l.config.dgi_bypass_warm_session,
+                l.sources.dgi_bypass_warm_session
+            ),
+            (true, Source::Env)
+        );
+        let l = load_case(&[], None);
+        assert_eq!(
+            (
+                l.config.dgi_bypass_warm_session,
+                l.sources.dgi_bypass_warm_session
+            ),
+            (true, Source::Default)
+        );
+        let dir = tmp_dir();
+        let err = load_with_env(&[
+            ("CASTOR_STATE_DIR", &dir.display().to_string()),
+            ("CASTOR_DGI_BYPASS_WARM_SESSION", "banana"),
+        ])
+        .unwrap_err();
+        match err {
+            ConfigError::InvalidValue { key, .. } => {
+                assert_eq!(key, "CASTOR_DGI_BYPASS_WARM_SESSION");
+            }
+            other => panic!("expected InvalidValue, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn reasoning_tag_defaults_and_env_override() {
+        // Defaults: the reserved reasoning delimiters, built via `concat!` so
+        // the raw byte sequence never sits in source.
+        let l = load_case(&[], None);
+        assert_eq!(l.config.reasoning_open_tag, concat!("<th", "ink>"));
+        assert_eq!(l.config.reasoning_close_tag, concat!("</th", "ink>"));
+        assert_eq!(l.sources.reasoning_open_tag, Source::Default);
+        assert_eq!(l.sources.reasoning_close_tag, Source::Default);
+
+        // Env override: a provider-specific delimiter pair flows through.
+        let l = load_case(
+            &[
+                ("CASTOR_REASONING_OPEN_TAG", "<reasoning>"),
+                ("CASTOR_REASONING_CLOSE_TAG", "</reasoning>"),
+            ],
+            None,
+        );
+        assert_eq!(
+            (l.config.reasoning_open_tag, l.sources.reasoning_open_tag),
+            ("<reasoning>".to_string(), Source::Env)
+        );
+        assert_eq!(
+            (l.config.reasoning_close_tag, l.sources.reasoning_close_tag),
+            ("</reasoning>".to_string(), Source::Env)
         );
     }
 
