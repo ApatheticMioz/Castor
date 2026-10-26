@@ -6,7 +6,7 @@
 [![npm](https://img.shields.io/npm/v/mcp-castor.svg?color=CB3837&logo=npm)](https://www.npmjs.com/package/mcp-castor)
 [![Rust](https://img.shields.io/badge/Rust-2024%20Edition-DEA584?logo=rust&logoColor=white)](https://www.rust-lang.org/)
 [![License: AGPL-3.0](https://img.shields.io/badge/License-AGPL--3.0-blue.svg)](LICENSE)
-[![Test Gate: 372/372](https://img.shields.io/badge/Test%20Gate-372%2F372%20Green-brightgreen.svg)](#testing--verification)
+[![Test Gate: Offline](https://img.shields.io/badge/Test%20Gate-cargo%20test%20--all-features%20%2B%20clippy-brightgreen.svg)](#testing--verification)
 
 ---
 
@@ -84,7 +84,9 @@ Castor provides an **in-process Rust execution server** as a Model Context Proto
       ▼
   Castor Server (Local Rust Execution Server over stdio)
       │
-      ├─── In-tree tools: read_file, edit_file, ast_replace, bash
+      ├─── 16 in-tree tools: read_file, write_file, edit_file, list_dir,
+      │    search_code, ast_search, ast_replace, git_status/diff/log/commit,
+      │    python_repl, paper_lookup, web_search, web_fetch, bash
       │    └── Validated against sandbox boundaries & AST syntax gates
       │
       ▼  Inference requests over HTTP (:18020)
@@ -191,9 +193,33 @@ Castor registers three stdio tools across any MCP client:
 
 | Tool | Purpose | Primary Actions & Parameters |
 |---|---|---|
-| **`castor_coworker`** | Hands-on execution & peer programming | Dispatches prompt with in-tree tools (`read_file`, `edit_file`, `ast_search`, `ast_replace`, `bash`, `web_search`, `paper_lookup`). |
+| **`castor_coworker`** | Hands-on execution & peer programming | Dispatches a prompt to the sandboxed 16 builtin-tool runtime: `read_file`, `write_file`, `edit_file`, `list_dir`, `search_code`, `ast_search`, `ast_replace`, `git_status`, `git_diff`, `git_log`, `git_commit`, `python_repl`, `paper_lookup`, `web_search`, `web_fetch`, `bash`. |
 | **`castor_task`** | Background task control & telemetry | Actions: `status`, `cancel`, `cancel_all`, `list`, `stats`, `extend_lease`. |
 | **`castor_server`** | Local inference engine supervisor | Actions: `status`, `start`, `stop`. Manages engine boots, health canaries, and auto-healing. |
+
+### The 16 Built-in Coworker Tools
+
+`castor_coworker` runs inside a sandboxed runtime exposing exactly these 16
+in-tree tools (defined in `src/tools/mod.rs`):
+
+| Tool | Capability |
+|---|---|
+| `read_file` | Read source, PDFs (native in-memory extraction), and images for local visual inspection. |
+| `write_file` | Create or overwrite a file (sandboxed to the workspace). |
+| `edit_file` | Exact-substring, uniqueness-guarded edit with in-memory AST validation before commit. |
+| `list_dir` | Directory listing with depth control. |
+| `search_code` | Text/pattern search across the workspace. |
+| `ast_search` | Structural AST search via native ast-grep. |
+| `ast_replace` | Structural AST replace with automatic rollback on syntax error. |
+| `git_status` | Short working-tree status. |
+| `git_diff` | Staged or unstaged diff. |
+| `git_log` | Recent commit history. |
+| `git_commit` | Stage paths and commit. |
+| `python_repl` | Stateful Python REPL scratchpad for computation and data analysis. |
+| `paper_lookup` | Verified academic metadata via OpenAlex (titles, venues, DOIs, affiliations, OA PDFs). |
+| `web_search` | Meta-search via SearXNG with Brave fallback. |
+| `web_fetch` | Fetch and convert HTML/PDF/plain text to clean Markdown. |
+| `bash` | Isolated shell with a 5-layer dangerous-command filter. |
 
 ---
 
@@ -254,8 +280,8 @@ cd Castor
 # Build binary
 cargo build --release
 
-# Run verification suite (372 tests)
-cargo test
+# Run the offline verification gate (unit + integration, deterministic mock/replay harnesses)
+cargo test --all-features
 
 # Register local release build with clients
 ./target/release/castor install --client all
@@ -268,12 +294,16 @@ cargo test
 Castor maintains a strict zero-warning and offline verification gate:
 
 ```bash
-# Fast offline test gate (372 tests, ~7s)
-cargo test
+# Offline test gate (unit + integration, deterministic mock/replay harnesses; no running engine)
+cargo test --all-features
 
 # Strict clippy lint gate (zero warnings enforced)
-cargo clippy --all-targets -- -D warnings
+cargo clippy --all-targets --all-features -- -D warnings
 ```
+
+The live GPU tests (`tests/llama_cpp.rs`, `tests/bonsai_deep_eval.rs`) are
+`#[ignore]`-gated and opt-in via `ALLOW_ENGINE_INTERRUPT=1`; they never run
+in the default suite.
 
 ---
 
@@ -281,7 +311,7 @@ cargo clippy --all-targets -- -D warnings
 
 ```
 Castor/
-  Cargo.toml                # Root crate manifest (dual-target: lib + bin)
+  Cargo.toml                # Root crate manifest (dual-target: lib + bin; features: mcp, evals, evo, full)
   package.json              # npm distribution manifest (bin/castor.js)
   bin/castor.js             # Cross-platform Node.js execution shim
   skills/                   # Reusable SKILL.md recipes
@@ -289,15 +319,22 @@ Castor/
     lib.rs                  # Library crate root (public modules & embeddings)
     main.rs                 # CLI entry point (delegates to castor::cli)
     cli.rs                  # Clap command line parsing & execution routing
-    config.rs               # Unified serde config (env > json > defaults)
+    config.rs               # Unified serde config (env > config.json > defaults)
     platform.rs             # Cross-OS path translation and process trees
-    mcp/                    # rmcp stdio transport, tool schemas, and server
+    skills.rs               # agentskills.io SKILL.md indexer
+    telemetry.rs            # JSONL event ledger & derived statistics
+    pruner.rs               # State dir retention pruner
+    state/                  # State dir layout, locks, session persistence
+    mcp/                    # rmcp stdio transport, tool schemas, DGI probe, worker
     task/                   # Task registry, long-poll wait (:18021), semaphore
     proxy/                  # Stream proxy (:18022), SSE sanitizer, loop breaker
-    engine/                 # Provider interface, engine lifecycle, health canaries
+    engine/                 # Provider interface, backend, lifecycle, supervisor, detached
     runner/                 # Multi-turn autonomous loop & event ledgers
-    tools/                  # Sandboxed FS, AST search/replace, shell, web, papers
+    tools/                  # 16 builtin tools: fs, ast, git, repl, web, paper, shell, sandbox
+    evals/                  # Offline replay harness (fixture, replay, runner)
     evo/                    # Evolutionary optimizer & lineage DAG
+  evals/                    # Tier A offline replay, golden test tasks, DGI datasets
+  docs/                     # Active specs + historical audits/
 ```
 
 ---

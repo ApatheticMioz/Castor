@@ -87,6 +87,51 @@ pub fn find_workspace_root(p: &std::path::Path) -> std::path::PathBuf {
     p.to_path_buf()
 }
 
+/// Build the worker system prompt in strict low-churn → high-churn KV prefix
+/// order so the Turn-1 prefix is byte-for-byte stable across sessions in the
+/// same workspace:
+///   (a) Static persona, invariants, and tool-routing hierarchy (most stable)
+///   (b) `[Workspace]` root, then the deterministic `[Workspace Skeleton]`
+///   (c) The active-skills index (highest churn — skills can vary per dispatch)
+///
+/// Extracted from [`run_job_with_engine`] as a pure function of its inputs so
+/// the prefix ordering can be regression-tested without spawning a job.
+pub fn build_worker_system_prompt(
+    workspace_root: &std::path::Path,
+    skeleton_enabled: bool,
+    skeleton: &str,
+    skills_index: &str,
+) -> String {
+    let mut system_prompt = String::from(
+        "You are Castor, an autonomous senior peer engineer pairing with the Lead Architect.\n\n\
+Peer Engineering Invariants:\n\
+- Senior Peer Mandate: Reason, decide, explore, and execute autonomously. Challenge flawed assumptions, cite conflicting code coordinates, and propose cleaner architectural alternatives rather than looping on broken premises.\n\
+- Ground-Truth Hierarchy: Active source code and compiler/test diagnostics are ground truth. Documentation and notes are reference ledgers. Write present-state truth only—never historical changelogs, ticket tags, or defensive lore.\n\
+- Tool Routing Hierarchy (Prefer Native Tools Over Bash):\n\
+  * Code Discovery & Refactoring: Use `ast_search` and `ast_replace` for structural syntax queries and multi-file rewrites; use `search_code`, `list_dir`, `read_file`, `edit_file`, and `write_file` for file operations.\n\
+  * Version Control: Use `git_status`, `git_diff`, `git_log`, and `git_commit` instead of spawning `bash` for local git operations.\n\
+  * Data Inspection & Calculation: Use `python_repl` (persistent in-session namespace) instead of repeated `bash python -c` subshells.\n\
+  * Visual & Document Inspection: Use `read_file` directly on local images (`.png`, `.jpg`, `.webp`, `.gif`, `.bmp`) and PDFs.\n\
+  * Research: Use `paper_lookup` (OpenAlex), `web_search`, and `web_fetch`.\n\
+  * Shell (`bash`): Reserve strictly for builds (`cargo build`), test/lint gates (`cargo test`, `cargo clippy`), and process/CI execution.\n\
+- Verification Discipline: Never claim completion or close a task without running the verification gate and confirming clean output.",
+    );
+
+    system_prompt.push_str(&format!(
+        "\n\n[Workspace]\nRoot: {}",
+        workspace_root.display()
+    ));
+    if skeleton_enabled && !skeleton.is_empty() {
+        system_prompt.push('\n');
+        system_prompt.push_str(skeleton);
+    }
+    if !skills_index.is_empty() {
+        system_prompt.push_str("\n\n");
+        system_prompt.push_str(skills_index);
+    }
+    system_prompt
+}
+
 /// Execute a job specification against the real local engine.
 pub async fn run_job(spec: &JobSpec, state: &StateDir, config: &Config) -> Result<String, String> {
     let registry = TaskRegistry::new(state);
@@ -244,31 +289,23 @@ pub async fn run_job_with_engine(
     };
     let skills_index = skills::render_index(&active_skills);
 
-    // 6. Build system prompt.
-    let mut system_prompt = format!(
-        "You are Castor, an autonomous senior peer programmer pairing with the Lead Architect. Working directory: {}\n\n\
-Peer Programming Invariants:\n\
-- Senior Peer Mandate: You are an autonomous senior peer engineer pairing with the Lead Architect, \
-not a passive execution tool. You are expected to reason, decide, explore, and act on your own behalf.\n\
-- Dual Vision Synergy ($0 Local): You possess native local visual inspection capabilities. When visual \
-artifacts, layout regressions, or component screenshots require validation, inspect image files locally via read_file.\n\
-- Proactive Pushback & Impasse Transparency: If a dispatch presents contradictory requirements, \
-impossible constraints, or flawed assumptions, do NOT enter silent trial-and-error loops or mutate \
-unverified code. Proactively state trade-offs, cite conflicting coordinates, and propose cleaner architectural alternatives.\n\
-- Ground-Truth Hierarchy & Present-State Truth: Active code and compiler diagnostics are ground truth. \
-Secondary docs and markdown notes are reference ledgers. Do not write historical storytelling or defensive lore.\n\
-- Verification Discipline: Never commit unverified mutations; verify against active test gates.\n\n{}",
-        workspace_root.display(),
-        skills_index
+    // 6. Build system prompt in strict low-churn -> high-churn KV prefix order
+    //    (delegated to the pure [`build_worker_system_prompt`] helper so the
+    //    ordering is unit-testable).
+    let skeleton = if config.workspace_skeleton_prefix {
+        // A byte-identical, deterministic `[Workspace Skeleton]` block (a pure
+        // function of the workspace's stable top-level shape) — a warm KV prefix
+        // so 96%+ of the Turn-1 prefix cache hits across concurrent sessions.
+        runner::build_workspace_skeleton(std::path::Path::new(&spec.cwd))
+    } else {
+        String::new()
+    };
+    let system_prompt = build_worker_system_prompt(
+        &workspace_root,
+        config.workspace_skeleton_prefix,
+        &skeleton,
+        &skills_index,
     );
-    // Issue #15: when enabled, prepend a compact, deterministic `[Workspace
-    // Skeleton]` block (a pure function of the workspace's top-level names)
-    // so the Turn-1 prefix is byte-for-byte stable across sessions in the same
-    // workspace — a warm KV prefix that lets 96%+ of the prefix cache hit.
-    if config.workspace_skeleton_prefix {
-        let skeleton = runner::build_workspace_skeleton(std::path::Path::new(&spec.cwd));
-        system_prompt = format!("{skeleton}\n{system_prompt}");
-    }
 
     // 7. Initialize optional extensions and composite tool executor.
     let ext_bridge = if let Some(ref exts) = spec.extensions {
@@ -316,9 +353,9 @@ Secondary docs and markdown notes are reference ledgers. Do not write historical
     // 0 when unset → the session-history watermark is disabled (zero behavior
     // change for callers that don't configure a context budget).
     options.max_context = max_ctx as usize;
-    // Issue #15: thread the operator-configured spill ceiling so oversized
-    // tool outputs are spooled to the scratch dir (keeping the in-conversation
-    // footprint bounded and the Turn-1 prefix stable).
+    // Thread the operator-configured spill ceiling so oversized tool outputs
+    // are spooled to the scratch dir (keeping the in-conversation footprint
+    // bounded and the Turn-1 prefix stable).
     options.tool_spill_bytes = Some(config.tool_spill_bytes);
     options = options.with_lease_context(runner::LeaseYieldContext {
         sem: std::sync::Arc::new(sem.clone()),
@@ -601,5 +638,119 @@ mod tests {
         assert!(rec.reason.unwrap().contains("Engine auto-boot failed"));
 
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Regression guard for the KV-prefix ordering invariant: the assembled
+    /// worker system prompt MUST place the static persona at byte 0, then the
+    /// `[Workspace]` root block, then the deterministic `[Workspace Skeleton]`,
+    /// and finally the active-skills index (lowest → highest churn). This is
+    /// what keeps the Turn-1 prefix byte-for-byte stable across sessions so the
+    /// KV cache hits. Any reordering here silently degrades prefix reuse.
+    #[test]
+    fn system_prompt_prefix_ordering_is_stable_and_ordered() {
+        let root = std::path::PathBuf::from("/work/repo");
+        let skeleton = "[Workspace Skeleton]\n- src/\n- Cargo.toml\n- CLAUDE.md\n";
+
+        let skills = vec![
+            crate::skills::Skill {
+                name: "canary-test-staging".into(),
+                description: "Stage changes behind a targeted test file".into(),
+                path: std::path::PathBuf::from("/work/repo/skills/canary-test-staging/SKILL.md"),
+            },
+            crate::skills::Skill {
+                name: "hypothesis-generation".into(),
+                description: "Structured root-cause hypothesis generation".into(),
+                path: std::path::PathBuf::from("/work/repo/skills/hypothesis-generation/SKILL.md"),
+            },
+        ];
+        let skills_index = skills::render_index(&skills);
+        let prompt = build_worker_system_prompt(&root, true, skeleton, &skills_index);
+
+        // (a) The static persona is byte-0 and is the FIRST text in the prompt.
+        let persona = "You are Castor, an autonomous senior peer engineer";
+        assert!(
+            prompt.starts_with(persona),
+            "persona must be byte 0, got prefix: {prompt:?}"
+        );
+
+        // Every section must appear, and each strictly after the last (ordering).
+        let workspace = "[Workspace]\nRoot: /work/repo";
+        let skeleton_marker = "[Workspace Skeleton]";
+        // The skills index block is the `render_index` header (present-state
+        // truth is a lowercase, unbracketed "Available skills." line).
+        let skills_marker = "Available skills.";
+
+        let p_persona = prompt.find(persona).expect("persona present");
+        let p_workspace = prompt.find(workspace).expect("[Workspace] block present");
+        let p_skeleton = prompt
+            .find(skeleton_marker)
+            .expect("[Workspace Skeleton] present");
+        let p_skills = prompt.find(skills_marker).expect("skills index present");
+
+        assert_eq!(p_persona, 0, "persona must start at byte 0");
+        assert!(
+            p_persona < p_workspace,
+            "persona must precede [Workspace] (got persona={p_persona}, workspace={p_workspace})"
+        );
+        assert!(
+            p_workspace < p_skeleton,
+            "[Workspace] must precede [Workspace Skeleton] (got workspace={p_workspace}, skeleton={p_skeleton})"
+        );
+        assert!(
+            p_skeleton < p_skills,
+            "[Workspace Skeleton] must precede the skills index (got skeleton={p_skeleton}, skills={p_skills})"
+        );
+
+        // The `[Workspace]` block carries the exact root, and the skeleton
+        // header is immediately followed by its deterministic entries.
+        assert!(
+            prompt.contains("\n\n[Workspace]\nRoot: /work/repo\n[Workspace Skeleton]\n- src/\n- Cargo.toml\n- CLAUDE.md\n"),
+            "root and skeleton must be contiguous with a single newline join"
+        );
+
+        // The skills index is the terminal block (after the skeleton).
+        let skills_suffix = &prompt[p_skills..];
+        assert!(
+            skills_suffix.contains("- canary-test-staging:")
+                && skills_suffix.contains("- hypothesis-generation:"),
+            "skills index must list every active skill: {skills_suffix}"
+        );
+    }
+
+    /// When the workspace-skeleton prefix is disabled, the prompt still opens
+    /// with the persona at byte 0, keeps the `[Workspace]` root, and omits the
+    /// skeleton block entirely (but still appends the skills index).
+    #[test]
+    fn system_prompt_without_skeleton_still_ordered() {
+        let root = std::path::PathBuf::from("/work/repo");
+        let skills_index = skills::render_index(&[crate::skills::Skill {
+            name: "hypothesis-generation".into(),
+            description: "Structured root-cause hypothesis generation".into(),
+            path: std::path::PathBuf::from("/work/repo/skills/hypothesis-generation/SKILL.md"),
+        }]);
+
+        // skeleton_enabled=false: even a non-empty skeleton string is ignored.
+        let prompt = build_worker_system_prompt(
+            &root,
+            false,
+            "[Workspace Skeleton]\n- src/\n",
+            &skills_index,
+        );
+
+        assert!(prompt.starts_with("You are Castor, an autonomous senior peer engineer"));
+        let p_workspace = prompt
+            .find("[Workspace]\nRoot: /work/repo")
+            .expect("workspace present");
+        let p_skills = prompt
+            .find("Available skills.")
+            .expect("skills index present");
+        assert!(
+            p_workspace < p_skills,
+            "[Workspace] must precede the skills index when skeleton is disabled"
+        );
+        assert!(
+            !prompt.contains("[Workspace Skeleton]"),
+            "skeleton must be omitted when disabled"
+        );
     }
 }

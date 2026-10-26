@@ -89,10 +89,10 @@ fn now_epoch_ms() -> u64 {
         .unwrap_or(0)
 }
 
-/// Valid reasoning-effort tiers for the default serving engine (Qwen via
-/// vLLM). The served template 400s on any other value (`off`, `high`,
-/// `minimal`, …), so the schema fails fast here instead of letting the
-/// upstream reject a dispatched session mid-run.
+/// Valid reasoning-effort tiers for the configured local serving engine
+/// (OpenAI-compatible). The served template 400s on any other value
+/// (`off`, `high`, `minimal`, …), so the schema fails fast here instead of
+/// letting the upstream reject a dispatched session mid-run.
 pub const REASONING_EFFORT_TIERS: [&str; 3] = ["xhigh", "medium", "low"];
 
 /// Validate a per-dispatch `reasoning_effort` value against
@@ -146,24 +146,28 @@ impl CastorMcpServer {
         vec![
             Tool::new(
                 self.tool_name(TOOL_COWORKER),
-                "Autonomous Senior Coworker (Castor Microkernel). Primary autonomous execution \
-                 coworker with full native access to Filesystem, Shell, and Git across Windows \
-                 and WSL. Executes codebase exploration, refactoring, implementation, \
-                 diagnostics, live web/docs research, and git operations.",
+                "Autonomous Senior Peer Engineer (Castor Microkernel). Executes single-concern \
+                 slices across a 16-tool sandboxed environment: structural AST search/replace \
+                 (ast_search, ast_replace), file I/O with native image & PDF inspection \
+                 (read_file, write_file, edit_file, list_dir, search_code), native Git \
+                 primitives (git_status, git_diff, git_log, git_commit), stateful Python \
+                 scratchpad (python_repl), academic & web research (paper_lookup, web_search, \
+                 web_fetch), and isolated shell execution (bash).",
                 empty.clone(),
             )
             .with_input_schema::<CoworkerParams>(),
             Tool::new(
                 self.tool_name(TOOL_TASK),
-                "Manage background coworker tasks: check status, retrieve output, cancel, or \
-                 list tasks.",
+                "Manage coworker tasks and telemetry: inspect live turn metrics and output \
+                 (status), list tasks (list), view operational telemetry (stats), extend turn \
+                 budget (extend_lease), or cancel tasks (cancel, cancel_all, kill).",
                 empty.clone(),
             )
             .with_input_schema::<TaskParams>(),
             Tool::new(
                 self.tool_name(TOOL_SERVER),
-                "Manage the local engine lifecycle: check status, start, or stop the \
-                 local serving engine.",
+                "Manage the local OpenAI-compatible serving engine lifecycle: check health \
+                 and active model (status), boot engine (start), or stop engine (stop).",
                 empty,
             )
             .with_input_schema::<ServerParams>(),

@@ -43,7 +43,7 @@ which one it is before acting.
 | Persona | Runtime | Mandate | Hard Limits |
 |---|---|---|---|
 | **Lead Architect** | Cloud (Claude Code: GLM 5.3 text-only Plan / GLM 5.3-flash vision Exec; Antigravity: Gemini 3.8 Flash vision) | Architecture, task decomposition, plan & manifest authorship, supervisory steering, final synthesis. | **Never** bulk-read source into cloud context; **never** author code; offloads exploration to the Coworker in single-concern slices; **never** falls back to direct shell/file execution when coworker is offline. |
-| **Autonomous Execution Coworker** | Local peer programmer (Ternary-Bonsai-2-27B or configured model) via Castor (`castor` MCP) | Hands-on execution & peer engineering: explore, AST surgery, edit, test, shell. Local peer programmer also has vision capability enabled. Proactively challenges flawed assumptions, proposes architectural alternatives, and returns grounded facts. | **Never** authors high-level plans/roadmaps; **never** escapes the sandbox root. |
+| **Autonomous Execution Coworker** | Local peer programmer (Ternary-Bonsai-2-27B or configured model) inside the sandboxed 16-tool Castor runtime | Hands-on execution & peer engineering: explore, structural AST surgery, file editing, git inspection/committing, stateful Python scratchpad, local visual inspection (images and PDFs), web/paper research, and shell — all inside the sandbox. Proactively challenges flawed assumptions, proposes architectural alternatives, and returns grounded facts. The 16 in-tree tools are: `read_file`, `write_file`, `edit_file`, `list_dir`, `search_code`, `ast_search`, `ast_replace`, `git_status`, `git_diff`, `git_log`, `git_commit`, `python_repl`, `paper_lookup`, `web_search`, `web_fetch`, `bash`. | **Never** authors high-level plans/roadmaps; **never** escapes the sandbox root. |
 | **Autonomous Optimizer (Evo)** | Local, offline batch runner | Closed-loop mutation: propose -> evaluate -> select/revert against a deterministic fitness metric. | **Snapshot before mutating**; **revert on regression**; never edits files outside the candidate's snapshot list. |
 
 > **Honest attribution:** No agent may claim "we" or coworker collaboration
@@ -97,25 +97,45 @@ node bin/castor.js install --client all
 ```
 
 ### 2.5 Key environment variables & configuration
+
+Configuration precedence (highest first): `CASTOR_*` environment
+variables > `~/.castor/config.json` (or `$CASTOR_STATE_DIR/config.json`)
+> built-in defaults. One key per setting — no aliases, no migration.
+The exact list below is the present-state inventory from
+`src/config.rs`; any variable not listed here does not exist.
+
 | Variable | Default | Meaning |
 |---|---|---|
 | `CASTOR_MODEL` | `Ternary-Bonsai-2-27B-PQ2_0` | Target model identifier for the coworker (or configured profile). |
 | `CASTOR_BASE_URL` | `http://127.0.0.1:18020/v1` | OpenAI-compatible endpoint. |
-| `CASTOR_TOOL_PREFIX` | `castor` | Namespace prefix for MCP tools (`castor_coworker`, etc.). |
-| `CASTOR_MAX_CONCURRENT_TASKS` | `1` | Cross-process execution slots (disk-lease semaphore). Slot defaults: 1 top-level, 4 for `bonsai-max`, 1 for `hyperqwen-huge`. |
-| `CASTOR_STATE_DIR` | `~/.castor` | Root for task JSON, slot leases, session logs, Evo lineage. |
-| `STATUS_PORT` | `18021` | Zero-turn long-poll HTTP wait/status server. |
-| `STREAM_PROXY_PORT` | `18022` | Universal SSE streaming proxy (loopback only). |
-| `CASTOR_REASONING_EFFORT` | `medium` | Fallback effort when a dispatch sends none {xhigh, medium, low}. |
-| `TEST_OFFLINE` | *(unset)* | Set to `1` to force live suites to skip (GPU-less runs). |
-| `ALLOW_ENGINE_INTERRUPT` | `0` | Dangerous override: by default, test suites NEVER interrupt, probe, or reboot a running serving engine. |
-| `CASTOR_BASE_TURN_BUDGET` | `80` | Base turn budget before requiring supervisor lease extension or landing. |
-| `CASTOR_MAX_ELASTIC_TURNS` | `200` | Maximum allowed turn ceiling via supervisor lease extension. |
+| `CASTOR_API_KEY` | `local-token` | API key sent to the engine (most local engines ignore it; required by strict endpoints). |
+| `CASTOR_ENGINE_TYPE` | *(unset)* | Serving backend: `llama.cpp` \| `vllm` \| `openai`. |
+| `CASTOR_PROFILE` | *(unset)* | Named profile selector: `bonsai-max` \| `hyperqwen-huge` (plus other builtin profiles) — overrides model/base URL/engine/slots/commands. |
+| `CASTOR_MAX_CONTEXT` | `65536` | Maximum context window passed to the engine. |
+| `CASTOR_LAUNCH_COMMAND` / `CASTOR_STOP_COMMAND` | *(profile-provided)* | Optional custom engine launch/stop command overrides (e.g. per-profile `.bat` / `vllm serve` invocations). |
 | `CASTOR_BOOT_TIMEOUT_SECS` | `180` | Serving engine boot timeout in seconds before abort (default 3 minutes). |
-| `CASTOR_SEARXNG_URL` | `http://127.0.0.1:8888/` | Local SearXNG meta-search instance endpoint. |
-| `CASTOR_BRAVE_API_KEY` | *(unset)* | Optional Brave Search API subscription key for fallback. |
-| `CASTOR_OPENALEX_EMAIL` | *(unset)* | Polite-pool contact email for zero-hallucination paper lookups. |
-| `CASTOR_OPENALEX_API_KEY` | *(unset)* | Optional OpenAlex Premium API key for high-throughput institutional tiers. |
+| `CASTOR_PORT_ENGINE` | `18020` | Local serving engine port. |
+| `CASTOR_PORT_STATUS` | `18021` | Zero-turn long-poll HTTP wait/status server. |
+| `CASTOR_PORT_PROXY` | `18022` | Universal SSE streaming proxy (loopback only). |
+| `CASTOR_TOOL_PREFIX` | `castor` | Namespace prefix for MCP tools (`castor_coworker`, etc.). |
+| `CASTOR_STATE_DIR` | `~/.castor` | Root for task JSON, slot leases, session logs, Evo lineage. |
+| `CASTOR_MAX_CONCURRENT_TASKS` | `1` | Cross-process execution slots (disk-lease semaphore). Slot defaults: 1 top-level, 4 for `bonsai-max`, 1 for `hyperqwen-huge`. |
+| `CASTOR_MIN_EVICTION_DETECT_TOKENS` | `13056` | Minimum prompt tokens before KV-cache eviction detection engages. |
+| `CASTOR_CACHE_HIT_YIELD_RATIO` | `0.20` | KV prefix-cache hit ratio that justifies yielding a warm slot to a new task. |
+| `CASTOR_WORKSPACE_SKELETON` | `true` | Prepend a compact workspace-skeleton block to the system prompt (warm Turn-1 prefix for KV prefix caching). |
+| `CASTOR_TOOL_SPILL_BYTES` | `16384` | Max bytes of a single tool output before it is spilled to disk (head/tail preview kept in conversation). |
+| `CASTOR_DGI_REJECT_MARGIN` | `1.5` | DGI gatekeeper log-odds reject margin: reject only when `logP(OVERLOADED) − logP(ADMIT)` exceeds this. |
+| `CASTOR_DGI_BYPASS_WARM_SESSION` | `true` | Skip the DGI probe for continuations that already have a non-empty session. |
+| `CASTOR_DGI_TIMEOUT_SECS` | `30` | Timeout for the DGI 1-forward-pass logit probe. |
+| `CASTOR_PROBE_BUDGET` | `6` | Consecutive non-mutating `bash` probes before a probe-budget advisory is injected. |
+| `CASTOR_TURN_TIMEOUT_SECS` | `600` | Per-turn wall-clock watchdog timeout; `0` disables. |
+| `CASTOR_MAX_TURN_REASONING_TOKENS` | `16384` | Per-turn reasoning token budget before a "stall" is declared; `0` disables. |
+| `CASTOR_REASONING_OPEN_TAG` | `<th` + `ink>` | Reasoning block open tag delimiter (source-assembled to avoid the reserved token sequence in this codebase). |
+| `CASTOR_REASONING_CLOSE_TAG` | `</th` + `ink>` | Reasoning block close tag delimiter. |
+| `CASTOR_SEARXNG_URL` | `http://127.0.0.1:8888/` | Local SearXNG meta-search instance endpoint (first `web_search` provider). |
+| `CASTOR_BRAVE_API_KEY` | *(unset)* | Optional Brave Search API key — the `web_search` fallback when SearXNG is not configured. |
+| `CASTOR_OPENALEX_EMAIL` | *(unset)* | Polite-pool contact email for OpenAlex `paper_lookup`. |
+| `CASTOR_OPENALEX_API_KEY` | *(unset)* | Optional OpenAlex API key for higher rate limits. |
 
 ---
 
@@ -139,8 +159,12 @@ Use structural AST tools, not string matching, for syntactic discovery and refac
 - Fuzzy matching is not supported; modifications use exact substrings.
 
 ### 3.4 Module layout
+
+Feature flags (`Cargo.toml`): `default = ["mcp"]`; `mcp`, `evals`,
+`evo` (= `evals`), `full` (= `mcp` + `evo` + `evals`).
+
 ```
-Cargo.toml               # Single root crate manifest
+Cargo.toml               # Single root crate manifest (dual-target: lib + bin)
 bin/
   castor.js              # Node.js cross-platform distribution shim
 src/
@@ -152,6 +176,8 @@ src/
   skills.rs              # agentskills.io SKILL.md indexer
   telemetry.rs           # JSONL event ledger & derived statistics
   pruner.rs              # State dir retention pruner
+  state/
+    mod.rs               # State dir layout, locks, and session persistence
   mcp/
     mod.rs               # rmcp stdio transport, tool schemas, and server
     dgi.rs               # Decomposition Granularity Index (DGI) 1-forward pass logit probe
@@ -166,21 +192,31 @@ src/
     sanitize.rs          # SSE UTF-8 reassembly, repetition detector, error frame translation
   engine/
     mod.rs               # Provider interface and HTTP client
+    backend.rs           # Serving backend capability matrix (llama.cpp / vLLM / OpenAI)
     lifecycle.rs         # Engine boot, canary verification, and auto-heal
     provider.rs          # OpenAI / vLLM streaming chat client
+    supervisor.rs        # Engine supervisor (start/stop/status, auto-heal supervision)
+    detached.rs          # Detached engine process supervision
   runner/
     mod.rs               # Multi-turn autonomous agent loop
     events.rs            # Session event ledger writer and replayer
     loop_detector.rs     # Action-hash sliding window loop breaker
   tools/
-    mod.rs               # Composite tool executor implementing runner::ToolExecutor
+    mod.rs               # Composite tool executor (16 builtin tools) implementing runner::ToolExecutor
     fs.rs                # Filesystem tools (read, write, edit, list, search)
     sandbox.rs           # 5-layer path containment and 137-vector security policy
     shell.rs             # Safe bash executor and command AST validator
     ast.rs               # Structural AST search and replace via native ast-grep
+    git.rs               # Native git status/diff/log/commit primitives
+    repl.rs              # Stateful Python REPL scratchpad
     web.rs               # Web search (SearXNG -> Brave) and fetch (markdown conversion)
     paper.rs             # Academic paper lookup via OpenAlex (metadata, affiliations, OA PDFs)
     extensions.rs        # MCP extension bridges (rmcp child processes)
+  evals/
+    mod.rs               # Eval harness root
+    fixture.rs           # Deterministic fixture engine for offline replay
+    replay.rs            # Session replay for Tier A offline evals
+    runner.rs            # Batch eval runner against task suites
   evo/
     mod.rs               # Offline evolutionary optimizer subsystem
     lineage.rs           # DAG of scored commits and parent pointers
@@ -222,7 +258,7 @@ skills/                  # Reusable SKILL.md workflow recipes
 - **NEVER** dump raw binary file bytes (`.png`, `.jpg`, `.exe`, etc.) into plaintext string buffers or transcripts (`BinaryFileError` guard). PDF documents are natively parsed in-memory into clean UTF-8 text by both `read_file` (local filesystem) and `web_fetch` (online URLs) via `lopdf`.
 - **NEVER** silently catch, suppress, or mask errors or upstream HTTP status codes (Rule 8).
 - **NEVER** weaken, skip, or delete a failing test to "unblock" the build.
-- **NEVER** interrupt the running serving engine, fire completion probes into `:18020`, or issue stop/reboot commands during testing unless `ALLOW_ENGINE_INTERRUPT=1` is explicitly set.
+- **NEVER** interrupt, probe, or reboot a running serving engine during the default test gate. The default suites run fully offline; the live GPU tests (`tests/llama_cpp.rs`, `tests/bonsai_deep_eval.rs`) are `#[ignore]`-gated and additionally require the explicit `ALLOW_ENGINE_INTERRUPT=1` opt-in to execute.
 - **NEVER** substitute cloud shell or file tools for coworker execution when the coworker is offline or fails; halt and notify the user or boot via 'castor server start'.
 
 ---
@@ -231,15 +267,20 @@ skills/                  # Reusable SKILL.md workflow recipes
 
 ### 5.1 The test gates
 ```bash
-# Fast test gate (~7s, offline, zero engine interruption)
-cargo test
+# Offline test gate (unit + integration, deterministic mock/replay harnesses)
+cargo test --all-features
 
-# Full clippy check (strict zero-warning gate)
-cargo clippy --all-targets -- -D warnings
+# Strict clippy gate (all targets, all features, zero warnings)
+cargo clippy --all-targets --all-features -- -D warnings
 ```
 
 **Zero Engine Interruption Invariant:**
-By default, tests NEVER interrupt, probe, or reboot a running serving engine (`ALLOW_ENGINE_INTERRUPT=0`). Live GPU execution is gated behind the explicit dangerous override `ALLOW_ENGINE_INTERRUPT=1`.
+The default `cargo test --all-features` gate runs **offline** against
+deterministic mock/replay harnesses and never interrupts, probes, or
+reboots a running serving engine. The live GPU tests in
+`tests/llama_cpp.rs` and `tests/bonsai_deep_eval.rs` are `#[ignore]`-gated
+(they do not run in the default suite) and additionally require the
+explicit `ALLOW_ENGINE_INTERRUPT=1` opt-in before they execute.
 
 ---
 
@@ -289,7 +330,7 @@ The project version is represented in three distinct locations that **must remai
 - **Terminal Status Inspection**: If the release fails (test gate failure, clippy lint, Node shim invocation failure, OIDC token minting timeout, or npm dist-tag promotion failure), the supervisor must inspect `gh run view --log-failed` immediately and diagnose root cause before attempting remediation.
 
 ### 8.4 Atomic Release Execution Checklist
-1. **Pre-flight verification**: Run `cargo test` (277+ tests green) and `cargo clippy --all-targets -- -D warnings` (0 warnings).
+1. **Pre-flight verification**: Run `cargo test --all-features` (0 failures) and `cargo clippy --all-targets --all-features -- -D warnings` (0 warnings).
 2. **Lockstep version bump**: Update `Cargo.toml` (`version = "X.Y.Z"`) and `package.json` (`"version": "X.Y.Z"`).
 3. **Commit & push main**:
    ```bash

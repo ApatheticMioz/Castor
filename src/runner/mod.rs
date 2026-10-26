@@ -47,7 +47,7 @@ const REASONING_CEILING_FINISH: &str = "length";
 /// Asks the autonomous peer engineer to synthesize what it has verified,
 /// implementation state, data tables, and exact blockers, with full tools
 /// available to ground its findings.
-const SALVAGE_PROMPT: &str = "[Salvage] Reasoning budget ceiling reached for this dispatch. \
+const SALVAGE_PROMPT: &str = "[System: Salvage] Reasoning budget ceiling reached for this dispatch. \
     As an autonomous peer engineer, provide your collaborative status report: \
     (1) summarize the findings, conclusions, and implementations you have reached so far, \
     (2) present any data tables, metrics, or scratchpad artifacts produced, and \
@@ -345,15 +345,15 @@ pub struct SessionOptions {
     /// Per-turn watchdog wall-clock ceiling (seconds). When `Some(s)` with
     /// `s > 0`, each `engine.chat` call is wrapped in
     /// [`tokio::time::timeout`]. A timeout triggers a single retry at `"low"`
-    /// reasoning effort (Issue #27 Part 2). `None` disables the timeout.
+    /// reasoning effort. `None` disables the timeout.
     pub turn_timeout_secs: Option<u64>,
     /// Per-turn watchdog reasoning-token budget. When `Some(n)` with
     /// `n > 0`, a turn that returns `finish_reason == "length"` with empty
     /// `tool_calls` and `metrics.reasoning_tokens >= n` is treated as a
-    /// stall and retried once at `"low"` reasoning effort (Issue #27 Part 2).
+    /// stall and retried once at `"low"` reasoning effort.
     /// `None` or `0` disables the token-budget trigger.
     pub max_turn_reasoning_tokens: Option<u32>,
-    /// Issue #15: maximum bytes of a single tool output before it is spilled
+    /// Maximum bytes of a single tool output before it is spilled
     /// to disk (keeping only a head/tail preview in the conversation).
     /// `None` means "use the default" ([`SPILL_THRESHOLD_BYTES`] = 16384).
     pub tool_spill_bytes: Option<usize>,
@@ -394,7 +394,7 @@ impl SessionOptions {
         }
     }
 
-    /// Attach the per-turn stall watchdog (Issue #27 Part 2). Wraps each
+    /// Attach the per-turn stall watchdog. Wraps each
     /// `engine.chat` call in a wall-clock timeout (`turn_timeout_secs`, `0`
     /// disables) and treats a `length`/empty-tool-call turn that burned at
     /// least `max_turn_reasoning_tokens` reasoning tokens (`0` disables) as a
@@ -501,7 +501,7 @@ fn write_salvage_report(
 
 /// Default maximum tool result bytes before overflowing to disk.
 ///
-/// Issue #15: this is the fallback threshold used when
+/// This is the fallback threshold used when
 /// [`SessionOptions::tool_spill_bytes`] is `None`. It is intentionally
 /// conservative (16 KiB) so the default conversation stays small — keeping the
 /// Turn-1 prefix byte-for-byte stable across sessions in the same workspace
@@ -611,7 +611,7 @@ const WORKSPACE_SKELETON_MANIFESTS: &[&str] = &[
     "README.md",
 ];
 
-/// Issue #15: build a compact, deterministic `[Workspace Skeleton]` block.
+/// Build a compact, deterministic `[Workspace Skeleton]` block.
 ///
 /// The block is intentionally tiny and *pure* (a function of the workspace's
 /// stable top-level shape alone — no timestamps, no mtimes, no sizes) so that
@@ -865,8 +865,7 @@ fn should_resume(
     est <= wm
 }
 
-/// Per-turn stall-watchdog wrapper for a single [`ChatEngine::chat`] call
-/// (Issue #27 Part 2).
+/// Per-turn stall-watchdog wrapper for a single [`ChatEngine::chat`] call.
 ///
 /// Two independent triggers, both optional (`None` / `0` disables that
 /// trigger):
@@ -1044,7 +1043,7 @@ pub async fn run_session(
         .and_then(|o| o.reasoning_effort.as_deref())
         .filter(|e| !e.is_empty());
 
-    // Per-turn stall watchdog (Issue #27 Part 2). `0` disables each trigger;
+    // Per-turn stall watchdog. `0` disables each trigger;
     // both default to disabled so callers without a watchdog are unchanged.
     let (wd_timeout, wd_max_reasoning) = match options {
         Some(o) => (
@@ -1070,7 +1069,7 @@ pub async fn run_session(
         let remaining = budget - turns;
         if remaining <= LANDING_WINDOW && !landing_injected {
             let notice = format!(
-                "[Budget Notice] You have {remaining} turns left in your budget. Land now: \
+                "[System: Lease Extension] You have {remaining} turns left in your budget. Land now: \
                  synthesize your final deliverable, findings, and grounded conclusions. \
                  Do not start new tool calls."
             );
@@ -1081,7 +1080,7 @@ pub async fn run_session(
         turns += 1;
 
         // Build the request: messages first, tool schemas last (APC contract).
-        // The per-turn stall watchdog (Issue #27 Part 2) wraps the call when a
+        // The per-turn stall watchdog wraps the call when a
         // timeout or reasoning-token budget is configured; otherwise the call
         // is issued directly (zero behavior change for unconfigured callers).
         let watchdog = wd_timeout > 0 || wd_max_reasoning > 0;
@@ -1161,7 +1160,7 @@ pub async fn run_session(
             // Compute the ceiling signal before moving `completion.content`.
             let ceiling_hit = is_reasoning_ceiling(&completion);
 
-            // Issue #24: capture the severed-stop signal (reasoning closed, but
+            // Capture the severed-stop signal (reasoning closed, but
             // the model stopped with no tool call and no real content) before
             // moving `completion`. This triggers a one-time continuation prompt
             // so the engine is given a chance to act after deliberating.
@@ -1197,7 +1196,7 @@ pub async fn run_session(
             // loop continues naturally — otherwise we land on the new content.
             if severed_stop {
                 let continuation_prompt = concat!(
-                    "[Continuation] Your last turn closed with ",
+                    "[System: Continuation] Your last turn closed with ",
                     "th_ink",
                     " reasoning but produced no tool call or final deliverable. \
                      If you still need to take an action (read, write, run a tool, \
@@ -1469,7 +1468,7 @@ pub async fn run_session(
                 // One salvage retry asking for a proper summary.
                 messages.push(msg(
                     "user",
-                    "[Salvage] Your previous response was empty. Provide a proper summary of \
+                    "[System: Salvage] Your previous response was empty. Provide a proper summary of \
                      your findings and the work you have completed.",
                 ));
                 let salvage = engine.chat(&messages, &[], true, effort).await?;
@@ -1599,12 +1598,12 @@ pub async fn run_session(
                 LoopState::Ok => {}
                 LoopState::Advisory => {
                     let advisory = if tc.name == "read_file" {
-                        "[Read Advisory] You have repeated the exact same read on this coordinate \
+                        "[System: Read Advisory] You have repeated the exact same read on this coordinate \
 multiple times. If you are facing contradictory requirements across files or an architectural \
 impasse, state your findings and ask for alignment rather than continuing to re-read."
                             .to_string()
                     } else {
-                        "[Loop Advisory] You have repeated the same action sequence multiple times in a \
+                        "[System: Loop Advisory] You have repeated the same action sequence multiple times in a \
                          row. Change your approach or synthesize your findings."
                             .to_string()
                     };
@@ -1694,7 +1693,7 @@ impasse, state your findings and ask for alignment rather than continuing to re-
         // Best-effort synthesis: ask the model to land one more time (tools stripped).
         messages.push(msg(
             "user",
-            "[Final] Your turn budget is exhausted. Synthesize your final deliverable, findings, \
+            "[System: Final Turn] Your turn budget is exhausted. Synthesize your final deliverable, findings, \
              and grounded conclusions now.",
         ));
         let completion = engine.chat(&messages, &[], true, effort).await?;
@@ -2141,7 +2140,7 @@ mod tests {
         let notice_injected = calls.iter().any(|c| {
             c.messages
                 .iter()
-                .any(|m| m.content.contains("[Budget Notice]"))
+                .any(|m| m.content.contains("[System: Lease Extension]"))
         });
         assert!(
             notice_injected,
@@ -2190,9 +2189,11 @@ mod tests {
 
         // The salvage prompt was injected into a call's messages.
         let calls = recorder.calls.lock().await;
-        let salvage_injected = calls
-            .iter()
-            .any(|c| c.messages.iter().any(|m| m.content.contains("[Salvage]")));
+        let salvage_injected = calls.iter().any(|c| {
+            c.messages
+                .iter()
+                .any(|m| m.content.contains("[System: Salvage]"))
+        });
         assert!(
             salvage_injected,
             "salvage prompt must be present in messages"
@@ -2239,7 +2240,7 @@ mod tests {
         let advisory_injected = calls.iter().any(|c| {
             c.messages
                 .iter()
-                .any(|m| m.content.contains("[Loop Advisory]"))
+                .any(|m| m.content.contains("[System: Loop Advisory]"))
         });
         assert!(
             advisory_injected,
@@ -2495,14 +2496,14 @@ mod tests {
         assert!(has("RESULT-A"), "first tool result must be preserved");
         assert!(has("RESULT-B"), "second tool result must be preserved");
         assert!(
-            has("[Salvage]"),
+            has("[System: Salvage]"),
             "the non-coercive salvage prompt must be injected"
         );
         // (2) The salvage prompt is peer-empowering: it asks for grounded
         //     summaries, metrics, and blockers without coercive imperatives.
         let salvage_prompt = salvage_msgs
             .iter()
-            .find(|m| m.content.contains("[Salvage]"))
+            .find(|m| m.content.contains("[System: Salvage]"))
             .expect("salvage prompt present");
         let p = salvage_prompt.content.to_lowercase();
         assert!(
@@ -2761,7 +2762,7 @@ mod tests {
         let loop_advisory_injected = calls.iter().any(|c| {
             c.messages
                 .iter()
-                .any(|m| m.content.contains("[Loop Advisory]"))
+                .any(|m| m.content.contains("[System: Loop Advisory]"))
         });
         assert!(
             loop_advisory_injected,
@@ -2856,7 +2857,7 @@ mod tests {
         let loop_advisory_injected = calls.iter().any(|c| {
             c.messages
                 .iter()
-                .any(|m| m.content.contains("[Loop Advisory]"))
+                .any(|m| m.content.contains("[System: Loop Advisory]"))
         });
         assert!(
             loop_advisory_injected,
@@ -2890,7 +2891,7 @@ mod tests {
         let _ = std::fs::remove_dir_all(state.root());
     }
 
-    // --- Issue #15: workspace skeleton & custom spill threshold -----------
+    // --- workspace skeleton & custom spill threshold -----------------------
 
     #[test]
     fn build_workspace_skeleton_is_deterministic_sorted_and_excludes_build_state() {

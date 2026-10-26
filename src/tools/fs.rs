@@ -447,7 +447,7 @@ impl FsExecutor {
 
         let stdout = String::from_utf8_lossy(&output.stdout);
         let mut lines: Vec<&str> = stdout.lines().collect();
-        // Issue #15: multi-threaded `git grep` can emit matches in a
+        // Multi-threaded `git grep` can emit matches in a
         // non-deterministic order. Sort the raw lines lexicographically
         // BEFORE truncation so the first `max_results` matches are stable
         // across repeated invocations (warm Turn-1 prefix for KV caching).
@@ -517,7 +517,7 @@ impl FsExecutor {
             Ok(e) => e,
             Err(_) => return Ok(()),
         };
-        // Issue #15: collect the OS directory enumeration into a Vec and sort
+        // Collect the OS directory enumeration into a Vec and sort
         // by file_name() so the fallback search order is deterministic
         // (independent of platform directory enumeration order).
         let mut entries: Vec<fs::DirEntry> = dir_iter.filter_map(|e| e.ok()).collect();
@@ -983,7 +983,7 @@ mod tests {
         assert!(out.len() < 500);
     }
 
-    /// Issue #15: the fallback `search_code` path (filesystem walk) must return
+    /// The fallback `search_code` path (filesystem walk) must return
     /// matches in a deterministic order that is independent of the platform's
     /// raw directory-enumeration order. `walk_search` collects each directory's
     /// entries into a `Vec` and sorts by `file_name()` before recursing, so the

@@ -50,18 +50,21 @@ node bin/castor.js install --client all
 The test gate is the single source of truth. Run it **before** opening a PR.
 
 ```bash
-# Fast offline test gate - 243 unit and integration tests (~7s).
-cargo test
+# Offline test gate - unit + integration tests, deterministic mock/replay harnesses.
+cargo test --all-features
 
 # Strict linter gate - zero warnings allowed
-cargo clippy --all-targets -- -D warnings
+cargo clippy --all-targets --all-features -- -D warnings
 
 # Format check
 cargo fmt -- --check
 ```
 
 **Zero Engine Interruption Invariant:**
-By default, tests NEVER interrupt, probe, or reboot a running serving engine (`ALLOW_ENGINE_INTERRUPT=0`). Live GPU execution is gated behind the explicit dangerous override `ALLOW_ENGINE_INTERRUPT=1`.
+By default, the `cargo test --all-features` gate runs **offline** and never
+interrupts, probes, or reboots a running serving engine. The live GPU tests
+(`tests/llama_cpp.rs`, `tests/bonsai_deep_eval.rs`) are `#[ignore]`-gated and
+additionally require the explicit `ALLOW_ENGINE_INTERRUPT=1` opt-in to execute.
 
 ### Targeted Test Runs
 Run a specific module or test in isolation:
@@ -102,19 +105,28 @@ Local Serving Engine (WSL2 / Linux, :18020)  ->  Serving Provider (Qwen3.8-27B d
 ```
 
 ### Module Layout
+
+Feature flags (`Cargo.toml`): `default = ["mcp"]`; `mcp`, `evals`,
+`evo` (= `evals`), `full` (= `mcp` + `evo` + `evals`).
+
 ```
-Cargo.toml               # Single root crate manifest
+Cargo.toml               # Single root crate manifest (dual-target: lib + bin)
 bin/
   castor.js              # Node.js cross-platform distribution shim
 src/
-  main.rs                # CLI entry point (clap dispatch, worker subcommand)
-  config.rs              # Configuration loader (serde, env > json > defaults)
+  lib.rs                 # Library crate root (public modules, traits, and programmatic embedding)
+  main.rs                # Thin CLI binary entry point (delegates to castor::cli::run)
+  cli.rs                 # Clap CLI parsing, command routing, and internal worker dispatch
+  config.rs              # Configuration loader (env > config.json > defaults)
   platform.rs            # Cross-OS path translation and process tree management
   skills.rs              # agentskills.io SKILL.md indexer
   telemetry.rs           # JSONL event ledger & derived statistics
   pruner.rs              # State dir retention pruner
+  state/
+    mod.rs               # State dir layout, locks, and session persistence
   mcp/
     mod.rs               # rmcp stdio transport, tool schemas, and server
+    dgi.rs               # Decomposition Granularity Index (DGI) 1-forward pass logit probe
     worker.rs            # Detached worker process execution loop
   task/
     mod.rs               # Task management subsystem
@@ -126,26 +138,37 @@ src/
     sanitize.rs          # SSE UTF-8 reassembly, repetition detector, error frame translation
   engine/
     mod.rs               # Provider interface and HTTP client
+    backend.rs           # Serving backend capability matrix (llama.cpp / vLLM / OpenAI)
     lifecycle.rs         # Engine boot, canary verification, and auto-heal
     provider.rs          # OpenAI / vLLM streaming chat client
+    supervisor.rs        # Engine supervisor (start/stop/status, auto-heal supervision)
+    detached.rs          # Detached engine process supervision
   runner/
     mod.rs               # Multi-turn autonomous agent loop
     events.rs            # Session event ledger writer and replayer
     loop_detector.rs     # Action-hash sliding window loop breaker
   tools/
-    mod.rs               # Composite tool executor implementing runner::ToolExecutor
+    mod.rs               # Composite tool executor (16 builtin tools) implementing runner::ToolExecutor
     fs.rs                # Filesystem tools (read, write, edit, list, search)
     sandbox.rs           # 5-layer path containment and 137-vector security policy
     shell.rs             # Safe bash executor and command AST validator
     ast.rs               # Structural AST search and replace via native ast-grep
-    web.rs               # Web search (SearXNG -> Brave -> DDG) and fetch (markdown conversion)
+    git.rs               # Native git status/diff/log/commit primitives
+    repl.rs              # Stateful Python REPL scratchpad
+    web.rs               # Web search (SearXNG -> Brave) and fetch (markdown conversion)
+    paper.rs             # Academic paper lookup via OpenAlex (metadata, affiliations, OA PDFs)
     extensions.rs        # MCP extension bridges (rmcp child processes)
+  evals/
+    mod.rs               # Eval harness root
+    fixture.rs           # Deterministic fixture engine for offline replay
+    replay.rs            # Session replay for Tier A offline evals
+    runner.rs            # Batch eval runner against task suites
   evo/
     mod.rs               # Offline evolutionary optimizer subsystem
     lineage.rs           # DAG of scored commits and parent pointers
     optimizer.rs         # Reflective batch evaluation against task suites
     watchdog.rs          # Lineage stagnation and health detector
-evals/                   # Tier A offline replay and golden test tasks
+evals/                   # Tier A offline replay, golden test tasks, and DGI benchmark datasets
 skills/                  # Reusable SKILL.md workflow recipes
 ```
 
@@ -165,8 +188,8 @@ We use [Conventional Commits](https://www.conventionalcommits.org/):
 
 ### PR Checklist
 Before requesting review, confirm:
-- [ ] `cargo test` is 100% green (277/277 tests).
-- [ ] `cargo clippy --all-targets -- -D warnings` passes with zero warnings.
+- [ ] `cargo test --all-features` is 100% green.
+- [ ] `cargo clippy --all-targets --all-features -- -D warnings` passes with zero warnings.
 - [ ] `cargo fmt -- --check` passes cleanly.
 - [ ] No hardcoded drive letters, home dirs, or usernames in any file (paths are relative or env-driven).
 - [ ] No secrets, credentials, or machine-identity paths committed.

@@ -23,6 +23,9 @@ spilled to `.scratch/`), which drives F3.
 
 ## 2. Task format — `tasks/<id>/task.toml`
 
+Parsed by `src/evals/fixture.rs` (`TaskConfig`, `deny_unknown_fields`), so the
+field set below is exact and any unknown key is a load error:
+
 ```toml
 id = "fix-failing-test"          # unique, kebab-case; == directory name
 prompt = """..."""               # exact user prompt given to the agent
@@ -30,13 +33,33 @@ setup = "setup.sh"               # optional; prepares fixture (deterministic, of
 timeout_s = 120                  # hard wall-clock cap for Tier B runs
 tags = ["tier-a", "F2"]          # tier-a|tier-b + failure class(es) it guards
 
-[scorer]
-checks = ["tests-green", "did-not-edit-test"]   # ordered check-ids
+# Deterministic scorer: an ORDERED array of check tables.
+[[scorer.checks]]
+id = "tests-green"
+kind = "exec"                    # run `cmd` in the post-run workdir
+cmd = "node --test \"test/*.test.js\""
+expect_exit = 0
+
+[[scorer.checks]]
+id = "test-file-untouched"
+kind = "file"                    # assert on a workdir file
+path = "test/sum.test.js"
+expect_sha256 = "930ebcff…"      # or: expect_contains = "…"
+
+[[scorer.checks]]
+id = "no-dropped-toolcall"
+kind = "trace"                   # predicate over trace.jsonl
+assert = "every_tool_call_has_result"
 ```
 
-Check-ids are **deterministic only**: (a) *execution checks* — run a command in
-the post-run workdir and assert exit code / file content; (b) *trace
-assertions* — predicate over `trace.jsonl` (tool names, args, order, paths).
+Check `kind`s are **deterministic only**: (a) `exec` — run `cmd` in the post-run
+workdir and assert `expect_exit`; (b) `file` — assert on a workdir file via
+`expect_sha256` or `expect_contains`; (c) `trace` — a named predicate over
+`trace.jsonl` (`every_tool_call_has_result`, `final_message_nonempty`,
+`no_tool_output_spilled`, `no_write_outside_workdir`,
+`final_message_mentions_workspace`, `read_file_before_edit_file`,
+`edit_file_before_bash_verify`, `bash_verify_present`,
+`edit_file_count_eq_1`, `no_consecutive_identical_failed_toolcall`).
 No LLM judges, no similarity metrics, no Likert scores.
 
 ## 3. Trace fixture format — `trace.jsonl`

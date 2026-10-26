@@ -1,26 +1,48 @@
 ---
 name: hypothesis-generation
-description: Evo discipline — state a measurable hypothesis, snapshot, evaluate, then select or revert.
-keywords: [hypothesis, evo, fitness, benchmark, optimization, candidate, lineage]
+description: Structured root-cause and optimization hypothesis generation — gather evidence, state ranked falsifiable single-variable hypotheses, and discriminate with the minimal measurement.
+keywords: [hypothesis, root-cause, investigate, debug, benchmark, diagnose, failure]
 ---
-# Hypothesis Generation (Evo Discipline)
+# Hypothesis Generation
 
-Every code change you make to improve a metric is a *candidate*. Treat it as
-a falsifiable hypothesis, not a guess.
+Every code change you make to fix a bug or improve a metric is a
+*falsifiable hypothesis*, not a guess. A hypothesis you cannot measure
+is not a hypothesis — do not propose it.
 
 ## Checklist
-1. State the hypothesis in one measurable sentence:
-   "Changing X will raise <metric> from A to B because <mechanism>."
-2. Snapshot the files you are about to mutate with `evo_propose_candidate`
-   BEFORE editing (pass the exact file list).
-3. Make the minimal change that tests the mechanism — one variable at a time.
-4. Run the verification with `evo_evaluate_candidate` (the test command).
-5. Read the fitness score and the compact failure digest.
-6. If it improved: `evo_select_candidate`. If it regressed or failed:
-   `evo_revert_candidate` to restore the snapshot.
+
+1. **Evidence Gathering** — Before writing a hypothesis, inspect:
+   - Failure traces and build output (condense with the
+     `traceback-condensing` skill first — never reason over raw
+     multi-page logs).
+   - Code structure around the failing frame: `ast_search` and
+     `search_code` for the symbols and call sites; `read_file` for the
+     exact region.
+   - Recent history: `git_log` (what changed) and `git_diff` (how it
+     changed) for the relevant paths.
+2. **Ranked Falsifiable Hypotheses** — Formulate **1–3**
+   single-variable hypotheses, in decreasing order of probability.
+   Each hypothesis must state all three of:
+   - **(a)** the **exact code coordinate** (`file:line`) where the
+     mechanism lives;
+   - **(b)** the **predicted mechanism** — one sentence: "Changing X
+     will cause Y because <mechanism>";
+   - **(c)** the **minimal reproduction or measurement command**
+     (`python_repl` for arithmetic/data checks, `bash` for
+     test/benchmark commands) that falsifies the hypothesis in a
+     single pass.
+3. **Single-Variable Discrimination** — Test the highest-probability
+   hypothesis first. Each trial changes exactly one variable; never
+   bundle multiple unverified changes into a single trial — you cannot
+   attribute the delta. If the hypothesis is falsified, move to the
+   next-ranked one; if confirmed, stop and apply the fix (with the
+   `evo-mutation-rollback` discipline if it touches fitness metrics).
 
 ## Rules
-- Never batch unrelated changes into one candidate — you cannot attribute
-  the fitness delta.
-- A candidate that cannot be measured is not a hypothesis; do not propose it.
-- Keep the hypothesis text short and specific; it is stored in the lineage.
+
+- A hypothesis without an exact `file:line` coordinate is a rumour;
+  read the file until you have the coordinate.
+- Keep the hypothesis text short and specific — it is the unit of
+  attribution in any subsequent lineage or audit record.
+- The falsification command must be runnable in one pass and must
+  produce a decisive yes/no, not an open-ended exploration.

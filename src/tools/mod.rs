@@ -90,7 +90,7 @@ impl CompositeExecutor {
 
     /// Return the list of all available tool schemas (builtins + extensions).
     ///
-    /// Issue #15: extension schemas are appended after the builtin schemas.
+    /// Extension schemas are appended after the builtin schemas.
     /// Because the extension bridge can freeze its tool set in an order that
     /// depends on async spawn timing, we sort the extension slice by
     /// `schema.name` deterministically so the full schema list (and therefore
@@ -112,7 +112,7 @@ pub fn builtin_tool_schemas() -> Vec<ToolSchema> {
     vec![
         ToolSchema {
             name: "read_file".to_string(),
-            description: "Read a file from disk (whole file or line range). Supports source code, PDFs (extracts text), and images (.png, .jpg, .webp, .gif, .bmp loaded for visual inspection).".to_string(),
+            description: "Read a file from disk (whole file or 1-based line range). Natively extracts text from PDFs and loads images (.png, .jpg, .webp, .gif, .bmp) for visual inspection. Prefer a single encompassing line range over repeated small reads on the same file.".to_string(),
             parameters: json!({
                 "type": "object",
                 "properties": {
@@ -125,7 +125,7 @@ pub fn builtin_tool_schemas() -> Vec<ToolSchema> {
         },
         ToolSchema {
             name: "write_file".to_string(),
-            description: "Write content to a file. Overwrites existing files by default.".to_string(),
+            description: "Create or overwrite a file on disk (creates parent directories automatically). Prefer edit_file for surgical changes to existing files.".to_string(),
             parameters: json!({
                 "type": "object",
                 "properties": {
@@ -138,7 +138,7 @@ pub fn builtin_tool_schemas() -> Vec<ToolSchema> {
         },
         ToolSchema {
             name: "edit_file".to_string(),
-            description: "Make an exact substring replacement in a file. Validates syntax before saving.".to_string(),
+            description: "Replace an exact substring in a file with in-memory AST syntax validation before commit. Target must match uniquely unless replace_all is true.".to_string(),
             parameters: json!({
                 "type": "object",
                 "properties": {
@@ -152,7 +152,7 @@ pub fn builtin_tool_schemas() -> Vec<ToolSchema> {
         },
         ToolSchema {
             name: "list_dir".to_string(),
-            description: "List directory contents up to a maximum depth (capped at 100 items to conserve context).".to_string(),
+            description: "List entries in a directory (sorted alphabetically, directories suffixed with /).".to_string(),
             parameters: json!({
                 "type": "object",
                 "properties": {
@@ -163,7 +163,7 @@ pub fn builtin_tool_schemas() -> Vec<ToolSchema> {
         },
         ToolSchema {
             name: "search_code".to_string(),
-            description: "Search for text patterns across files in the workspace.".to_string(),
+            description: "Search for literal or regex patterns across workspace files with deterministic sorted output. Prefer over bash grep/rg.".to_string(),
             parameters: json!({
                 "type": "object",
                 "properties": {
@@ -176,7 +176,7 @@ pub fn builtin_tool_schemas() -> Vec<ToolSchema> {
         },
         ToolSchema {
             name: "bash".to_string(),
-            description: "Execute a command in bash shell with layered safety checks and process group isolation.".to_string(),
+            description: "Execute a shell command with process-group isolation and safety validation. Reserve for builds, test suites, linters, and external CLIs (e.g. cargo, gh); do NOT use bash for file reading, text search, git status/diff/log/commit, or Python calculations where native tools exist.".to_string(),
             parameters: json!({
                 "type": "object",
                 "properties": {
@@ -188,7 +188,7 @@ pub fn builtin_tool_schemas() -> Vec<ToolSchema> {
         },
         ToolSchema {
             name: "ast_search".to_string(),
-            description: "Search code using an ast-grep structural pattern.".to_string(),
+            description: "Structural AST search using ast-grep pattern syntax with metavariables ($VAR, $$$ARGS). Prefer over regex or search_code when matching syntactic constructs (functions, structs, call sites, imports).".to_string(),
             parameters: json!({
                 "type": "object",
                 "properties": {
@@ -201,7 +201,7 @@ pub fn builtin_tool_schemas() -> Vec<ToolSchema> {
         },
         ToolSchema {
             name: "ast_replace".to_string(),
-            description: "Search and replace code using an ast-grep structural pattern.".to_string(),
+            description: "Structural AST search-and-replace across files with automatic rollback if any modified file fails syntax validation.".to_string(),
             parameters: json!({
                 "type": "object",
                 "properties": {
@@ -215,7 +215,7 @@ pub fn builtin_tool_schemas() -> Vec<ToolSchema> {
         },
         ToolSchema {
             name: "web_search".to_string(),
-            description: "Search the web using SearXNG with Brave search fallback. Supports category routing (e.g. 'general', 'science', 'it').".to_string(),
+            description: "Search the web via SearXNG (primary) or Brave Search API (fallback). Returns titles, URLs, and snippets.".to_string(),
             parameters: json!({
                 "type": "object",
                 "properties": {
@@ -228,7 +228,7 @@ pub fn builtin_tool_schemas() -> Vec<ToolSchema> {
         },
         ToolSchema {
             name: "web_fetch".to_string(),
-            description: "Fetch a web page or document (HTML, Markdown, plain text, or PDF) and extract clean readable text. For PDFs, extracts text with pagination support.".to_string(),
+            description: "Fetch a URL and convert HTML or PDF content into clean readable Markdown/UTF-8 text.".to_string(),
             parameters: json!({
                 "type": "object",
                 "properties": {
@@ -240,7 +240,7 @@ pub fn builtin_tool_schemas() -> Vec<ToolSchema> {
         },
         ToolSchema {
             name: "paper_lookup".to_string(),
-            description: "Search and retrieve verified academic paper metadata (canonical title, year, venue, DOI, author institutional affiliations, abstract, and direct open-access PDF URLs) from OpenAlex.".to_string(),
+            description: "Search peer-reviewed academic literature via OpenAlex (250M+ works) by query, DOI, OpenAlex ID, or arXiv ID. Returns verified titles, authors, affiliations, citations, abstracts, and Open Access PDF links.".to_string(),
             parameters: json!({
                 "type": "object",
                 "properties": {
@@ -252,7 +252,7 @@ pub fn builtin_tool_schemas() -> Vec<ToolSchema> {
         },
         ToolSchema {
             name: "python_repl".to_string(),
-            description: "Evaluate Python code in a persistent in-session REPL scratchpad. The REPL keeps a shared namespace across calls so variables defined in one call are visible in the next. Supports a trailing expression (result auto-printed via repr). Pass reset=true to clear the namespace and start a fresh session.".to_string(),
+            description: "Execute Python code in a persistent, stateful workspace-scoped interpreter session. Variables, imports, and functions persist across calls within the session. Prefer over repeated bash python -c invocations.".to_string(),
             parameters: json!({
                 "type": "object",
                 "properties": {
@@ -264,7 +264,7 @@ pub fn builtin_tool_schemas() -> Vec<ToolSchema> {
         },
         ToolSchema {
             name: "git_status".to_string(),
-            description: "Show a short status of the working tree (git status -sb) in the sandboxed workspace. Optionally scoped to a single path.".to_string(),
+            description: "Return structured repository status (branch, clean/dirty state, and staged/unstaged/untracked file lists) without spawning bash. Prefer over bash git status.".to_string(),
             parameters: json!({
                 "type": "object",
                 "properties": {
@@ -274,7 +274,7 @@ pub fn builtin_tool_schemas() -> Vec<ToolSchema> {
         },
         ToolSchema {
             name: "git_diff".to_string(),
-            description: "Show the diff of changes (git diff). Supports --staged and --stat flags. Optionally scoped to a single path.".to_string(),
+            description: "Return unified git diff for working tree or staged index (--cached), optionally scoped to specific sandbox-validated file paths. Prefer over bash git diff.".to_string(),
             parameters: json!({
                 "type": "object",
                 "properties": {
@@ -286,7 +286,7 @@ pub fn builtin_tool_schemas() -> Vec<ToolSchema> {
         },
         ToolSchema {
             name: "git_log".to_string(),
-            description: "Show recent commit history (git log --oneline). Limit clamped to 1-100 (default 10). Optionally scoped to a path.".to_string(),
+            description: "Return structured recent commit history (hash, short_hash, author, date, subject). Prefer over bash git log.".to_string(),
             parameters: json!({
                 "type": "object",
                 "properties": {
@@ -297,7 +297,7 @@ pub fn builtin_tool_schemas() -> Vec<ToolSchema> {
         },
         ToolSchema {
             name: "git_commit".to_string(),
-            description: "Stage specified paths (git add) and create a commit. Paths are sandbox-validated before staging.".to_string(),
+            description: "Stage and commit changes inside the sandboxed workspace. When paths are provided, commits ONLY those paths (git commit --only) without sweeping unrelated pre-staged index entries; when paths is omitted, validates all staged index entries against sandbox write policy.".to_string(),
             parameters: json!({
                 "type": "object",
                 "properties": {

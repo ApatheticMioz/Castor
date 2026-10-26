@@ -1,4 +1,4 @@
-//! In-session Python REPL scratchpad (RFC Issue #17, Part 2).
+//! In-session Python REPL scratchpad.
 //!
 //! `PythonRepl` owns a single long-lived `python3 -u -c <DRIVER>` child
 //! process whose stdin/stdout are JSON-line channels. Each call to

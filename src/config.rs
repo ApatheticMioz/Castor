@@ -629,7 +629,7 @@ pub fn load_with(get_env: impl Fn(&str) -> Option<String>) -> Result<LoadedConfi
     let (max_turn_reasoning_tokens, src_max_turn_reasoning_tokens) =
         pick_u32(env_u32("CASTOR_MAX_TURN_REASONING_TOKENS")?, None, 16384);
 
-    // Issue #15: KV prefix-caching efficiency knobs (env-only, no config.json keys).
+    // KV prefix-caching efficiency knobs (env-only, no config.json keys).
     let (tool_spill_bytes, src_tool_spill_bytes) =
         pick_usize(env_usize("CASTOR_TOOL_SPILL_BYTES")?, None, 16384);
     let (workspace_skeleton_prefix, src_workspace_skeleton_prefix) =

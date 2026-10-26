@@ -1,63 +1,72 @@
-# Documentation & Engineering Audits
+# Documentation Index
 
-This directory contains architectural specifications, adversarial audits, engineering ledgers, and formal verification reports for the **LLM_Ecosystem** and the **Castor** harness.
+This directory holds the **active specifications** for the Castor harness
+plus the **historical reference ledgers** (audits and archive notes). The two
+kinds of documents are intentionally separated by directory.
 
----
-
-## Directory Overview
-
-```
-docs/
-├── README.md                               # This documentation index
-└── audits/
-    ├── AUDIT_2026-09-05.md                 # Full repository & configuration drift audit
-    ├── CASTOR_PROGRESS.md                   # Castor runtime implementation ledger
-    ├── PATCHWORK_ADVERSARIAL_AUDIT_2026-09-05.md # Threat modeling & adversarial architecture review
-    └── QWEN_EVO_AUDIT.md                   # Collaborative peer-review & stress analysis
-```
+> [!NOTE]
+> `docs/audits/` and `docs/archive/` are **historical reference ledgers** —
+> time-stamped point-in-time analyses, forensic post-mortems, and
+> implementation ledgers (including pre-Rust `mcp-qwen` / `mcp-castor`
+> JS-runtime analyses). They are **NOT active specification**. For the
+> current architecture, configuration, and behavior, consult the active
+> specs below plus the source of truth in `src/` and `AGENTS.md`
+> (see the Ground-Truth Hierarchy in `AGENTS.md` §7).
 
 ---
 
-## Audit Index
+## Active Specifications
 
-### 1. [Repository & Configuration Drift Audit (2026-09-05)](audits/AUDIT_2026-09-05.md)
-- **Focus**: Cross-platform configuration drift, sync timeouts across orchestrator clients (Claude Code vs. Antigravity IDE), environment variable leakage, and dead code elimination.
-- **Key Findings**: Identification of DrvFs path separators across POSIX/NTFS boundaries, unindexed directory traversal traps, and lock contention mitigations.
+These documents describe the present-state system and are maintained in
+lockstep with the code:
 
-### 2. [Castor Implementation & Progress Ledger](audits/CASTOR_PROGRESS.md)
-- **Focus**: Step-by-step development history of the Castor runtime.
-- **Components Built**:
-  - Embedded Castor microkernel (`src/harness/core/kernel.js`, `events.js`)
-  - Structural AST surgery service via `@ast-grep/napi` with syntax-validation safety gates
-  - Traceback condenser reducing 8,000-character stack traces to $\le 100$-token digests
-  - 5-layer zero-risk sandboxing preventing disk escapes beyond workspace root
-  - Closed-loop evolutionary candidate engine (`.evo/lineage.json`)
-
-### 3. [Patchwork Adversarial Security Audit (2026-09-05)](audits/PATCHWORK_ADVERSARIAL_AUDIT_2026-09-05.md)
-- **Focus**: Adversarial threat modeling attacking the AST surgery engine, shell executor, and file mutation boundary.
-- **Outcomes**: Hardening against symlink escapes (`fs.realpathSync`), Windows reserved device names (`CON`, `PRN`, `AUX`, `NUL`), drive-root destructions (`format C:`, `rm -rf /`), and process group zombie leaks.
-
-### 4. [Qwen-Evo Collaborative Peer Audit](audits/QWEN_EVO_AUDIT.md)
-- **Focus**: Joint code-review and stress evaluation executed collaboratively between Lead Architect (Gemini 3.8 Flash) and local coworker (Qwen3.8-27B).
-- **Outcomes**: Validation of Evo candidate lineage records, git commit grounding, and prefix-caching stability.
-
-### 5. [Qwen Usage Audit — Balancing Cloud/Local Orchestration (2026-09)](qwen-usage-audit-2026-09.md)
-- **Focus**: Dispatch discipline forensic cross-analysis across Antigravity session `38daaf48` and Castor telemetry; empirical basis for CLAUDE.md/GEMINI.md §3 dispatch policy.
-- **Outcomes**: Implementation of per-dispatch `reasoning_effort`, 7-day retention, orphan-death events, and `dispatch-scorecard.mjs`.
-
-### 6. [Cross-Session Forensic Audit: vLLM Telemetry & Dispatch Dynamics (2026-09-13)](audits/CROSS_SESSION_VLLM_AND_QWEN_DISPATCH_AUDIT_2026-09-13.md)
-- **Focus**: Parallel workload evaluation across Claude Code (WSL2, 23h Q1 paper revision marathon) and Antigravity IDE (Windows, Castor->Castor purge).
-- **Outcomes**: Extraction of live vLLM telemetry (93.1% prefix cache hit rate, 57% DFlash2 spec acceptance, 3.99 tokens/step speedup), analysis of 45 tasks (3,997 turns, 1,536 tools), classification of good vs. bad prompts, and preservation of telemetry snapshots.
-
-### 7. [WSL Supervisory Forensic Audit: Antigravity Overseeing Claude Code & Qwen on /final (2026-09-13)](audits/WSL_FINAL_SUPERVISORY_SESSION_AUDIT_2026-09-13.md)
-- **Focus**: Deep-dive into WSL Antigravity session `d10f18ad` overseeing Claude Code's 20h revision marathon in `/home/apath/Work/temp/final`.
-- **Outcomes**: Forensic diagnosis of the 93-minute Fig 2 probe loop, wait endpoint HTTP 500 error, Zhipu AI / GLM API 400 PDF poison pill rescue via JSONL surgical sanitization, LaTeX float starvation fixes, and the anti-probe dispatch constraint.
+- [`engine-profiles.md`](engine-profiles.md) — Pluggable serving-engine
+  profiles (`bonsai-max`, `hyperqwen-huge`, generic OpenAI endpoints) and
+  the `CASTOR_ENGINE_TYPE` / `CASTOR_PROFILE` configuration contract.
+- [`llama-cpp.md`](llama-cpp.md) — Managed `llama.cpp` (`llama-server`)
+  startup/shutdown, GGUF models, tool-calling flags, and optional live
+  `#[ignore]`-gated tests.
 
 ---
 
-## Key Architecture References
+## Historical Audit Ledger (`docs/audits/`)
+
+Time-stamped forensic, adversarial, and progress audits. Ordered roughly by
+date. These record what was done and why — they are a reference, not an
+executable contract.
+
+| Report | Focus |
+|---|---|
+| [`AUDIT_2026-09-05.md`](audits/AUDIT_2026-09-05.md) | Full repository & configuration drift audit. |
+| [`PATCHWORK_ADVERSARIAL_AUDIT_2026-09-05.md`](audits/PATCHWORK_ADVERSARIAL_AUDIT_2026-09-05.md) | Adversarial threat modeling of the AST / shell / file-mutation boundary (pre-Rust JS runtime). |
+| [`AUDIT_MANIFEST_2026-09-08.md`](audits/AUDIT_MANIFEST_2026-09-08.md) | Findings manifest for the 2026-09-08 session (divergent protocol files, line-ending defects). |
+| [`REBRAND_AND_ISSUE_AUDIT_2026-09-08.md`](audits/REBRAND_AND_ISSUE_AUDIT_2026-09-08.md) | Rename/rebrand audit and open-issue triage. |
+| [`CROSS_SESSION_VLLM_AND_QWEN_DISPATCH_AUDIT_2026-09-13.md`](audits/CROSS_SESSION_VLLM_AND_QWEN_DISPATCH_AUDIT_2026-09-13.md) | Cross-session vLLM telemetry & dispatch-dynamics forensics. |
+| [`WSL_FINAL_SUPERVISORY_SESSION_AUDIT_2026-09-13.md`](audits/WSL_FINAL_SUPERVISORY_SESSION_AUDIT_2026-09-13.md) | WSL supervisory session audit (probe-loop diagnosis, wait-endpoint forensics). |
+| [`AUDIT_MANIFEST_2026-09-14.md`](audits/AUDIT_MANIFEST_2026-09-14.md) | Findings manifest for the 2026-09-14 session (protocol amendments). |
+| [`QWEN_EVO_AUDIT.md`](audits/QWEN_EVO_AUDIT.md) | Collaborative Evo lineage / peer-review stress analysis. |
+| [`CASTOR_PROGRESS.md`](audits/CASTOR_PROGRESS.md) | Castor implementation progress ledger. |
+| [`AUDIT_2026-09-27_MILESTONE_CLOSEOUT.md`](audits/AUDIT_2026-09-27_MILESTONE_CLOSEOUT.md) | Milestone closeout audit (suite-count sync, protocol lock). |
+| [`qwen-usage-audit-2026-09.md`](audits/qwen-usage-audit-2026-09.md) | Cloud/local dispatch-balancing audit; empirical basis for the `CLAUDE.md`/`GEMINI.md` §3 dispatch policy. |
+
+Raw telemetry captured during the 2026-09-13 cross-session analysis lives in
+[`docs/audits/telemetry/`](audits/telemetry/).
+
+---
+
+## Archive (`docs/archive/`)
+
+Long-form engineering notes superseded by the active specs:
+
+- [`DEVELOPMENT_NOTES_2026.md`](archive/DEVELOPMENT_NOTES_2026.md) —
+  Engineering-decisions and benchmark changelog (largely pre-Rust / JS-runtime).
+- [`marathon-case-study-2026-09.md`](archive/marathon-case-study-2026-09.md) —
+  Single-session revision-marathon case study.
+
+---
+
+## Related References
 
 - **MCP Server Architecture**: [`src/mcp/mod.rs`](../src/mcp/mod.rs) & [`src/main.rs`](../src/main.rs)
-- **Engineering Decisions & Benchmark Changelog**: [`docs/archive/DEVELOPMENT_NOTES_2026.md`](archive/DEVELOPMENT_NOTES_2026.md)
-- **[OLD] SWE-rebench Validation Suite (Early Prototype Runner)**: [`benchmarks/swe-rebench/README.md`](../benchmarks/swe-rebench/README.md)
-- **Upstream vLLM Wedge Repro Report**: [`benchmarks/wedge-repro/RESULTS.md`](../benchmarks/wedge-repro/RESULTS.md)
+- **Canonical Operating Contract**: [`AGENTS.md`](../AGENTS.md)
+- **Benchmark Suites**: [`benchmarks/`](../benchmarks/) (SWE-bench validation, vLLM wedge-repro)
