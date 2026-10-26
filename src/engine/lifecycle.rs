@@ -633,6 +633,8 @@ mod tests {
             min_eviction_detect_tokens: 13056,
             turn_timeout_secs: 600,
             max_turn_reasoning_tokens: 16384,
+            tool_spill_bytes: 16384,
+            workspace_skeleton_prefix: true,
             state_dir: state.root().to_path_buf(),
         }
     }

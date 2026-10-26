@@ -53,6 +53,11 @@ impl FsExecutor {
         Self { policy }
     }
 
+    /// Access the underlying [`SandboxPolicy`] (used by git tools to validate paths).
+    pub fn policy(&self) -> &SandboxPolicy {
+        &self.policy
+    }
+
     /// The primary write root (the workspace), used as the cwd and as the base
     /// for relative-path resolution / relative display.
     fn root(&self) -> &Path {
@@ -441,7 +446,12 @@ impl FsExecutor {
         }
 
         let stdout = String::from_utf8_lossy(&output.stdout);
-        let lines: Vec<&str> = stdout.lines().collect();
+        let mut lines: Vec<&str> = stdout.lines().collect();
+        // Issue #15: multi-threaded `git grep` can emit matches in a
+        // non-deterministic order. Sort the raw lines lexicographically
+        // BEFORE truncation so the first `max_results` matches are stable
+        // across repeated invocations (warm Turn-1 prefix for KV caching).
+        lines.sort();
         let matches: Vec<String> = lines
             .iter()
             .take(max_results)

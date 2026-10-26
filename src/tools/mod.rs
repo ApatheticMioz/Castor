@@ -7,7 +7,9 @@
 pub mod ast;
 pub mod extensions;
 pub mod fs;
+pub mod git;
 pub mod paper;
+pub mod repl;
 pub mod sandbox;
 pub mod shell;
 pub mod web;
@@ -21,6 +23,7 @@ use serde_json::{Value, json};
 use self::extensions::ExtensionBridge;
 use self::fs::FsExecutor;
 use self::paper::PaperClient;
+use self::repl::PythonRepl;
 use self::web::WebClient;
 use crate::engine::ToolSchema;
 use crate::runner::{ToolError, ToolExecutor, ToolOutcome};
@@ -31,6 +34,7 @@ pub struct CompositeExecutor {
     fs: FsExecutor,
     web: WebClient,
     paper: PaperClient,
+    repl: PythonRepl,
     brave_api_key: Option<String>,
     extensions: Option<ExtensionBridge>,
 }
@@ -63,9 +67,10 @@ impl CompositeExecutor {
         let paper = PaperClient::with_credentials(openalex_email, openalex_api_key);
         Ok(Self {
             fs,
-            workspace_root: root,
+            workspace_root: root.clone(),
             web,
             paper,
+            repl: PythonRepl::new(root),
             brave_api_key,
             extensions,
         })
@@ -84,10 +89,19 @@ impl CompositeExecutor {
     }
 
     /// Return the list of all available tool schemas (builtins + extensions).
+    ///
+    /// Issue #15: extension schemas are appended after the builtin schemas.
+    /// Because the extension bridge can freeze its tool set in an order that
+    /// depends on async spawn timing, we sort the extension slice by
+    /// `schema.name` deterministically so the full schema list (and therefore
+    /// the Turn-1 prompt) is byte-for-byte stable across sessions — a warm KV
+    /// prefix that lets 96%+ of the prefix cache hit.
     pub fn tool_schemas(&self) -> Vec<ToolSchema> {
         let mut schemas = builtin_tool_schemas();
         if let Some(ref ext) = self.extensions {
-            schemas.extend(ext.tool_schemas());
+            let mut ext_schemas = ext.tool_schemas();
+            ext_schemas.sort_by(|a, b| a.name.cmp(&b.name));
+            schemas.extend(ext_schemas);
         }
         schemas
     }
@@ -234,6 +248,63 @@ pub fn builtin_tool_schemas() -> Vec<ToolSchema> {
                     "num_results": { "type": "integer", "description": "Number of results to return (default: 3, max: 10)" }
                 },
                 "required": ["query"]
+            }),
+        },
+        ToolSchema {
+            name: "python_repl".to_string(),
+            description: "Evaluate Python code in a persistent in-session REPL scratchpad. The REPL keeps a shared namespace across calls so variables defined in one call are visible in the next. Supports a trailing expression (result auto-printed via repr). Pass reset=true to clear the namespace and start a fresh session.".to_string(),
+            parameters: json!({
+                "type": "object",
+                "properties": {
+                    "code": { "type": "string", "description": "Python code to evaluate. May contain multiple statements; if the final statement is a bare expression, its repr is returned." },
+                    "reset": { "type": "boolean", "description": "If true, discard the current session and start a fresh one before evaluating (default: false)" }
+                },
+                "required": ["code"]
+            }),
+        },
+        ToolSchema {
+            name: "git_status".to_string(),
+            description: "Show a short status of the working tree (git status -sb) in the sandboxed workspace. Optionally scoped to a single path.".to_string(),
+            parameters: json!({
+                "type": "object",
+                "properties": {
+                    "path": { "type": "string", "description": "Optional relative path to limit status to" }
+                }
+            }),
+        },
+        ToolSchema {
+            name: "git_diff".to_string(),
+            description: "Show the diff of changes (git diff). Supports --staged and --stat flags. Optionally scoped to a single path.".to_string(),
+            parameters: json!({
+                "type": "object",
+                "properties": {
+                    "staged": { "type": "boolean", "description": "Show staged changes instead of unstaged (default: false)" },
+                    "stat": { "type": "boolean", "description": "Show summary stats only (default: false)" },
+                    "path": { "type": "string", "description": "Optional relative path to limit diff to" }
+                }
+            }),
+        },
+        ToolSchema {
+            name: "git_log".to_string(),
+            description: "Show recent commit history (git log --oneline). Limit clamped to 1-100 (default 10). Optionally scoped to a path.".to_string(),
+            parameters: json!({
+                "type": "object",
+                "properties": {
+                    "limit": { "type": "integer", "description": "Number of commits to show (default: 10, max: 100)" },
+                    "path": { "type": "string", "description": "Optional relative path to limit log to" }
+                }
+            }),
+        },
+        ToolSchema {
+            name: "git_commit".to_string(),
+            description: "Stage specified paths (git add) and create a commit. Paths are sandbox-validated before staging.".to_string(),
+            parameters: json!({
+                "type": "object",
+                "properties": {
+                    "message": { "type": "string", "description": "Commit message (must not be empty)" },
+                    "paths": { "type": "array", "items": { "type": "string" }, "description": "Optional list of file paths to stage before committing" }
+                },
+                "required": ["message"]
             }),
         },
     ]
@@ -443,6 +514,82 @@ impl ToolExecutor for CompositeExecutor {
                 }
             }
 
+            // Git tools
+            "git_status" => {
+                let path = args.get("path").and_then(|v| v.as_str());
+                let policy = self.fs.policy();
+                match git::git_status(policy, path).await {
+                    Ok(text) => Ok(ToolOutcome { text }),
+                    Err(e) => Ok(ToolOutcome {
+                        text: format!("Error: {e}"),
+                    }),
+                }
+            }
+
+            "git_diff" => {
+                let staged = args
+                    .get("staged")
+                    .and_then(|v| v.as_bool())
+                    .unwrap_or(false);
+                let stat = args.get("stat").and_then(|v| v.as_bool()).unwrap_or(false);
+                let path = args.get("path").and_then(|v| v.as_str());
+                let policy = self.fs.policy();
+                match git::git_diff(policy, staged, stat, path).await {
+                    Ok(text) => Ok(ToolOutcome { text }),
+                    Err(e) => Ok(ToolOutcome {
+                        text: format!("Error: {e}"),
+                    }),
+                }
+            }
+
+            "git_log" => {
+                let limit = args.get("limit").and_then(|v| v.as_u64()).map(|l| l as u32);
+                let path = args.get("path").and_then(|v| v.as_str());
+                let policy = self.fs.policy();
+                match git::git_log(policy, limit, path).await {
+                    Ok(text) => Ok(ToolOutcome { text }),
+                    Err(e) => Ok(ToolOutcome {
+                        text: format!("Error: {e}"),
+                    }),
+                }
+            }
+
+            "git_commit" => {
+                let message = args.get("message").and_then(|v| v.as_str()).unwrap_or("");
+                let paths: Option<Vec<String>> =
+                    args.get("paths").and_then(|v| v.as_array()).map(|a| {
+                        a.iter()
+                            .filter_map(|v| v.as_str().map(|s| s.to_string()))
+                            .collect()
+                    });
+                let policy = self.fs.policy();
+                match git::git_commit(policy, message, paths.as_deref()).await {
+                    Ok(text) => Ok(ToolOutcome { text }),
+                    Err(e) => Ok(ToolOutcome {
+                        text: format!("Error: {e}"),
+                    }),
+                }
+            }
+
+            // In-session Python REPL
+            "python_repl" => {
+                let code = args.get("code").and_then(|v| v.as_str()).unwrap_or("");
+                let reset = args.get("reset").and_then(|v| v.as_bool()).unwrap_or(false);
+                match self.repl.eval(code, reset).await {
+                    Ok(text) => {
+                        let text = if text.is_empty() {
+                            "(no output)".to_string()
+                        } else {
+                            text
+                        };
+                        Ok(ToolOutcome { text })
+                    }
+                    Err(e) => Ok(ToolOutcome {
+                        text: format!("Error: {e}"),
+                    }),
+                }
+            }
+
             // Dynamic extensions
             other => {
                 if let Some(ref ext) = self.extensions {
@@ -488,7 +635,7 @@ mod tests {
 
         // Check schemas list
         let schemas = executor.tool_schemas();
-        assert_eq!(schemas.len(), 11);
+        assert_eq!(schemas.len(), 16);
         let names: Vec<&str> = schemas.iter().map(|s| s.name.as_str()).collect();
         assert!(names.contains(&"read_file"));
         assert!(names.contains(&"bash"));

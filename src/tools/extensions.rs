@@ -572,4 +572,85 @@ for line in sys.stdin:
         let res = ExtensionBridge::spawn(&["definitely_not_a_real_cmd_xyz".to_string()]).await;
         assert!(res.is_err(), "expected an error for a bad command");
     }
+
+    /// Integration test: spawns the real `scripts/motion/motion_mcp_server.py`
+    /// via ExtensionBridge, verifies both tools are discovered with correct
+    /// schemas, then calls `score_frames` on a temp fixture to assert the
+    /// visual-fitness score.
+    #[tokio::test]
+    async fn motion_mcp_server_tools_discovered_and_scored() {
+        let script = std::path::Path::new("scripts/motion/motion_mcp_server.py");
+        let py = if cfg!(windows) { "python" } else { "python3" };
+        let cmd = format!("{} {}", py, script.display());
+
+        let bridge = ExtensionBridge::spawn(&[cmd]).await.unwrap();
+        let schemas = bridge.tool_schemas();
+
+        // Both tools must be discovered under the derived server name.
+        let render = schemas
+            .iter()
+            .find(|s| s.name.ends_with("__render_scene"))
+            .expect("expected a namespaced render_scene tool");
+        let score = schemas
+            .iter()
+            .find(|s| s.name.ends_with("__score_frames"))
+            .expect("expected a namespaced score_frames tool");
+
+        // Schema sanity: parameters must be a JSON object.
+        assert_eq!(render.parameters["type"], "object");
+        assert_eq!(score.parameters["type"], "object");
+        assert!(
+            score.parameters["properties"]["frame_dir"]["type"] == "string"
+                || score.parameters["properties"]["frame_files"].is_object(),
+            "score_frames schema should have frame_dir or frame_files"
+        );
+
+        // Create a temp frame fixture with non-trivial (deterministic) bytes.
+        let dir = std::env::temp_dir().join(format!(
+            "castor_motion_fixture_{}_{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+
+        // 256 "pixels" of 3 bytes each = 768 bytes of deterministic pattern.
+        let mut frame_data = Vec::new();
+        for i in 0..256u32 {
+            frame_data.push((i * 7 + 13) as u8);
+            frame_data.push((i * 11 + 29) as u8);
+            frame_data.push((i * 3 + 41) as u8);
+        }
+        std::fs::write(dir.join("frame_0000.png"), &frame_data).unwrap();
+
+        // Call score_frames on the fixture.
+        let full_score_name = score.name.clone();
+        let args_json = serde_json::json!({"frame_dir": dir.display().to_string()}).to_string();
+        let result = bridge.call(&full_score_name, &args_json).await.unwrap();
+
+        let v: serde_json::Value =
+            serde_json::from_str(&result).expect("score_frames result should be JSON");
+        assert_eq!(
+            v["ok"], true,
+            "score_frames should report ok, got: {result}"
+        );
+        assert_eq!(v["nan_free"], true, "expected nan_free=true, got: {result}");
+
+        let fitness = v["fitness"].as_f64().unwrap_or(0.0);
+        assert!(
+            fitness > 0.0 && fitness <= 1.0,
+            "fitness should be in (0.0, 1.0], got: {fitness}"
+        );
+
+        let entropy = v["entropy"].as_f64().unwrap_or(0.0);
+        assert!(
+            entropy > 0.0,
+            "entropy should be > 0 for non-blank frames, got: {entropy}"
+        );
+
+        bridge.shutdown_all().await;
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 }

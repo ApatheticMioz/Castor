@@ -99,6 +99,16 @@ pub struct Config {
     /// `tool_calls`). Default 16384. `0` disables the token-budget trigger.
     /// Env: `CASTOR_MAX_TURN_REASONING_TOKENS`.
     pub max_turn_reasoning_tokens: u32,
+    /// Maximum bytes of a single tool output before it is spilled to disk
+    /// (keeping only a head/tail preview in the conversation). Default 16384.
+    /// Env: `CASTOR_TOOL_SPILL_BYTES`.
+    pub tool_spill_bytes: usize,
+    /// When `true`, a compact `[Workspace Skeleton]` block listing the
+    /// top-level workspace entries (sorted, capped) is prepended to the
+    /// system prompt so every session in the same workspace shares a warm
+    /// Turn-1 prefix (KV prefix caching). Default `true`.
+    /// Env: `CASTOR_WORKSPACE_SKELETON` (`0` / `false` to disable).
+    pub workspace_skeleton_prefix: bool,
     pub state_dir: PathBuf,
 }
 
@@ -139,6 +149,8 @@ pub struct Sources {
     pub min_eviction_detect_tokens: Source,
     pub turn_timeout_secs: Source,
     pub max_turn_reasoning_tokens: Source,
+    pub tool_spill_bytes: Source,
+    pub workspace_skeleton_prefix: Source,
     pub state_dir: Source,
 }
 
@@ -470,6 +482,20 @@ pub fn load_with(get_env: impl Fn(&str) -> Option<String>) -> Result<LoadedConfi
             _ => Ok(None),
         }
     };
+    let env_usize = |key: &str| -> Result<Option<usize>, ConfigError> {
+        match get_env(key) {
+            Some(v) if !v.is_empty() => {
+                v.parse::<usize>()
+                    .map(Some)
+                    .map_err(|e| ConfigError::InvalidValue {
+                        key: key.to_string(),
+                        value: v,
+                        reason: e.to_string(),
+                    })
+            }
+            _ => Ok(None),
+        }
+    };
     let env_f64 = |key: &str| -> Result<Option<f64>, ConfigError> {
         match get_env(key) {
             Some(v) if !v.is_empty() => {
@@ -603,6 +629,12 @@ pub fn load_with(get_env: impl Fn(&str) -> Option<String>) -> Result<LoadedConfi
     let (max_turn_reasoning_tokens, src_max_turn_reasoning_tokens) =
         pick_u32(env_u32("CASTOR_MAX_TURN_REASONING_TOKENS")?, None, 16384);
 
+    // Issue #15: KV prefix-caching efficiency knobs (env-only, no config.json keys).
+    let (tool_spill_bytes, src_tool_spill_bytes) =
+        pick_usize(env_usize("CASTOR_TOOL_SPILL_BYTES")?, None, 16384);
+    let (workspace_skeleton_prefix, src_workspace_skeleton_prefix) =
+        pick_bool(env_bool("CASTOR_WORKSPACE_SKELETON")?, true);
+
     let (ports, (src_port_engine, src_port_status, src_port_proxy)) = {
         let (engine, src_port_engine) =
             pick_u16(env_port_engine, file_ports.and_then(|p| p.engine), 18020);
@@ -646,6 +678,8 @@ pub fn load_with(get_env: impl Fn(&str) -> Option<String>) -> Result<LoadedConfi
             min_eviction_detect_tokens,
             turn_timeout_secs,
             max_turn_reasoning_tokens,
+            tool_spill_bytes,
+            workspace_skeleton_prefix,
             state_dir,
         },
         sources: Sources {
@@ -675,6 +709,8 @@ pub fn load_with(get_env: impl Fn(&str) -> Option<String>) -> Result<LoadedConfi
             min_eviction_detect_tokens: src_min_eviction_detect_tokens,
             turn_timeout_secs: src_turn_timeout_secs,
             max_turn_reasoning_tokens: src_max_turn_reasoning_tokens,
+            tool_spill_bytes: src_tool_spill_bytes,
+            workspace_skeleton_prefix: src_workspace_skeleton_prefix,
             state_dir: state_dir_src,
         },
         profile_name,
@@ -883,6 +919,18 @@ pub fn format_loaded(loaded: &LoadedConfig) -> String {
         "max_turn_reasoning_tokens",
         &c.max_turn_reasoning_tokens.to_string(),
         s.max_turn_reasoning_tokens,
+    );
+    row(
+        &mut out,
+        "tool_spill_bytes",
+        &c.tool_spill_bytes.to_string(),
+        s.tool_spill_bytes,
+    );
+    row(
+        &mut out,
+        "workspace_skeleton_prefix",
+        &c.workspace_skeleton_prefix.to_string(),
+        s.workspace_skeleton_prefix,
     );
     row(
         &mut out,

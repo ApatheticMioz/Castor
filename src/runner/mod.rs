@@ -353,6 +353,10 @@ pub struct SessionOptions {
     /// stall and retried once at `"low"` reasoning effort (Issue #27 Part 2).
     /// `None` or `0` disables the token-budget trigger.
     pub max_turn_reasoning_tokens: Option<u32>,
+    /// Issue #15: maximum bytes of a single tool output before it is spilled
+    /// to disk (keeping only a head/tail preview in the conversation).
+    /// `None` means "use the default" ([`SPILL_THRESHOLD_BYTES`] = 16384).
+    pub tool_spill_bytes: Option<usize>,
 }
 
 impl SessionOptions {
@@ -369,6 +373,7 @@ impl SessionOptions {
             lease_context: None,
             turn_timeout_secs: None,
             max_turn_reasoning_tokens: None,
+            tool_spill_bytes: None,
         }
     }
 
@@ -385,6 +390,7 @@ impl SessionOptions {
             lease_context: None,
             turn_timeout_secs: None,
             max_turn_reasoning_tokens: None,
+            tool_spill_bytes: None,
         }
     }
 
@@ -493,18 +499,30 @@ fn write_salvage_report(
     fs::write(path, report)
 }
 
-/// Maximum tool result bytes before overflowing to disk (32 KB observation limit).
-pub const TOOL_SPILL_BYTES: usize = 32 * 1024;
+/// Default maximum tool result bytes before overflowing to disk.
+///
+/// Issue #15: this is the fallback threshold used when
+/// [`SessionOptions::tool_spill_bytes`] is `None`. It is intentionally
+/// conservative (16 KiB) so the default conversation stays small — keeping the
+/// Turn-1 prefix byte-for-byte stable across sessions in the same workspace
+/// (a warm KV prefix that lets 96%+ of the prefix cache hit). Operators can
+/// raise it via `CASTOR_TOOL_SPILL_BYTES`.
+pub const SPILL_THRESHOLD_BYTES: usize = 16384;
 
 /// Spill oversized tool outputs to `<scratch>/.scratch/tool_out_<id>.txt` and return
 /// a concise pointer block.
+///
+/// `threshold` is the byte ceiling that triggers a spill; `None` falls back to
+/// [`SPILL_THRESHOLD_BYTES`].
 pub fn spill_tool_output(
     output: &str,
     tool_call_id: &str,
     scratch_root: Option<&Path>,
+    threshold: Option<usize>,
 ) -> (String, Option<(usize, PathBuf)>) {
+    let threshold = threshold.unwrap_or(SPILL_THRESHOLD_BYTES);
     let bytes = output.len();
-    if bytes <= TOOL_SPILL_BYTES {
+    if bytes <= threshold {
         return (output.to_string(), None);
     }
 
@@ -546,7 +564,7 @@ pub fn spill_tool_output(
                 .collect();
             let elided = bytes.saturating_sub(head.len() + tail.len());
             let pointer = format!(
-                "[Tool output spilled to disk: {bytes} bytes > {TOOL_SPILL_BYTES}-byte threshold. \
+                "[Tool output spilled to disk: {bytes} bytes > {threshold}-byte threshold. \
 Full payload saved to: {}]\n\n\
 --- Head preview (first 1024 bytes) ---\n{head}\n\
 ... [{elided} bytes elided] ...\n\
@@ -567,6 +585,61 @@ Hint: use read_file with start_line/end_line or search_code to inspect specific 
             (truncated, None)
         }
     }
+}
+
+/// Maximum number of top-level entries emitted in a [`build_workspace_skeleton`]
+/// block. Capping keeps the skeleton a tiny, stable prefix even for huge
+/// workspaces.
+const WORKSPACE_SKELETON_MAX_ENTRIES: usize = 40;
+
+/// Directories that never help a Turn-1 orientation and whose presence would
+/// only make the skeleton depend on build state — always excluded so the block
+/// stays byte-for-byte stable for a given source tree.
+const WORKSPACE_SKELETON_IGNORED: &[&str] = &[".git", "target", "node_modules", ".scratch"];
+
+/// Issue #15: build a compact, deterministic `[Workspace Skeleton]` block that
+/// lists the top-level entry names of `workspace` in sorted lexicographical
+/// order.
+///
+/// The block is intentionally tiny and *pure* (a function of the workspace's
+/// top-level names alone — no timestamps, no mtimes, no sizes) so that every
+/// session started in the same workspace prepends an identical prefix to its
+/// system prompt. A byte-identical prefix is what lets 96%+ of the KV cache
+/// hit on Turn 1 across concurrent sessions.
+///
+/// Rules:
+/// - Top-level entries only (no recursion).
+/// - `.git` / `target` / `node_modules` / `.scratch` are ignored (build state).
+/// - Sorted lexicographically by name, so the order is independent of the OS
+///   directory-enumeration order.
+/// - Capped at [`WORKSPACE_SKELETON_MAX_ENTRIES`] entries; a trailing
+///   `(N more…)` marker is emitted when the list is truncated so the model can
+///   still learn the workspace is large.
+/// - If the directory cannot be read, an empty skeleton (header only) is
+///   returned so the prefix is still well-defined (deterministic, never a
+///   crash) and still identical for the same workspace.
+pub fn build_workspace_skeleton(workspace: &std::path::Path) -> String {
+    let mut out = String::from("[Workspace Skeleton]\n");
+    let mut names: Vec<String> = match std::fs::read_dir(workspace) {
+        Ok(iter) => iter
+            .filter_map(|e| e.ok())
+            .map(|e| e.file_name().to_string_lossy().into_owned())
+            .filter(|n| !WORKSPACE_SKELETON_IGNORED.contains(&n.as_str()))
+            .collect(),
+        Err(_) => return out,
+    };
+    names.sort();
+    names.dedup();
+    let total = names.len();
+    let shown = names.iter().take(WORKSPACE_SKELETON_MAX_ENTRIES);
+    for n in shown {
+        out.push_str(&format!("- {n}\n"));
+    }
+    if total > WORKSPACE_SKELETON_MAX_ENTRIES {
+        let more = total - WORKSPACE_SKELETON_MAX_ENTRIES;
+        out.push_str(&format!("({more} more…)\n"));
+    }
+    out
 }
 
 /// The on-disk shape of a single persisted history message.
@@ -1109,6 +1182,7 @@ pub async fn run_session(
                             tool_call_id: None,
                         });
                         let scratch_root = options.and_then(|o| o.scratch_root());
+                        let spill_threshold = options.and_then(|o| o.tool_spill_bytes);
                         for tc in &cont.tool_calls {
                             let outcome = match executor.execute(&tc.name, &tc.arguments).await {
                                 Ok(o) => o,
@@ -1117,8 +1191,12 @@ pub async fn run_session(
                                 },
                             };
                             tool_activity = true;
-                            let (tool_content, spilled) =
-                                spill_tool_output(&outcome.text, &tc.id, scratch_root.as_deref());
+                            let (tool_content, spilled) = spill_tool_output(
+                                &outcome.text,
+                                &tc.id,
+                                scratch_root.as_deref(),
+                                spill_threshold,
+                            );
                             if let Some((bytes, path)) = spilled {
                                 let _ = logger.append(serde_json::json!({
                                     "type": "tool_output_spilled",
@@ -1198,10 +1276,12 @@ pub async fn run_session(
                                     },
                                 };
                                 let scratch_root = options.and_then(|o| o.scratch_root());
+                                let spill_threshold = options.and_then(|o| o.tool_spill_bytes);
                                 let (tool_content, spilled) = spill_tool_output(
                                     &outcome.text,
                                     &tc.id,
                                     scratch_root.as_deref(),
+                                    spill_threshold,
                                 );
                                 if let Some((bytes, path)) = spilled {
                                     let _ = logger.append(serde_json::json!({
@@ -1394,8 +1474,13 @@ pub async fn run_session(
                 };
 
             let scratch_root = options.and_then(|o| o.scratch_root());
-            let (tool_content, spilled) =
-                spill_tool_output(&raw_tool_content, &tc.id, scratch_root.as_deref());
+            let spill_threshold = options.and_then(|o| o.tool_spill_bytes);
+            let (tool_content, spilled) = spill_tool_output(
+                &raw_tool_content,
+                &tc.id,
+                scratch_root.as_deref(),
+                spill_threshold,
+            );
             if let Some((bytes, path)) = spilled {
                 let _ = logger.append(serde_json::json!({
                     "type": "tool_output_spilled",
@@ -2670,7 +2755,7 @@ mod tests {
     #[test]
     fn tool_output_spill_below_threshold_returns_unchanged() {
         let small = "a".repeat(100);
-        let (output, spilled) = spill_tool_output(&small, "c1", None);
+        let (output, spilled) = spill_tool_output(&small, "c1", None, None);
         assert_eq!(output, small);
         assert!(spilled.is_none());
     }
@@ -2678,8 +2763,8 @@ mod tests {
     #[test]
     fn tool_output_spill_above_threshold_spills_to_scratch() {
         let state = tmp_state();
-        let large = "x".repeat(TOOL_SPILL_BYTES + 5000);
-        let (pointer, spilled) = spill_tool_output(&large, "call_99", Some(state.root()));
+        let large = "x".repeat(SPILL_THRESHOLD_BYTES + 5000);
+        let (pointer, spilled) = spill_tool_output(&large, "call_99", Some(state.root()), None);
         assert!(spilled.is_some());
         let (bytes, path) = spilled.unwrap();
         assert_eq!(bytes, large.len());
@@ -2688,6 +2773,107 @@ mod tests {
         assert!(pointer.contains("Tool output spilled to disk"));
         assert!(pointer.contains("--- Head preview"));
         assert!(pointer.contains("--- Tail preview"));
+        let _ = std::fs::remove_dir_all(state.root());
+    }
+
+    // --- Issue #15: workspace skeleton & custom spill threshold -----------
+
+    #[test]
+    fn build_workspace_skeleton_is_deterministic_sorted_and_excludes_build_state() {
+        let dir = std::env::temp_dir().join(format!(
+            "castor_skel_{}_{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        // Deliberately create entries in a non-sorted order, including the
+        // ignored build-state dirs.
+        for name in [
+            "zzz.txt",
+            "src",
+            "target",
+            "node_modules",
+            ".git",
+            ".scratch",
+            "Makefile",
+            "Cargo.toml",
+            "aaa.txt",
+        ] {
+            let p = dir.join(name);
+            if name == "src" {
+                std::fs::create_dir_all(&p).unwrap();
+            } else {
+                std::fs::write(&p, "x").unwrap();
+            }
+        }
+
+        let a = build_workspace_skeleton(&dir);
+        let b = build_workspace_skeleton(&dir);
+        // Deterministic: two calls over the same workspace yield identical bytes.
+        assert_eq!(a, b);
+        // Header present.
+        assert!(a.starts_with("[Workspace Skeleton]\n"));
+        // Ignored build-state dirs are excluded.
+        for ignored in [".git", "target", "node_modules", ".scratch"] {
+            assert!(
+                !a.contains(&format!("- {ignored}\n")),
+                "skeleton must not list ignored entry `{ignored}`:\n{a}"
+            );
+        }
+        // Present entries are listed and in sorted lexicographical order.
+        let lines: Vec<String> = a
+            .lines()
+            .skip(1) // drop the header
+            .filter(|l| l.starts_with("- "))
+            .map(str::to_owned)
+            .collect();
+        // The exact expected sorted set of surviving (non-ignored) entries.
+        let mut expected = ["Cargo.toml", "Makefile", "aaa.txt", "src", "zzz.txt"];
+        expected.sort();
+        let expected_sorted: Vec<String> = expected.iter().map(|n| format!("- {n}")).collect();
+        assert_eq!(
+            lines, expected_sorted,
+            "entries must be sorted lexicographically:\n{a}"
+        );
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn spill_tool_output_respects_custom_threshold() {
+        let state = tmp_state();
+        // A payload that exceeds a *custom* low threshold but is well below the
+        // default 16 KiB — proves the caller's `threshold` overrides the default.
+        let custom = 100usize;
+        let payload = "y".repeat(300);
+        assert!(payload.len() > custom && payload.len() < SPILL_THRESHOLD_BYTES);
+
+        let (pointer, spilled) =
+            spill_tool_output(&payload, "custom_1", Some(state.root()), Some(custom));
+        assert!(
+            spilled.is_some(),
+            "a custom threshold below the payload length must trigger a spill"
+        );
+        let (bytes, path) = spilled.unwrap();
+        assert_eq!(bytes, payload.len());
+        assert!(path.exists());
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), payload);
+        assert!(pointer.contains("Tool output spilled to disk"));
+        assert!(pointer.contains(&format!("> {custom}-byte threshold")));
+
+        // Same payload, but a threshold above its length must NOT spill.
+        let (output, spilled2) = spill_tool_output(
+            &payload,
+            "custom_2",
+            Some(state.root()),
+            Some(payload.len()),
+        );
+        assert_eq!(output, payload);
+        assert!(spilled2.is_none());
+
         let _ = std::fs::remove_dir_all(state.root());
     }
 

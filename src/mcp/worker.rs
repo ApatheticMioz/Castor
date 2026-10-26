@@ -245,7 +245,7 @@ pub async fn run_job_with_engine(
     let skills_index = skills::render_index(&active_skills);
 
     // 6. Build system prompt.
-    let system_prompt = format!(
+    let mut system_prompt = format!(
         "You are Castor, an autonomous senior peer programmer pairing with the Lead Architect. Working directory: {}\n\n\
 Peer Programming Invariants:\n\
 - Senior Peer Mandate: You are an autonomous senior peer engineer pairing with the Lead Architect, \
@@ -261,6 +261,14 @@ Secondary docs and markdown notes are reference ledgers. Do not write historical
         workspace_root.display(),
         skills_index
     );
+    // Issue #15: when enabled, prepend a compact, deterministic `[Workspace
+    // Skeleton]` block (a pure function of the workspace's top-level names)
+    // so the Turn-1 prefix is byte-for-byte stable across sessions in the same
+    // workspace — a warm KV prefix that lets 96%+ of the prefix cache hit.
+    if config.workspace_skeleton_prefix {
+        let skeleton = runner::build_workspace_skeleton(std::path::Path::new(&spec.cwd));
+        system_prompt = format!("{skeleton}\n{system_prompt}");
+    }
 
     // 7. Initialize optional extensions and composite tool executor.
     let ext_bridge = if let Some(ref exts) = spec.extensions {
@@ -308,6 +316,10 @@ Secondary docs and markdown notes are reference ledgers. Do not write historical
     // 0 when unset → the session-history watermark is disabled (zero behavior
     // change for callers that don't configure a context budget).
     options.max_context = max_ctx as usize;
+    // Issue #15: thread the operator-configured spill ceiling so oversized
+    // tool outputs are spooled to the scratch dir (keeping the in-conversation
+    // footprint bounded and the Turn-1 prefix stable).
+    options.tool_spill_bytes = Some(config.tool_spill_bytes);
     options = options.with_lease_context(runner::LeaseYieldContext {
         sem: std::sync::Arc::new(sem.clone()),
         lease: shared_lease.clone(),
