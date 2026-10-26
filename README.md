@@ -334,7 +334,7 @@ Castor/
     evals/                  # Offline replay harness (fixture, replay, runner)
     evo/                    # Evolutionary optimizer & lineage DAG
   evals/                    # Tier A offline replay, golden test tasks, DGI datasets
-  docs/                     # Active specs + historical audits/
+  docs/                     # Active specifications (engine profiles, llama.cpp guide)
 ```
 
 ---

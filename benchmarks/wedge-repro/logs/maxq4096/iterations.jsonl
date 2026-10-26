@@ -1,4 +1,0 @@
-{"iter": 1, "t1_tokens": 24000, "residue": 64, "t1_ok": false, "t2_ok": false, "t3_ok": false, "t1_s": null, "t2_s": null, "t1_gen_tps": null, "t1_err": "timed out", "canary_ok": false, "wedge": true}
-{"iter": 2, "t1_tokens": 24317, "residue": 125, "t1_ok": false, "t2_ok": false, "t3_ok": false, "t1_s": null, "t2_s": null, "t1_gen_tps": null, "t1_err": "timed out", "canary_ok": false, "wedge": true}
-{"iter": 3, "t1_tokens": 24634, "residue": 58, "t1_ok": false, "t2_ok": false, "t3_ok": false, "t1_s": null, "t2_s": null, "t1_gen_tps": null, "t1_err": "timed out", "canary_ok": true, "wedge": false, "t1_timeout_engine_healthy": true}
-{"iter": 4, "t1_tokens": 24951, "residue": 119, "t1_ok": false, "t2_ok": false, "t3_ok": false, "t1_s": null, "t2_s": null, "t1_gen_tps": null, "t1_err": "timed out", "canary_ok": false, "wedge": true}
