@@ -1112,22 +1112,26 @@ fn bar_chart(count: u64, max: u64, width: usize) -> String {
     if max == 0 || count == 0 {
         return " ".repeat(width);
     }
-    let ratio = count as f64 / max as f64;
-    let full = (ratio * width as f64).floor() as usize;
+    let ratio = (count as f64 / max as f64).min(1.0);
+    let units = ratio * width as f64;
+    let full = units.floor() as usize;
     if full >= width {
         return "█".repeat(width);
     }
-    let remainder = (ratio * width as f64) - full as f64;
-    let frac = if remainder >= 0.75 {
-        "▊"
-    } else if remainder >= 0.5 {
-        "▌"
-    } else if remainder >= 0.25 {
-        "▎"
-    } else if full == 0 {
-        "▏"
+    // Eight-step fractional head cell, driven by `(remainder * 8.0).round()`:
+    // ▏ ▎ ▍ ▌ ▋ ▊ ▉ █. A sliver is only emitted when there is a genuine
+    // fractional remainder (or a sub-cell count); an exact fill stays whole.
+    const BLOCKS: &[char] = &['▏', '▎', '▍', '▌', '▋', '▊', '▉', '█'];
+    let remainder = units - full as f64;
+    let mut level = (remainder * 8.0).round() as usize;
+    if level == 0 && (remainder > 0.0 || full == 0) {
+        level = 1;
+    }
+    let level = level.min(8);
+    let frac = if level == 0 {
+        String::new()
     } else {
-        ""
+        BLOCKS[level - 1].to_string()
     };
     let bar_len = full + if frac.is_empty() { 0 } else { 1 };
     let empty = width.saturating_sub(bar_len);
@@ -1213,11 +1217,13 @@ pub fn format_stats_card_styled(stats: &Stats, color: bool) -> String {
 
     out.push_str(&format!("{}ACTIVITY & RUNTIME{}\n", p.bold, p.reset));
     out.push_str(&format!(
-        "  Turns                  {:>10}\n",
+        "  {:<22} {:>14}\n",
+        "Turns",
         fmt_grouped(stats.total_turns)
     ));
     out.push_str(&format!(
-        "  Sessions               {:>10}\n",
+        "  {:<22} {:>14}\n",
+        "Sessions",
         fmt_grouped(stats.total_sessions)
     ));
 
@@ -1245,7 +1251,8 @@ pub fn format_stats_card_styled(stats: &Stats, color: bool) -> String {
         }
         let detail_str = format!(" ({})", details.join(", "));
         out.push_str(&format!(
-            "  Tasks                  {:>10}  {}{:.1}% success{}{}\n",
+            "  {:<22} {:>14}  {}{:.1}% success{}{}\n",
+            "Tasks",
             fmt_grouped(total_tasks),
             p.dim,
             ok_rate,
@@ -1253,11 +1260,24 @@ pub fn format_stats_card_styled(stats: &Stats, color: bool) -> String {
             p.reset
         ));
     } else {
-        out.push_str("  Tasks                           0\n");
+        out.push_str(&format!(
+            "  {:<22} {:>14}\n",
+            "Tasks",
+            "0"
+        ));
+    }
+
+    if stats.inference_compute_ms > 0 {
+        out.push_str(&format!(
+            "  {:<22} {:>14}  {}GPU compute (prefill + decode){}\n",
+            "Inference Compute",
+            fmt_duration_compact(stats.inference_compute_ms),
+            p.dim,
+            p.reset
+        ));
     }
 
     if stats.total_duration_ms > 0 {
-        let hours = stats.total_duration_ms as f64 / 3_600_000.0;
         let avg_str = stats
             .avg_duration_ms
             .map(|ms| {
@@ -1270,14 +1290,17 @@ pub fn format_stats_card_styled(stats: &Stats, color: bool) -> String {
             })
             .unwrap_or_default();
         out.push_str(&format!(
-            "  Active Compute         {:>9.2}h{}\n",
-            hours, avg_str
+            "  {:<22} {:>14}{}\n",
+            "Session Wall-Clock",
+            fmt_duration_compact(stats.total_duration_ms),
+            avg_str
         ));
     }
 
     if stats.total_task_execution_ms > 0 {
         out.push_str(&format!(
-            "  Task Execution Time    {:>16}\n",
+            "  {:<22} {:>14}\n",
+            "Task Execution Time",
             fmt_duration_compact(stats.total_task_execution_ms)
         ));
     }
@@ -1293,7 +1316,8 @@ pub fn format_stats_card_styled(stats: &Stats, color: bool) -> String {
             String::new()
         };
         out.push_str(&format!(
-            "  Tool Calls             {:>10}  {}{:.1}% success{}{}\n",
+            "  {:<22} {:>14}  {}{:.1}% success{}{}\n",
+            "Tool Calls",
             fmt_grouped(stats.total_tool_calls),
             p.dim,
             ok_rate,
@@ -1301,7 +1325,11 @@ pub fn format_stats_card_styled(stats: &Stats, color: bool) -> String {
             p.reset
         ));
     } else {
-        out.push_str("  Tool Calls                      0\n");
+        out.push_str(&format!(
+            "  {:<22} {:>14}\n",
+            "Tool Calls",
+            "0"
+        ));
     }
     out.push('\n');
 
@@ -1309,16 +1337,22 @@ pub fn format_stats_card_styled(stats: &Stats, color: bool) -> String {
         out.push_str(&format!("{}SERVING ENGINE VELOCITY{}\n", p.bold, p.reset));
         if let Some(tps) = stats.avg_decode_tps {
             out.push_str(&format!(
-                "  Decode Speed           {:>8.1} t/s  {}sustained generation (excl. prefill){}\n",
-                tps, p.dim, p.reset
+                "  {:<22} {:>14}  {}sustained generation (excl. prefill){}\n",
+                "Decode Speed",
+                format!("{:.1} t/s", tps),
+                p.dim,
+                p.reset
             ));
         }
         if let Some(peak) = stats.peak_decode_tps
             && stats.avg_decode_tps.is_none_or(|avg| peak > avg)
         {
             out.push_str(&format!(
-                "  Speculative Burst      {:>8.1} t/s  {}peak DFlash2 burst{}\n",
-                peak, p.dim, p.reset
+                "  {:<22} {:>14}  {}peak DFlash2 burst{}\n",
+                "Speculative Burst",
+                format!("{:.1} t/s", peak),
+                p.dim,
+                p.reset
             ));
         }
         if let Some(prefill) = stats.effective_prefill_tps {
@@ -1333,8 +1367,9 @@ pub fn format_stats_card_styled(stats: &Stats, color: bool) -> String {
                 })
                 .unwrap_or_default();
             out.push_str(&format!(
-                "  Effective Prefill      {:>8} t/s  {}prompt ingestion{}{}\n",
-                fmt_scaled(prefill as u64),
+                "  {:<22} {:>14}  {}prompt ingestion{}{}\n",
+                "Effective Prefill",
+                format!("{} t/s", fmt_scaled(prefill as u64)),
                 p.dim,
                 ttft_ctx,
                 p.reset
@@ -1346,11 +1381,13 @@ pub fn format_stats_card_styled(stats: &Stats, color: bool) -> String {
     out.push_str(&format!("{}TOKEN EFFICIENCY & VOLUME{}\n", p.bold, p.reset));
     let total_tokens = stats.total_prompt_tokens + stats.total_completion_tokens;
     out.push_str(&format!(
-        "  Total Processed        {:>10}\n",
+        "  {:<22} {:>14}\n",
+        "Total Processed",
         fmt_scaled(total_tokens)
     ));
     out.push_str(&format!(
-        "  Prompt Tokens          {:>10}\n",
+        "  {:<22} {:>14}\n",
+        "Prompt Tokens",
         fmt_scaled(stats.total_prompt_tokens)
     ));
     if stats.total_cached_tokens > 0 {
@@ -1361,7 +1398,8 @@ pub fn format_stats_card_styled(stats: &Stats, color: bool) -> String {
         };
         let hit_rate = (stats.total_cached_tokens as f64 / denom as f64) * 100.0;
         out.push_str(&format!(
-            "  Cached Tokens          {:>10}  {}{:.1}% cache hit{}\n",
+            "  {:<22} {:>14}  {}{:.1}% cache hit{}\n",
+            "Cached Tokens",
             fmt_scaled(stats.total_cached_tokens),
             p.dim,
             hit_rate,
@@ -1369,7 +1407,8 @@ pub fn format_stats_card_styled(stats: &Stats, color: bool) -> String {
         ));
     }
     out.push_str(&format!(
-        "  Output Tokens          {:>10}\n",
+        "  {:<22} {:>14}\n",
+        "Output Tokens",
         fmt_scaled(stats.total_completion_tokens)
     ));
     if stats.total_reasoning_tokens > 0 {
@@ -1378,7 +1417,8 @@ pub fn format_stats_card_styled(stats: &Stats, color: bool) -> String {
             * 100.0;
         let ratio = stats.reasoning_ratio.unwrap_or(r_pct / 100.0);
         out.push_str(&format!(
-            "  Reasoning Tokens       {:>10}  {}{:.1}% of generation ({:.2}x deliberation){}\n",
+            "  {:<22} {:>14}  {}{:.1}% of generation ({:.2}x deliberation){}\n",
+            "Reasoning Tokens",
             fmt_scaled(stats.total_reasoning_tokens),
             p.dim,
             r_pct,
@@ -1392,7 +1432,8 @@ pub fn format_stats_card_styled(stats: &Stats, color: bool) -> String {
         out.push_str(&format!("{}EXTREMES (HALL OF FAME){}\n", p.bold, p.reset));
         if let Some(v) = ext.max_prompt_tokens {
             out.push_str(&format!(
-                "  Max Prompt (single)    {:>10}  {}tokens in one context{}\n",
+                "  {:<22} {:>14}  {}tokens in one context{}\n",
+                "Max Prompt (single)",
                 fmt_scaled(v),
                 p.dim,
                 p.reset
@@ -1400,7 +1441,8 @@ pub fn format_stats_card_styled(stats: &Stats, color: bool) -> String {
         }
         if let Some(v) = ext.max_reasoning_tokens {
             out.push_str(&format!(
-                "  Max Reasoning (single) {:>10}  {}deepest deliberation{}\n",
+                "  {:<22} {:>14}  {}deepest deliberation{}\n",
+                "Max Reasoning (single)",
                 fmt_scaled(v),
                 p.dim,
                 p.reset
@@ -1413,13 +1455,14 @@ pub fn format_stats_card_styled(stats: &Stats, color: bool) -> String {
                 format!("{:.2}s", v / 1000.0)
             };
             out.push_str(&format!(
-                "  Min TTFT               {:>10}  {}fastest prefill{}\n",
-                ms_str, p.dim, p.reset
+                "  {:<22} {:>14}  {}fastest prefill{}\n",
+                "Min TTFT", ms_str, p.dim, p.reset
             ));
         }
         if let Some(v) = ext.peak_decode_tps {
             out.push_str(&format!(
-                "  Peak Decode            {:>10}  {}fastest burst{}\n",
+                "  {:<22} {:>14}  {}fastest burst{}\n",
+                "Peak Decode",
                 format!("{:.1} t/s", v),
                 p.dim,
                 p.reset
@@ -1433,7 +1476,8 @@ pub fn format_stats_card_styled(stats: &Stats, color: bool) -> String {
         p.bold, stats.benchmark_model, p.reset
     ));
     out.push_str(&format!(
-        "  Virtual Cloud Cost     {:>10}\n",
+        "  {:<22} {:>14}\n",
+        "Virtual Cloud Cost",
         fmt_usd_grouped(stats.estimated_cost_saved_usd)
     ));
     let rate = if stats.electricity_rate_usd > 0.0 {
@@ -1447,7 +1491,8 @@ pub fn format_stats_card_styled(stats: &Stats, color: bool) -> String {
         (DEFAULT_SYSTEM_POWER_KW * 1000.0).round() as u32
     };
     out.push_str(&format!(
-        "  Local Power Cost (Est) {:>10}  {}{:.1} kWh @ ${:.2}/kWh ({}W){}\n",
+        "  {:<22} {:>14}  {}{:.1} kWh @ ${:.2}/kWh ({}W){}\n",
+        "Local Power Cost (Est)",
         fmt_usd_grouped(stats.estimated_electricity_cost_usd),
         p.dim,
         stats.estimated_energy_kwh,
@@ -1461,7 +1506,8 @@ pub fn format_stats_card_styled(stats: &Stats, color: bool) -> String {
         100.0
     };
     out.push_str(&format!(
-        "  Net Savings            {}{:>10}{}  {}{:.2}% margin{}\n",
+        "  {:<22} {}{:>14}{}  {}{:.2}% margin{}\n",
+        "Net Savings",
         p.bright_green,
         format!("+{}", fmt_usd_grouped(stats.net_savings_usd)),
         p.reset,
@@ -1530,11 +1576,11 @@ pub fn format_stats_card_styled(stats: &Stats, color: bool) -> String {
             if errs > 0 {
                 let err_rate = (errs as f64 / total.max(1) as f64) * 100.0;
                 let text = format!("{} ({:.1}%)", fmt_grouped(errs), err_rate);
-                let pad = 12usize.saturating_sub(text.len());
-                format!("{}{}{}{}", " ".repeat(pad), p.red, text, p.reset)
+                format!("{}{:>12}{}", p.red, text, p.reset)
             } else {
-                let pad = 11usize;
-                format!("{}{}{}{}", " ".repeat(pad), p.dim, "-", p.reset)
+                // Center the dash so a zero-error row does not float to the
+                // far right edge of the errors column.
+                format!("{}{:12}{}", p.dim, "-", p.reset)
             }
         };
 
@@ -1666,9 +1712,9 @@ struct CachedTask {
     execution_ms: Option<u64>,
 }
 
-/// Bumped when the cached value shape changes (v5 adds the per-task
-/// `execution_ms` field).
-const TELEMETRY_CACHE_VERSION: u32 = 5;
+/// Bumped when the cached value shape changes (v6 adds `inference_compute_ms`
+/// and unclamps speculative decode bursts).
+const TELEMETRY_CACHE_VERSION: u32 = 6;
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 struct TelemetryCache {
