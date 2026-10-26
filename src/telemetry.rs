@@ -1904,7 +1904,12 @@ fn parse_session_events(raw: &str, since: Option<i128>) -> Option<SessionAgg> {
                 {
                     agg.ttft_sum_ms += ttft;
                     agg.ttft_count += 1;
-                    agg.min_ttft_ms = Some(agg.min_ttft_ms.map_or(ttft, |cur| cur.min(ttft)));
+                    // A 0.0 ttft is a "not measured" sentinel, not a real
+                    // fastest-prefill observation — do not let it collapse the
+                    // min (and average) to zero.
+                    if ttft > 0.0 {
+                        agg.min_ttft_ms = Some(agg.min_ttft_ms.map_or(ttft, |cur| cur.min(ttft)));
+                    }
                     if p > 0 {
                         agg.prefill_prompt_tokens += p;
                     }
@@ -2248,6 +2253,38 @@ mod tests {
             Some(parse_timestamp_ms(&json!("2026-10-01T12:00:02.000Z")).unwrap())
         );
         assert!(agg.first_ms.unwrap() < agg.last_ms.unwrap());
+    }
+
+    /// Regression guard (#18): a `ttft_ms` of exactly `0.0` is a "not
+    /// measured" sentinel and must NOT collapse `min_ttft_ms` (and the average)
+    /// to zero. Only strictly-positive TTFTs are admitted to the min.
+    #[test]
+    fn min_ttft_ignores_zero_sentinel() {
+        let ledger = concat!(
+            // First dispatch has no measured TTFT (0.0 sentinel); it must not
+            // drive the min to zero.
+            "{\"type\":\"dispatch\",\"turn\":1,\"timestamp\":\"2026-10-01T12:00:00.000Z\",\"metrics\":{\"prompt_tokens\":1000,\"ttft_ms\":0.0}}\n",
+            // Second dispatch has a real 250ms TTFT.
+            "{\"type\":\"dispatch\",\"turn\":2,\"timestamp\":\"2026-10-01T12:00:01.000Z\",\"metrics\":{\"prompt_tokens\":1000,\"ttft_ms\":250.0}}\n",
+            // Third dispatch has a 100ms TTFT — the true min.
+            "{\"type\":\"dispatch\",\"turn\":3,\"timestamp\":\"2026-10-01T12:00:02.000Z\",\"metrics\":{\"prompt_tokens\":1000,\"ttft_ms\":100.0}}\n",
+            // Terminal so the session is finalized.
+            "{\"type\":\"final\",\"status\":\"completed\",\"duration_ms\":1000,\"timestamp\":\"2026-10-01T12:00:03.000Z\"}\n",
+        );
+        let agg = parse_session_events(ledger, None).expect("ledger parses");
+        // All three dispatches count as TTFT observations (incl. the 0.0).
+        assert_eq!(agg.ttft_count, 3);
+        // But the min must be 100.0, not the 0.0 sentinel.
+        assert_eq!(agg.min_ttft_ms, Some(100.0));
+
+        // A session with ONLY 0.0 sentinels yields no min at all.
+        let only_zero = concat!(
+            "{\"type\":\"dispatch\",\"turn\":1,\"timestamp\":\"2026-10-01T12:00:00.000Z\",\"metrics\":{\"prompt_tokens\":1000,\"ttft_ms\":0.0}}\n",
+            "{\"type\":\"final\",\"status\":\"completed\",\"duration_ms\":1000,\"timestamp\":\"2026-10-01T12:00:01.000Z\"}\n",
+        );
+        let agg0 = parse_session_events(only_zero, None).expect("ledger parses");
+        assert_eq!(agg0.ttft_count, 1);
+        assert_eq!(agg0.min_ttft_ms, None);
     }
 
     /// Regression guard: a ledger carrying non-canonical schema spellings

@@ -283,44 +283,109 @@ impl TaskSemaphore {
         }
     }
 
+    /// Write a fully-serialized [`Lease`] to `slot_{i}.json` using
+    /// write-to-temp-then-`rename`, so a concurrent reader never observes a
+    /// partial / torn file (only a complete file or, during a claim, a
+    /// zero-length lock). The temp path is same-directory so the rename is
+    /// atomic on the same volume; on a rename collision (e.g. cross-device) it
+    /// falls back to a direct write and removes the temp.
+    fn atomic_publish_lease(&self, i: usize, lease: &Lease) -> bool {
+        let path = self.slot_path(i);
+        let Ok(json) = serde_json::to_string(lease) else {
+            return false;
+        };
+        let tmp = self
+            .inner
+            .slots_dir
+            .join(format!("slot_{}.{}_tmp", i, std::process::id()));
+        if fs::write(&tmp, &json).is_ok() && fs::rename(&tmp, &path).is_err() {
+            // Rename collided — fall back to a direct write, then clean up.
+            let ok = fs::write(&path, &json).is_ok();
+            let _ = fs::remove_file(&tmp);
+            return ok;
+        }
+        true
+    }
+
     /// Try to claim a single slot index with a given initial context-token
     /// value baked into the persisted [`Lease`].
+    ///
+    /// The claim is *atomic-published*: O_EXCL creates a zero-length lock file
+    /// on the slot path (never a partial lease); the lease JSON is written to a
+    /// temp file and then `rename`d over the slot. A concurrent reader therefore
+    /// only ever sees a 0-byte lock or a complete file — never a torn lease.
     fn try_claim(&self, i: usize, task_id: &str, context_tokens: u32) -> ClaimOutcome {
         let path = self.slot_path(i);
         let tenant = std::process::id() as u32;
         let now = now_ms();
+        let lease = Lease {
+            tenant,
+            task_id: task_id.to_string(),
+            at: now,
+            hb: now,
+            context_tokens,
+        };
 
-        // 1. Fresh O_EXCL claim.
+        // 1. Fresh O_EXCL claim (0-byte lock), then atomic publish.
         match fs::OpenOptions::new()
             .create_new(true)
             .write(true)
             .open(&path)
         {
-            Ok(mut f) => {
-                let lease = Lease {
-                    tenant,
-                    task_id: task_id.to_string(),
-                    at: now,
-                    hb: now,
-                    context_tokens,
-                };
-                if let Ok(json) = serde_json::to_string(&lease) {
-                    let _ = write_all(&mut f, json.as_bytes());
+            Ok(_f) => {
+                if self.atomic_publish_lease(i, &lease) {
+                    return ClaimOutcome::Claimed(SlotLease {
+                        index: i,
+                        file: path,
+                        tenant,
+                        task_id: task_id.to_string(),
+                    });
                 }
-                return ClaimOutcome::Claimed(SlotLease {
-                    index: i,
-                    file: path,
-                    tenant,
-                    task_id: task_id.to_string(),
-                });
+                // Publish failed: roll back our lock so the slot is not left
+                // half-claimed, then report occupied (caller will retry).
+                let _ = fs::remove_file(&path);
+                return ClaimOutcome::Occupied;
             }
             Err(e) if e.kind() == io::ErrorKind::AlreadyExists => {}
             Err(_) => return ClaimOutcome::Occupied,
         }
 
-        // 2. Exists: reclaim if the owner is dead, else occupied.
-        let lease = self.read_lease(i);
-        if !self.lease_reclaimable(lease.as_ref()) {
+        // 2. Exists: a zero-length file is an in-flight claim by a live writer
+        //    (O_EXCL already failed with AlreadyExists, so it is not absent).
+        //    It must NOT be reclaimed — doing so would let a faster sibling
+        //    rename the in-flight file away and the original claimant would
+        //    publish to a dead path, ending up with no slot (the classic
+        //    "3 of 4 slots visible" flake).
+        let st = fs::metadata(&path).ok();
+        if st.as_ref().is_none_or(|m| m.len() == 0) {
+            // Guard against a *stale* lock: if a claimant died between the
+            // O_EXCL and the rename, the 0-byte lock would otherwise wedge the
+            // slot forever. Reclaim only if the lock is old (>> any publish).
+            if let Some(locked_ms) = st.as_ref().and_then(|m| m.modified().ok()) {
+                let age_ms = locked_ms
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .map(|d| d.as_millis() as u64)
+                    .unwrap_or(0);
+                let now_ms = now_ms();
+                if now_ms.saturating_sub(age_ms) > 10_000 {
+                    let dead = self
+                        .inner
+                        .slots_dir
+                        .join(format!("slot_{i}.dead_{}_{}", now, tenant));
+                    if fs::rename(&path, &dead).is_ok() {
+                        let _ = fs::remove_file(&dead);
+                        return ClaimOutcome::Reclaimed;
+                    }
+                }
+            }
+            return ClaimOutcome::Occupied;
+        }
+
+        // 3. Non-zero: a complete (or corrupt) lease. Reclaim only if the
+        //    owner is dead (`None` here means non-zero but unparseable, i.e. a
+        //    crashed writer).
+        let existing = self.read_lease(i);
+        if !self.lease_reclaimable(existing.as_ref()) {
             return ClaimOutcome::Occupied;
         }
         // Reclaim: atomic rename to a dead file, then remove.
@@ -330,29 +395,24 @@ impl TaskSemaphore {
             .join(format!("slot_{i}.dead_{}_{}", now, tenant));
         let _ = fs::rename(&path, &dead);
         let _ = fs::remove_file(&dead);
-        // Retry the O_EXCL claim once after reclaim.
+        // Retry the O_EXCL claim once after reclaim, then atomic-publish.
         match fs::OpenOptions::new()
             .create_new(true)
             .write(true)
             .open(&path)
         {
-            Ok(mut f) => {
-                let lease = Lease {
-                    tenant,
-                    task_id: task_id.to_string(),
-                    at: now,
-                    hb: now,
-                    context_tokens,
-                };
-                if let Ok(json) = serde_json::to_string(&lease) {
-                    let _ = write_all(&mut f, json.as_bytes());
+            Ok(_f) => {
+                if self.atomic_publish_lease(i, &lease) {
+                    ClaimOutcome::Claimed(SlotLease {
+                        index: i,
+                        file: path,
+                        tenant,
+                        task_id: task_id.to_string(),
+                    })
+                } else {
+                    let _ = fs::remove_file(&path);
+                    ClaimOutcome::Occupied
                 }
-                ClaimOutcome::Claimed(SlotLease {
-                    index: i,
-                    file: path,
-                    tenant,
-                    task_id: task_id.to_string(),
-                })
             }
             Err(_) => ClaimOutcome::Reclaimed,
         }
@@ -403,33 +463,40 @@ impl TaskSemaphore {
     ///
     /// When `pool_capacity_tokens == 0` the token-budget check is bypassed
     /// entirely (original slot-count-only semantics).
+    /// DRY token-budget admission gate.
+    ///
+    /// Returns `true` when a new lease with `initial_tokens` context tokens
+    /// may be admitted without pushing the committed pool total over
+    /// `pool_capacity_tokens`. The gate is disabled (always admits) when no
+    /// budget is configured (`pool_capacity_tokens == 0`).
+    ///
+    /// It is evaluated over ALL live leases, so it also holds when the pool
+    /// is currently empty — a single oversized claim can never overcommit the
+    /// pool.
+    fn token_budget_admits(&self, initial_tokens: u32) -> bool {
+        let capacity = self.inner.pool_capacity_tokens;
+        if capacity == 0 {
+            return true; // token-budget gate disabled
+        }
+        let committed: u64 = self
+            .list_slots()
+            .iter()
+            .map(|l| (self.inner.per_slot_state_tokens as u64) + (l.context_tokens as u64))
+            .sum();
+        let new_total =
+            committed + (self.inner.per_slot_state_tokens as u64) + (initial_tokens as u64);
+        new_total <= (capacity as u64)
+    }
+
     pub async fn acquire_with_tokens(&self, task_id: &str, initial_tokens: u32) -> SlotLease {
         loop {
-            // Fast path: no alien tenant, try to claim a free slot.
-            if !self.alien_tenant_active() {
+            // Fast path: no alien tenant, and the token-budget gate admits
+            // this claim (checked once over all live leases, so an empty pool
+            // can never overcommit). If the gate refuses, we fall through to
+            // the FIFO waiter path and re-check here on the next loop, so a
+            // woken waiter can never overcommit either.
+            if !self.alien_tenant_active() && self.token_budget_admits(initial_tokens) {
                 for i in 0..self.inner.max_slots {
-                    // Token-budget gate: when a budget is configured and there
-                    // is at least one live lease, the new claim must not push
-                    // the committed total over the pool capacity.
-                    if self.inner.pool_capacity_tokens > 0 {
-                        let live = self.list_slots();
-                        if !live.is_empty() {
-                            let committed: u64 = live
-                                .iter()
-                                .map(|l| {
-                                    (self.inner.per_slot_state_tokens as u64)
-                                        + (l.context_tokens as u64)
-                                })
-                                .sum();
-                            let new_total = committed
-                                + (self.inner.per_slot_state_tokens as u64)
-                                + (initial_tokens as u64);
-                            if new_total > (self.inner.pool_capacity_tokens as u64) {
-                                // Budget exceeded — skip this slot for now.
-                                continue;
-                            }
-                        }
-                    }
                     if let ClaimOutcome::Claimed(lease) = self.try_claim(i, task_id, initial_tokens)
                     {
                         return lease;
@@ -485,7 +552,19 @@ impl TaskSemaphore {
             };
             let path = self.slot_path(i);
             if let Ok(json) = serde_json::to_string(&updated) {
-                let _ = fs::write(&path, json);
+                // Write-then-rename so concurrent readers never observe a
+                // truncated / 0-byte lease mid-write. The temp file is
+                // same-directory so the rename is atomic on the same volume.
+                let tmp =
+                    self.inner
+                        .slots_dir
+                        .join(format!("slot_{}.{}_tmp", i, std::process::id()));
+                if fs::write(&tmp, &json).is_ok() && fs::rename(&tmp, &path).is_err() {
+                    // Rename collided (e.g. cross-device / busy) — fall back to
+                    // a direct write and clean up the temp.
+                    let _ = fs::write(&path, json);
+                    let _ = fs::remove_file(&tmp);
+                }
             }
         }
     }
@@ -747,12 +826,6 @@ pub struct SlotStatus {
     pub is_alien_active: bool,
     pub is_same_active: bool,
     pub is_fully_occupied: bool,
-}
-
-fn write_all(f: &mut fs::File, bytes: &[u8]) -> io::Result<()> {
-    use std::io::Write;
-    f.write_all(bytes)?;
-    f.flush()
 }
 
 // ---------------------------------------------------------------------------
@@ -1220,7 +1293,10 @@ mod tests {
         let bin = castor_bin();
         assert!(bin.exists(), "castor binary not found at {bin:?}");
 
-        // Spawn 4 separate child processes each claiming 1 slot and holding for 2 seconds
+        // Spawn 4 separate child processes each claiming 1 slot and holding it.
+        // The generous hold (30s) ensures slow CI runners never reap a child
+        // before the parent observes all 4 slots; the parent kills them at the
+        // end regardless.
         let mut children = Vec::new();
         for i in 0..4 {
             let child = std::process::Command::new(&bin)
@@ -1230,7 +1306,7 @@ mod tests {
                 .arg("--max-slots")
                 .arg("4")
                 .arg("--hold-secs")
-                .arg("10")
+                .arg("30")
                 .stdout(std::process::Stdio::piped())
                 .stderr(std::process::Stdio::null())
                 .spawn()
@@ -1259,8 +1335,22 @@ mod tests {
             }
         }
 
-        // Now all 4 slots are occupied by alien processes!
-        assert_eq!(sem.list_slots().len(), 4);
+        // Poll until all 4 slots are visible (up to 5s). A child can claim its
+        // slot and print HELD in any order; the parent's snapshot must not be
+        // taken before every child's lease file is fully on disk.
+        let deadline = std::time::Instant::now() + Duration::from_secs(5);
+        loop {
+            let n = sem.list_slots().len();
+            if n == 4 || std::time::Instant::now() > deadline {
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(25));
+        }
+        assert_eq!(
+            sem.list_slots().len(),
+            4,
+            "all 4 child slot leases must be visible after polling"
+        );
 
         // A 5th acquire from the parent process MUST block!
         let sem_clone = sem.clone();
@@ -1273,13 +1363,17 @@ mod tests {
             "5th acquire must be blocked when 4 slots are occupied"
         );
 
-        // Wait for children to finish (they hold for ~3s and exit)
-        for mut child in children {
-            let status = child.wait().unwrap();
-            assert!(status.success());
+        // Kill the children: the 5th-acquire-blocks check above has proven the
+        // alien-exclusion invariant. We kill (rather than wait for the full
+        // 30s hold) so the test stays fast; a killed child's lease is then
+        // reclaimable (dead tenant) and the parent can acquire.
+        for mut child in children.drain(..) {
+            let _ = child.kill();
+            let _ = child.wait();
         }
 
-        // Now parent should be able to acquire immediately
+        // The killed children's leases are now reclaimable (dead tenant), so a
+        // parent acquire must succeed once the stale leases are cleaned up.
         let lease = rt().block_on(async {
             tokio::time::timeout(
                 Duration::from_secs(5),

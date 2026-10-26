@@ -41,11 +41,14 @@ jobs:
       - name: Build all targets
         run: cargo build --all-targets
 
-      - name: Run clippy (-D warnings)
-        run: cargo clippy --all-targets -- -D warnings
+      - name: Run clippy (-D warnings, all features)
+        run: cargo clippy --all-targets --all-features -- -D warnings
 
-      - name: Run tests (authoritative gate)
-        run: cargo test --verbose
+      - name: Verify slim feature gate compiles (no-default + mcp)
+        run: cargo check --no-default-features --features mcp
+
+      - name: Run tests (authoritative gate, all features)
+        run: cargo test --all-features
 
       - name: Test Node shim
         uses: actions/setup-node@v4

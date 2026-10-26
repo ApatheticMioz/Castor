@@ -953,7 +953,18 @@ async fn chat_with_watchdog(
             "turn stalled at reasoning-token budget ({}); retrying once at 'low' effort",
             max_turn_reasoning_tokens
         );
-        return engine.chat(messages, tools, true, Some("low")).await;
+        // The stalling completion never emitted an assistant message (no tool
+        // calls and empty content), so its deliberation is not in `messages`.
+        // Re-ask with an explicit nudge so the retry model knows *why* it is
+        // being re-prompted and lands concisely on the next action.
+        let mut retry_messages = messages.to_vec();
+        retry_messages.push(msg(
+            "user",
+            "[System: Previous deliberation exceeded the single-turn reasoning \
+             budget. Be concise and emit your next tool call or final response \
+             immediately.]",
+        ));
+        return engine.chat(&retry_messages, tools, true, Some("low")).await;
     }
 
     Ok(completion)
@@ -1043,6 +1054,17 @@ pub async fn run_session(
         None => (0, 0),
     };
 
+    // Reasoning-delimiter tag pair for the session (reserved defaults when
+    // `SessionOptions` does not override them). Hoisted once so the per-turn
+    // assistant strip, the main tool loop, and the severed-stop continuation
+    // all share the same pair (DRY) instead of each re-deriving it.
+    let open_tag = options
+        .map(|o| o.effective_open_tag())
+        .unwrap_or_else(|| concat!("<th", "ink>").to_string());
+    let close_tag = options
+        .map(|o| o.effective_close_tag())
+        .unwrap_or_else(|| concat!("</th", "ink>").to_string());
+
     while turns < budget {
         // Cooperative landing: in the last ~5 turns, inject a budget notice.
         let remaining = budget - turns;
@@ -1124,7 +1146,7 @@ pub async fn run_session(
         // Append the assistant message. Strip <th_ink>...</th_ink> traces if tool_calls
         // were made, to prevent context inflation and prompt-cache invalidation.
         let sanitized_content = if !completion.tool_calls.is_empty() {
-            strip_think_tags(&completion.content)
+            strip_reasoning_tags(&completion.content, &open_tag, &close_tag)
         } else {
             completion.content.clone()
         };
@@ -1143,9 +1165,6 @@ pub async fn run_session(
             // the model stopped with no tool call and no real content) before
             // moving `completion`. This triggers a one-time continuation prompt
             // so the engine is given a chance to act after deliberating.
-            let close_tag = options
-                .map(|o| o.effective_close_tag())
-                .unwrap_or_else(|| concat!("</th", "ink>").to_string());
             let severed_stop = completion
                 .finish_reason
                 .as_deref()
@@ -1248,9 +1267,15 @@ pub async fn run_session(
                                 "is_error": outcome.text.starts_with("Error:"),
                                 "output": tool_content,
                             }));
+                            // Sanitize embedded reasoning delimiters so a
+                            // downstream tool-call parser never sees a valid
+                            // delimiter inside this continuation's tool output
+                            // (mirrors the main tool loop, DRY).
+                            let sanitized_tool_content =
+                                sanitize_tool_delimiters(&tool_content, &open_tag, &close_tag);
                             messages.push(Message {
                                 role: "tool".into(),
-                                content: tool_content,
+                                content: sanitized_tool_content,
                                 tool_call_id: Some(tc.id.clone()),
                                 tool_calls: Vec::new(),
                             });
@@ -1527,13 +1552,8 @@ pub async fn run_session(
 
             // Append the tool result as a tool message. Sanitize any embedded
             // reasoning delimiters so a downstream tool-call parser never sees a
-            // valid `<th_ink>`-style delimiter inside tool output.
-            let open_tag = options
-                .map(|o| o.effective_open_tag())
-                .unwrap_or_else(|| concat!("<th", "ink>").to_string());
-            let close_tag = options
-                .map(|o| o.effective_close_tag())
-                .unwrap_or_else(|| concat!("</th", "ink>").to_string());
+            // valid `<th_ink>`-style delimiter inside tool output. (The tag pair
+            // is hoisted to function scope; see the pre-loop definition.)
             let sanitized_tool_content =
                 sanitize_tool_delimiters(&tool_content, &open_tag, &close_tag);
             messages.push(Message {

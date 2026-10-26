@@ -735,7 +735,35 @@ pub fn format_live_turn_status(
     let elapsed_s = now_ms.saturating_sub(start_ms) / 1000;
 
     let path = state.sessions().join(&rec.session_id).join("events.jsonl");
-    let raw = std::fs::read_to_string(&path).ok()?;
+    // For huge session ledgers, read only the last 64 KiB so polling `status`
+    // is O(1) with respect to total file size: the most recent `dispatch` and
+    // `tool_result` events (which is all a live status line needs) always live
+    // near the tail of an append-only JSONL file.
+    const TAIL_BYTES: u64 = 64 * 1024;
+    let mut raw = String::new();
+    let file_len = std::fs::metadata(&path).map(|m| m.len()).unwrap_or(0);
+    if file_len > TAIL_BYTES {
+        use std::io::{Read, Seek, SeekFrom};
+        let mut f = match std::fs::File::open(&path) {
+            Ok(f) => f,
+            Err(_) => return None,
+        };
+        let _ = f.seek(SeekFrom::End(-(TAIL_BYTES as i64)));
+        let mut buf = Vec::with_capacity(TAIL_BYTES as usize);
+        if f.read_to_end(&mut buf).is_ok() {
+            raw = String::from_utf8_lossy(&buf).into_owned();
+        }
+        // Discard the (possibly partial) first line: our seek landed mid-line,
+        // and a truncated line would fail JSON parse anyway. Dropping it up to
+        // the first '\n' keeps the remaining lines whole.
+        if let Some(pos) = raw.find('\n') {
+            raw = raw[pos + 1..].to_string();
+        } else {
+            raw.clear(); // the whole tail was a single partial line
+        }
+    } else {
+        raw = std::fs::read_to_string(&path).ok()?;
+    }
 
     let mut turn: Option<u64> = None;
     let mut prompt_tokens: Option<u64> = None;
