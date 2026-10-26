@@ -26,6 +26,10 @@ const COMPLETION_COST_PER_MILLION: f64 = 10.0;
 /// Default average system electrical power consumption in kilowatts (250 W).
 const DEFAULT_SYSTEM_POWER_KW: f64 = 0.25;
 
+/// Default electrical draw in kilowatts while the GPU is idle (i.e. a session
+/// is alive but no model compute is in flight) — 30 W.
+const DEFAULT_IDLE_POWER_KW: f64 = 0.03;
+
 /// Default effective electricity rate in USD per kilowatt-hour ($0.18/kWh).
 const DEFAULT_ELECTRICITY_COST_PER_KWH: f64 = 0.18;
 
@@ -55,6 +59,16 @@ fn electricity_rate_usd() -> f64 {
         .ok()
         .and_then(|s| s.parse::<f64>().ok())
         .unwrap_or(DEFAULT_ELECTRICITY_COST_PER_KWH)
+}
+
+/// Electrical draw in kilowatts while the GPU is idle, honoring the
+/// `CASTOR_IDLE_WATTS` override (falls back to the 30 W default).
+fn idle_power_kw() -> f64 {
+    std::env::var("CASTOR_IDLE_WATTS")
+        .ok()
+        .and_then(|s| s.parse::<f64>().ok())
+        .map(|w| w / 1000.0)
+        .unwrap_or(DEFAULT_IDLE_POWER_KW)
 }
 
 /// Hall-of-Fame extremes across the scanned events: the single most
@@ -121,6 +135,12 @@ pub struct Stats {
     pub estimated_electricity_cost_usd: f64,
     /// Estimated energy consumption in kWh.
     pub estimated_energy_kwh: f64,
+    /// Real GPU model-compute time in ms: the sum of (TTFT prefill + decode)
+    /// across all qualifying turns in every session, including sessions that
+    /// never wrote a `final` event (crashed sessions still contribute their
+    /// measured compute time).
+    #[serde(default)]
+    pub inference_compute_ms: u64,
     /// Electricity cost rate used in calculations (USD per kWh).
     #[serde(default = "default_electricity_rate")]
     pub electricity_rate_usd: f64,
@@ -200,6 +220,7 @@ impl Default for Stats {
             estimated_cost_saved_usd: 0.0,
             estimated_electricity_cost_usd: 0.0,
             estimated_energy_kwh: 0.0,
+            inference_compute_ms: 0,
             electricity_rate_usd: DEFAULT_ELECTRICITY_COST_PER_KWH,
             system_power_watts: (DEFAULT_SYSTEM_POWER_KW * 1000.0).round() as u32,
             net_savings_usd: 0.0,
@@ -369,6 +390,7 @@ struct SessionRollup {
     max_prompt_tokens: u64,
     max_reasoning_tokens: u64,
     min_ttft_ms: Option<f64>,
+    inference_compute_ms: f64,
 }
 
 impl SessionRollup {
@@ -395,6 +417,7 @@ impl SessionRollup {
         if let Some(m) = other.min_ttft_ms {
             self.min_ttft_ms = Some(self.min_ttft_ms.map_or(m, |cur| cur.min(m)));
         }
+        self.inference_compute_ms += other.inference_compute_ms;
         for (name, n) in other.tool_calls {
             *self.tool_calls.entry(name).or_insert(0) += n;
         }
@@ -460,6 +483,7 @@ fn add_session_to_rollup(rollup: &mut SessionRollup, session: &SessionAgg, opts:
     if let Some(m) = session.min_ttft_ms {
         rollup.min_ttft_ms = Some(rollup.min_ttft_ms.map_or(m, |cur| cur.min(m)));
     }
+    rollup.inference_compute_ms += session.inference_compute_ms;
     for (name, n) in &session.tool_calls_by_name {
         *rollup.tool_calls.entry(name.clone()).or_insert(0) += n;
     }
@@ -893,6 +917,7 @@ pub fn derive_stats(state_dir: &Path, opts: &StatsOptions) -> Stats {
         duration_sum: session_rollup.duration_sum,
         duration_count: session_rollup.duration_count,
         total_duration_ms: session_rollup.duration_sum,
+        inference_compute_ms: session_rollup.inference_compute_ms.round() as u64,
         daily: if opts.by_day {
             Some(session_rollup.daily)
         } else {
@@ -910,9 +935,15 @@ pub fn derive_stats(state_dir: &Path, opts: &StatsOptions) -> Stats {
     stats.estimated_cost_saved_usd = (stats.estimated_cost_saved_usd * 100.0).round() / 100.0;
 
     let kw = system_power_kw();
+    let idle_kw = idle_power_kw();
     let rate = electricity_rate_usd();
-    let hours = stats.total_duration_ms as f64 / 3_600_000.0;
-    let kwh = (hours * kw * 100.0).round() / 100.0;
+    // Two-tier energy model: the GPU draws full system power only while
+    // performing real model compute (prefill + decode), and the lower idle
+    // draw for the remainder of each session's wall-clock duration.
+    let session_wall_hours = stats.total_duration_ms as f64 / 3_600_000.0;
+    let inference_hours = stats.inference_compute_ms as f64 / 3_600_000.0;
+    let idle_wall_hours = (session_wall_hours - inference_hours).max(0.0);
+    let kwh = (inference_hours * kw + idle_wall_hours * idle_kw) * 100.0 / 100.0;
     stats.estimated_energy_kwh = kwh;
     stats.estimated_electricity_cost_usd = ((kwh * rate) * 100.0).round() / 100.0;
     stats.net_savings_usd =
@@ -1612,6 +1643,12 @@ struct SessionAgg {
     /// Fastest TTFT (ms) observed in this session (best prefill latency).
     #[serde(default)]
     min_ttft_ms: Option<f64>,
+    /// Real GPU model-compute time (ms): the sum of `ttft + decode` across all
+    /// qualifying turns. Tracked per turn regardless of whether the session
+    /// ever wrote a `final` event, so a crashed session's compute time is not
+    /// dropped to zero.
+    #[serde(default)]
+    inference_compute_ms: f64,
 }
 
 #[derive(Debug, Clone, PartialEq, Default, Serialize, Deserialize)]
@@ -1902,16 +1939,17 @@ fn parse_session_events(raw: &str, since: Option<i128>) -> Option<SessionAgg> {
                 if let Some(ttft) = ttft_opt
                     && ttft >= 0.0
                 {
-                    agg.ttft_sum_ms += ttft;
-                    agg.ttft_count += 1;
                     // A 0.0 ttft is a "not measured" sentinel, not a real
-                    // fastest-prefill observation — do not let it collapse the
-                    // min (and average) to zero.
+                    // prefill observation — it must not inflate the TTFT
+                    // count/sum (which would bias the average) nor contribute
+                    // prompt tokens into the prefill-throughput denominator.
                     if ttft > 0.0 {
+                        agg.ttft_sum_ms += ttft;
+                        agg.ttft_count += 1;
                         agg.min_ttft_ms = Some(agg.min_ttft_ms.map_or(ttft, |cur| cur.min(ttft)));
-                    }
-                    if p > 0 {
-                        agg.prefill_prompt_tokens += p;
+                        if p > 0 {
+                            agg.prefill_prompt_tokens += p;
+                        }
                     }
                     if let Some(total) = total_opt
                         && total > ttft
@@ -1919,9 +1957,22 @@ fn parse_session_events(raw: &str, since: Option<i128>) -> Option<SessionAgg> {
                         let decode_ms = total - ttft;
                         if decode_ms >= 50.0 && comp > 0 {
                             let turn_tps = (comp as f64) / (decode_ms / 1000.0);
-                            if turn_tps <= 250.0 {
+                            // Generous ceiling: admit high-acceptance DFlash2
+                            // speculative-decode bursts (hundreds of t/s)
+                            // instead of capping them at the 250 t/s that
+                            // used to silently drop them from the peak/sustained
+                            // decode metrics; the `decode_ms >= 50.0` guard
+                            // above still filters zero-duration division
+                            // artifacts.
+                            if turn_tps <= 2000.0 {
                                 agg.decode_duration_ms += decode_ms;
                                 agg.decode_tokens += comp;
+                                // Real GPU compute time: prefill (TTFT) +
+                                // decode for this turn, tracked even for
+                                // sessions that never write a `final` event.
+                                if ttft > 0.0 {
+                                    agg.inference_compute_ms += ttft + decode_ms;
+                                }
                                 if comp >= 4 && decode_ms >= 80.0 {
                                     agg.peak_decode_tps = Some(
                                         agg.peak_decode_tps
@@ -2272,18 +2323,21 @@ mod tests {
             "{\"type\":\"final\",\"status\":\"completed\",\"duration_ms\":1000,\"timestamp\":\"2026-10-01T12:00:03.000Z\"}\n",
         );
         let agg = parse_session_events(ledger, None).expect("ledger parses");
-        // All three dispatches count as TTFT observations (incl. the 0.0).
-        assert_eq!(agg.ttft_count, 3);
+        // Only the two strictly-positive TTFTs count as observations; the
+        // 0.0 sentinel is a "not measured" marker, not a real prefill.
+        assert_eq!(agg.ttft_count, 2);
         // But the min must be 100.0, not the 0.0 sentinel.
         assert_eq!(agg.min_ttft_ms, Some(100.0));
 
-        // A session with ONLY 0.0 sentinels yields no min at all.
+        // A session with ONLY 0.0 sentinels yields no TTFT observations at
+        // all.
         let only_zero = concat!(
             "{\"type\":\"dispatch\",\"turn\":1,\"timestamp\":\"2026-10-01T12:00:00.000Z\",\"metrics\":{\"prompt_tokens\":1000,\"ttft_ms\":0.0}}\n",
             "{\"type\":\"final\",\"status\":\"completed\",\"duration_ms\":1000,\"timestamp\":\"2026-10-01T12:00:01.000Z\"}\n",
         );
         let agg0 = parse_session_events(only_zero, None).expect("ledger parses");
-        assert_eq!(agg0.ttft_count, 1);
+        assert_eq!(agg0.ttft_count, 0);
+        assert_eq!(agg0.ttft_sum_ms, 0.0);
         assert_eq!(agg0.min_ttft_ms, None);
     }
 
@@ -2859,6 +2913,34 @@ mod tests {
         assert_eq!(stats.peak_decode_tps, Some(150.0));
         assert_eq!(stats.avg_ttft_ms, Some(250.0));
         assert_eq!(stats.effective_prefill_tps, Some(6000.0));
+
+        let _ = fs::remove_dir_all(&state);
+    }
+
+    /// A high-acceptance DFlash2 speculative-decode burst (well above the old
+    /// 250 t/s clamp, here ~400 t/s) must now be admitted into the peak and
+    /// sustained decode metrics, and its prefill+decode time must land in
+    /// `inference_compute_ms` — even for a session that never writes a
+    /// `final` event (a crash).
+    #[test]
+    fn high_acceptance_burst_is_admitted_and_compute_tracked_without_final() {
+        let state = tmp_state();
+        write(
+            &state.join("sessions/s1/events.jsonl"),
+            // 500 completion tokens over 1250ms decode = 400 t/s (above the
+            // old 250 clamp); 300ms TTFT. No `final` event on purpose.
+            concat!(
+                "{\"type\":\"dispatch\",\"turn\":1,\"timestamp\":\"2026-10-06T10:00:00.000Z\",\"metrics\":{\"prompt_tokens\":1000,\"completion_tokens\":500,\"ttft_ms\":300.0,\"total_ms\":1550.0}}\n",
+            ),
+        );
+
+        let stats = derive_stats(&state, &Default::default());
+        // The burst is now admitted: 400 t/s peak and sustained.
+        assert_eq!(stats.peak_decode_tps, Some(400.0));
+        assert_eq!(stats.avg_decode_tps, Some(400.0));
+        // Real compute time = ttft (300) + decode (1250) = 1550ms, tracked
+        // despite the missing `final`.
+        assert_eq!(stats.inference_compute_ms, 1550);
 
         let _ = fs::remove_dir_all(&state);
     }

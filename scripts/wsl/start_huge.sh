@@ -1,5 +1,4 @@
 #!/bin/bash
-# vLLM + DFlash2 + KVarN, CTX=huge: 245,760 context, ~77 tok/s. DEFAULT config.
 set -e
 pkill -9 -f 'vllm serve' 2>/dev/null || true
 pkill -9 -f EngineCore 2>/dev/null || true
@@ -14,7 +13,7 @@ export PYTORCH_CUDA_ALLOC_CONF=expandable_segments:False
 export VLLM_WSL2_ENABLE_PIN_MEMORY=1
 export VLLM_DFLASH2_LOOKUP_ADAPTIVE=0
 export EMBED_UVA=${EMBED_UVA:-1}
-export MAX_SEQS=${MAX_SEQS:-1}
+export MAX_SEQS=${MAX_SEQS:-8}
 export REQ_METRICS=1
 # Server-side reasoning default: medium effort when no per-request override is sent.
 export EXTRA_ARGS='--default-chat-template-kwargs {"reasoning_effort":"medium"}'
