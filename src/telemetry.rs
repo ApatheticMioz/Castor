@@ -1578,9 +1578,9 @@ pub fn format_stats_card_styled(stats: &Stats, color: bool) -> String {
                 let text = format!("{} ({:.1}%)", fmt_grouped(errs), err_rate);
                 format!("{}{:>12}{}", p.red, text, p.reset)
             } else {
-                // Center the dash so a zero-error row does not float to the
-                // far right edge of the errors column.
-                format!("{}{:12}{}", p.dim, "-", p.reset)
+                // Center the dash so a zero-error row sits cleanly in the
+                // middle of the errors column.
+                format!("{}{:^12}{}", p.dim, "-", p.reset)
             }
         };
 
@@ -2975,9 +2975,7 @@ mod tests {
             &state.join("sessions/s1/events.jsonl"),
             // 500 completion tokens over 1250ms decode = 400 t/s (above the
             // old 250 clamp); 300ms TTFT. No `final` event on purpose.
-            concat!(
-                "{\"type\":\"dispatch\",\"turn\":1,\"timestamp\":\"2026-10-06T10:00:00.000Z\",\"metrics\":{\"prompt_tokens\":1000,\"completion_tokens\":500,\"ttft_ms\":300.0,\"total_ms\":1550.0}}\n",
-            ),
+            "{\"type\":\"dispatch\",\"turn\":1,\"timestamp\":\"2026-10-06T10:00:00.000Z\",\"metrics\":{\"prompt_tokens\":1000,\"completion_tokens\":500,\"ttft_ms\":300.0,\"total_ms\":1550.0}}\n",
         );
 
         let stats = derive_stats(&state, &Default::default());
