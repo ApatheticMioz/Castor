@@ -14,7 +14,7 @@ The coworker is an autonomous senior peer programmer pairing with you, not a bli
 ### Serving Engine (multi-engine, pluggable)
 - The Local Coworker runs on a **pluggable OpenAI-compatible backend** (`src/engine/backend.rs`): `llama.cpp`, `vLLM`, or a generic/OpenAI endpoint (SGLang, Ollama, LM Studio, etc.).
 - Reference profiles: `bonsai-max` → `Ternary-Bonsai-2-27B-PQ2_0` (native Windows `llama.cpp`), `hyperqwen-huge` → `qwen3.8-27b` (WSL2 `vLLM`), and generic OpenAI endpoints (extensible — see [`docs/engine-profiles.md`](docs/engine-profiles.md)).
-- **Never assume a single engine, model, or slot.** Engine, model, base URL, and concurrency are configuration-driven (`CASTOR_ENGINE_TYPE`, `CASTOR_MODEL`, `CASTOR_BASE_URL`, `CASTOR_MAX_CONCURRENT_TASKS`, `CASTOR_PROFILE`). Cross-process concurrency is a disk-lease semaphore (`src/task/semaphore.rs`): `bonsai-max` ships with 4 slots, `hyperqwen-huge` with 1, top-level default 1. Full table: `AGENTS.md` §2.5.
+- **Never assume a single engine, model, or slot.** Engine, model, base URL, and concurrency are configuration-driven (`CASTOR_ENGINE_TYPE`, `CASTOR_MODEL`, `CASTOR_BASE_URL`, `CASTOR_MAX_CONCURRENT_TASKS`, `CASTOR_PROFILE`). Cross-process concurrency is governed by a disk-lease semaphore (`src/task/semaphore.rs`). Full table: `AGENTS.md` §2.5.
 
 ---
 
@@ -28,9 +28,14 @@ Both you and the local peer engineer possess native vision capabilities:
 
 ## 3. Core Execution Contracts
 
-1. **Systematic Exploration Offloading by Default**:
+1. **Systematic Exploration Offloading & Concurrent Slicing**:
    - Never bulk-read repository source files, run large greps, or hoard source trees into cloud context.
    - Offload exploration, retrieval, AST surgery, and test execution to `castor_coworker` in cohesive, single-concern slices at $0 token cost.
+   - **Proactively parallelize independent work**: Avoid sequential bottlenecks by dispatching isolated concurrent coworker tasks for parallel exploration, multi-module verification, or independent diagnostics.
+   - **Workload Concurrency Sizing**:
+     - **1 concurrent agent** for heavy tasks (deep refactoring, multi-turn architecture surgery, comprehensive test suites).
+     - **Up to 2 concurrent agents** for medium tasks (isolated module analysis, dual-angle reviews, targeted verification).
+     - **Up to 4 concurrent agents** for short/fast tasks (quick file lookups, log slicing, single AST checks, independent diagnostics).
    - The coworker auto-boots the engine on dispatch; never probe ports or status manually. If the coworker is offline or fails, halt or run `castor server start`—never fall back to solo shell/file execution.
    - Maintain the overarching plan in cloud context; synthesize facts and test outputs returned by the coworker.
 2. **Zero-Turn Execution & Wait Contract**:

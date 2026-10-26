@@ -88,7 +88,7 @@ Castor ships with tuned profiles as reference implementations. All profiles are 
 ### 4.2 `hyperqwen-huge` (WSL2 / Linux vLLM)
 - **Engine**: vLLM OpenAI-compatible server
 - **Model**: `qwen3.8-27b`
-- **Concurrency**: 1 slot (default), external daemon management
+- **Concurrency**: 8 slots (matches daemon MAX_SEQS), external daemon management
 - **Reasoning**: `chat_template_kwargs: {"reasoning_effort": effort}`
 
 ### 4.3 `generic` (Ollama / LM Studio / SGLang / Remote API)
