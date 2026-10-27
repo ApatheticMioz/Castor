@@ -83,3 +83,10 @@ desktop.ini
 
 # Rust build artifacts
 target/
+
+# Local media studio workspace, logo scratch & draft PRs
+video/
+docs/assets/logos/
+*.xlsx
+HYPERQWEN_PR.md
+
