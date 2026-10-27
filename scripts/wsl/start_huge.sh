@@ -13,7 +13,12 @@ export PYTORCH_CUDA_ALLOC_CONF=expandable_segments:False
 export VLLM_WSL2_ENABLE_PIN_MEMORY=1
 export VLLM_DFLASH2_LOOKUP_ADAPTIVE=0
 export EMBED_UVA=${EMBED_UVA:-1}
-export MAX_SEQS=${MAX_SEQS:-8}
+export MAX_SEQS=${MAX_SEQS:-4}
+# Full HyperQwen 245,760 long-context configuration:
+# MAX_SEQS=4 captures 32-query-token decode graphs (saving ~0.9 GiB vs MAX_SEQS=8),
+# allowing the full 245,760 context and 268k token KV cache to fit directly inside 24GB VRAM.
+export MAX_LEN=${MAX_LEN:-245760}
+export KV_MEM=${KV_MEM:-5261334938}
 export REQ_METRICS=1
 # Server-side reasoning default: medium effort when no per-request override is sent.
 export EXTRA_ARGS='--default-chat-template-kwargs {"reasoning_effort":"medium"}'
@@ -31,4 +36,3 @@ if [ -f "$CASTOR_BIN" ]; then
   setsid "$CASTOR_BIN" proxy < /dev/null > /tmp/stream_proxy.log 2>&1 &
 fi
 exec bash single-user/start_qwen.sh
-
