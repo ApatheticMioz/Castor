@@ -13,7 +13,7 @@
 <a href="https://www.npmjs.com/package/mcp-castor"><img alt="npm" src="https://img.shields.io/npm/v/mcp-castor.svg?color=CB3837&logo=npm"></a>
 <a href="https://www.rust-lang.org/"><img alt="Rust" src="https://img.shields.io/badge/Rust-2024%20Edition-DEA584?logo=rust&logoColor=white"></a>
 <a href="LICENSE"><img alt="License: AGPL-3.0" src="https://img.shields.io/badge/License-AGPL--3.0-blue.svg"></a>
-<a href="#testing--verification"><img alt="Test Gate" src="https://img.shields.io/badge/Test%20Gate-cargo%20test%20--all-features%20%2B%20clippy-brightgreen.svg"></a>
+<a href="#testing--verification"><img alt="Test Gate" src="https://img.shields.io/badge/Test_Gate-cargo_test_%2B_clippy-brightgreen.svg"></a>
 </p>
 
 <a href="https://raw.githubusercontent.com/ApatheticMioz/Castor/main/docs/assets/demo.mp4"><img src="https://raw.githubusercontent.com/ApatheticMioz/Castor/main/docs/assets/demo.webp" alt="Castor: Local Tool Runner for Cloud LLMs" width="100%"></a>
