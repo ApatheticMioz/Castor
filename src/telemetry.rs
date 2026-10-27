@@ -818,13 +818,19 @@ fn load_task_metrics_cached(
             }
         }
 
-        if let Some(ms) = exec {
-            metrics.total_execution_ms += ms;
-        }
-
         match status.as_str() {
-            "completed" => metrics.completed += 1,
-            "failed" => metrics.failed += 1,
+            "completed" => {
+                metrics.completed += 1;
+                if let Some(ms) = exec {
+                    metrics.total_execution_ms += ms;
+                }
+            }
+            "failed" => {
+                metrics.failed += 1;
+                if let Some(ms) = exec {
+                    metrics.total_execution_ms += ms;
+                }
+            }
             "cancelled" => metrics.cancelled += 1,
             _ => {}
         }
@@ -839,7 +845,9 @@ struct TaskMetrics {
     failed: u64,
     cancelled: u64,
     /// Sum of task execution durations in ms (`ended_at - started_at`) over
-    /// tasks that reported both bounds.
+    /// non-cancelled tasks that reported both bounds. Cancelled tasks represent
+    /// aborted or zombie executions whose `ended_at` reflects manual cleanup
+    /// rather than active execution.
     total_execution_ms: u64,
 }
 
@@ -1712,9 +1720,9 @@ struct CachedTask {
     execution_ms: Option<u64>,
 }
 
-/// Bumped when the cached value shape changes (v6 adds `inference_compute_ms`
-/// and unclamps speculative decode bursts).
-const TELEMETRY_CACHE_VERSION: u32 = 6;
+/// Bumped when the cached value shape changes (v7 excludes cancelled zombie tasks
+/// from `total_execution_ms`).
+const TELEMETRY_CACHE_VERSION: u32 = 7;
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 struct TelemetryCache {
@@ -2865,11 +2873,17 @@ mod tests {
             &state.join("tasks/task_c.json"),
             "{\"id\":\"task_c\",\"status\":\"completed\",\"ended_at\":1760000000000}",
         );
+        // Cancelled task with huge execution window: excluded from the sum.
+        write(
+            &state.join("tasks/task_d.json"),
+            "{\"id\":\"task_d\",\"status\":\"cancelled\",\"started_at\":1760000000000,\"ended_at\":1760500000000}",
+        );
 
         let s = derive_stats(&state, &Default::default());
         assert_eq!(s.total_tasks_completed, 2);
         assert_eq!(s.total_tasks_failed, 1);
-        // 300 + 5_400_000 ms; task_c contributes nothing.
+        assert_eq!(s.total_tasks_cancelled, 1);
+        // 300 + 5_400_000 ms; task_c and cancelled task_d contribute nothing.
         assert_eq!(s.total_task_execution_ms, 5_400_300);
 
         let _ = fs::remove_dir_all(&state);
