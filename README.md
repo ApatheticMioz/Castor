@@ -1,12 +1,27 @@
+<div align="center">
+
+<img src="https://raw.githubusercontent.com/ApatheticMioz/Castor/main/docs/assets/logo.svg" alt="Castor Logo" width="128" height="128">
+
 # Castor
 
-> Pair cloud orchestrators (Claude, Gemini, Antigravity) with local execution models (Ollama, vLLM, LM Studio) via MCP — offloading AST surgery, file operations, and test loops at **$0 token cost**.
+<p><b>Universal Cloud-to-Local Agent Bridge & MCP Microkernel in Rust</b></p>
 
-[![CI](https://img.shields.io/badge/CI-Passing-success?logo=githubactions&logoColor=white)](#testing--verification)
-[![npm](https://img.shields.io/npm/v/mcp-castor.svg?color=CB3837&logo=npm)](https://www.npmjs.com/package/mcp-castor)
-[![Rust](https://img.shields.io/badge/Rust-2024%20Edition-DEA584?logo=rust&logoColor=white)](https://www.rust-lang.org/)
-[![License: AGPL-3.0](https://img.shields.io/badge/License-AGPL--3.0-blue.svg)](LICENSE)
-[![Test Gate: Offline](https://img.shields.io/badge/Test%20Gate-cargo%20test%20--all-features%20%2B%20clippy-brightgreen.svg)](#testing--verification)
+<p>Pair cloud orchestrators (Claude Code, Google Antigravity) with local execution models (Ollama, vLLM, LM Studio) at <b>$0 token cost</b>.</p>
+
+<p>
+<a href="#testing--verification"><img alt="CI" src="https://img.shields.io/badge/CI-Passing-success?logo=githubactions&logoColor=white"></a>
+<a href="https://www.npmjs.com/package/mcp-castor"><img alt="npm" src="https://img.shields.io/npm/v/mcp-castor.svg?color=CB3837&logo=npm"></a>
+<a href="https://www.rust-lang.org/"><img alt="Rust" src="https://img.shields.io/badge/Rust-2024%20Edition-DEA584?logo=rust&logoColor=white"></a>
+<a href="LICENSE"><img alt="License: AGPL-3.0" src="https://img.shields.io/badge/License-AGPL--3.0-blue.svg"></a>
+<a href="#testing--verification"><img alt="Test Gate" src="https://img.shields.io/badge/Test%20Gate-cargo%20test%20--all-features%20%2B%20clippy-brightgreen.svg"></a>
+</p>
+
+<a href="https://raw.githubusercontent.com/ApatheticMioz/Castor/main/docs/assets/demo.mp4"><img src="https://raw.githubusercontent.com/ApatheticMioz/Castor/main/docs/assets/demo.webp" alt="Castor: Local Tool Runner for Cloud LLMs" width="100%"></a>
+
+<sub>Zero tool output tokens enter cloud context. In-process dispatch & 93.9% KV cache hit across 53 days of production telemetry.
+<a href="https://raw.githubusercontent.com/ApatheticMioz/Castor/main/docs/assets/demo.mp4">1080p60 MP4</a></sub>
+
+</div>
 
 ---
 
