@@ -776,6 +776,21 @@ pub async fn run_with(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
                 .map_err(|e| format!("cannot read job spec {spec_path}: {e}"))?;
             let spec: mcp::worker::JobSpec = serde_json::from_str(&raw)
                 .map_err(|e| format!("invalid job spec JSON {spec_path}: {e}"))?;
+            let task_id_clone = spec.task_id.clone();
+            let state_clone = state.clone();
+            let prev_hook = std::panic::take_hook();
+            std::panic::set_hook(Box::new(move |info| {
+                let err_msg = format!("Worker panicked: {info}");
+                let task_file = state_clone.tasks().join(format!("{task_id_clone}.json"));
+                if let Ok(raw) = std::fs::read_to_string(&task_file)
+                    && let Ok(mut rec) = serde_json::from_str::<serde_json::Value>(&raw)
+                {
+                    rec["status"] = serde_json::json!("failed");
+                    rec["reason"] = serde_json::json!(err_msg);
+                    let _ = std::fs::write(&task_file, serde_json::to_string_pretty(&rec).unwrap_or_default());
+                }
+                prev_hook(info);
+            }));
             mcp::worker::run_job(&spec, &state, &loaded.config)
                 .await
                 .map_err(|e| format!("worker failed: {e}"))?;

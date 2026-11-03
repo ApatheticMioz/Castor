@@ -159,11 +159,20 @@ impl FsExecutor {
         };
         let lines: Vec<&str> = content.split('\n').collect();
         let total = lines.len();
-        let start = start_line.saturating_sub(1);
-        let end = end_line
-            .map(|e| e.min(total))
-            .unwrap_or_else(|| (start + 800).min(total));
-        let slice = &lines[start.min(total)..end];
+        let (raw_start, raw_end) = match end_line {
+            Some(e) => {
+                let s = start_line.max(1);
+                let e = e.max(1);
+                (s.min(e), s.max(e))
+            }
+            None => {
+                let s = start_line.max(1);
+                (s, s.saturating_add(800).saturating_sub(1))
+            }
+        };
+        let start = raw_start.saturating_sub(1).min(total);
+        let end = raw_end.min(total).max(start);
+        let slice = &lines[start..end];
         let numbered: Vec<String> = slice
             .iter()
             .enumerate()
@@ -172,11 +181,12 @@ impl FsExecutor {
                 format!("{}: {}", start + i + 1, content)
             })
             .collect();
+        let showing_start = if slice.is_empty() { start } else { start + 1 };
         Ok(format!(
             "{} (total: {} lines, showing: {}-{})\n{}",
             resolved.display(),
             total,
-            start + 1,
+            showing_start,
             end,
             numbered.join("\n")
         ))
@@ -1021,5 +1031,34 @@ mod tests {
         let out = ex.read_file("min.js", 1, None).unwrap();
         assert!(out.contains("... [line truncated]"));
         assert!(out.len() < 3000);
+    }
+
+    #[test]
+    fn read_file_inverted_bounds_auto_swaps_and_does_not_panic() {
+        let root = test_root("read_inverted_bounds");
+        let file = root.join("test.txt");
+        let content = (1..=50)
+            .map(|i| format!("line {i}"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        fs::write(&file, &content).unwrap();
+        let ex = executor(&root);
+
+        // Inverted bounds: start 30, end 10
+        let out = ex.read_file("test.txt", 30, Some(10)).unwrap();
+        assert!(out.contains("showing: 10-30"));
+        assert!(out.contains("10: line 10"));
+        assert!(out.contains("30: line 30"));
+        assert!(!out.contains("9: line 9"));
+        assert!(!out.contains("31: line 31"));
+
+        // Single line when start == end
+        let out_single = ex.read_file("test.txt", 15, Some(15)).unwrap();
+        assert!(out_single.contains("showing: 15-15"));
+        assert!(out_single.contains("15: line 15"));
+
+        // Out of bounds start
+        let out_oob = ex.read_file("test.txt", 100, Some(200)).unwrap();
+        assert!(out_oob.contains("showing: 50-50"));
     }
 }
