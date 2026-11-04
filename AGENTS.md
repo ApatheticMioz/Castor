@@ -205,7 +205,7 @@ src/
   tools/
     mod.rs               # Composite tool executor (lean 8-tool core + feature-gated ast/paper) implementing runner::ToolExecutor
     fs.rs                # Filesystem tools (read, write, edit, list, search)
-    sandbox.rs           # 5-layer path containment and 137-vector security policy
+    sandbox.rs           # Zero-trust path containment and workspace security policy
     shell.rs             # Safe bash executor and command AST validator (git ops and Python run here)
     ast.rs               # [feature: ast] Structural AST search and replace via native ast-grep
     web.rs               # Web search (SearXNG -> Brave) and fetch (markdown conversion)
@@ -249,11 +249,11 @@ skills/                  # Reusable SKILL.md workflow recipes
 ### 4.2 ASK FIRST
 - **ASK** before adding a new dependency.
 - **ASK** before changing any constant in `src/config.rs` (ports, timeouts, budgets).
-- **ASK** before touching the 5-layer sandbox, the semaphore, or the wedge detector.
+- **ASK** before touching the security sandbox, the semaphore, or the wedge detector.
 - **ASK** before committing anything under `.evo/`, `.scratch/`, or `*.log`.
 
 ### 4.3 NEVER
-- **NEVER** let a file or shell operation escape the workspace root. The 5-layer defense is non-negotiable.
+- **NEVER** let a file or shell operation escape the workspace root. Zero-trust workspace containment is non-negotiable.
 - **NEVER** dump raw binary file bytes (`.png`, `.jpg`, `.exe`, etc.) into plaintext string buffers or transcripts (`BinaryFileError` guard). PDF documents are natively parsed in-memory into clean UTF-8 text by both `read_file` (local filesystem) and `web_fetch` (online URLs) via `lopdf`.
 - **NEVER** silently catch, suppress, or mask errors or upstream HTTP status codes (Rule 8).
 - **NEVER** weaken, skip, or delete a failing test to "unblock" the build.
@@ -285,12 +285,11 @@ explicit `ALLOW_ENGINE_INTERRUPT=1` opt-in before they execute.
 
 ## 6. Security & Reporting
 
-- The sandbox is a **zero-trust, 5-layer** defense-in-depth boundary:
-  PathEscape validation -> Symlink Realpath resolution -> Root-Overwrite Guard -> Dangerous-Shell Filter -> AST Syntax Validation & Evo Rollback.
+- The sandbox is a **zero-trust** defense-in-depth boundary:
+  Path Normalizer -> Symlink Realpath resolution -> Workspace Root Guard -> Dangerous-Shell Filter -> AST Syntax Validation.
 - **Never** open a public issue for a security vulnerability. Report
   privately per [`SECURITY.md`](SECURITY.md).
-- The 137-vector containment suite (`src/tools/sandbox.rs`: 123 attack
-  vectors blocked, 14 allow vectors) is the regression net for the boundary.
+- The sandbox containment test suite (`src/tools/sandbox.rs`) is the regression net for the boundary.
 
 ---
 

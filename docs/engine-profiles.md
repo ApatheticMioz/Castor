@@ -2,7 +2,7 @@
 
 Castor is an **engine-agnostic autonomous microkernel**. The underlying model (Bonsai, Qwen, DeepSeek, or any open-weights / proprietary model) and the serving engine (`llama.cpp`, `vLLM`, `SGLang`, `Ollama`, `LM Studio`, or a generic OpenAI-compatible API) are **pluggable profiles**, not system identity.
 
-The microkernel's core invariants—5-layer zero-trust sandbox, structural AST surgery, task registry, telemetry ledger, and evolutionary optimizer—remain invariant regardless of the serving engine. Only the **Serving Engine Profile** adapts to the target engine's wire protocol and hardware topology.
+The microkernel's core invariants—zero-trust workspace containment, structural AST surgery, task registry, telemetry ledger, and evolutionary optimizer—remain invariant regardless of the serving engine. Only the **Serving Engine Profile** adapts to the target engine's wire protocol and hardware topology.
 
 ---
 
@@ -14,7 +14,7 @@ Lead Architect (Cloud: Claude / Gemini / Antigravity)
         │  MCP over stdio (castor_coworker, castor_task, castor_server)
         ▼
 Castor Microkernel (Rust)
-        ├── 5-Layer Security Sandbox & AST Surgery
+        ├── Zero-Trust Security Sandbox & AST Surgery
         ├── File-Lease Cross-Process Semaphore (:18021 status server)
         ├── Zero-Turn Stream Proxy (:18022 SSE reassembly)
         └── Pluggable Engine Driver (`src/engine/backend.rs`)

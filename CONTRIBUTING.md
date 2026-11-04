@@ -151,7 +151,7 @@ src/
   tools/
     mod.rs               # Composite tool executor (lean 8-tool core + feature-gated ast/paper) implementing runner::ToolExecutor
     fs.rs                # Filesystem tools (read, write, edit, list, search)
-    sandbox.rs           # 5-layer path containment and 137-vector security policy
+    sandbox.rs           # Zero-trust path containment and workspace security policy
     shell.rs             # Safe bash executor and command AST validator (git ops and Python run here)
     ast.rs               # [feature: ast] Structural AST search and replace via native ast-grep
     web.rs               # Web search (SearXNG -> Brave) and fetch (markdown conversion)
@@ -202,7 +202,7 @@ Before requesting review, confirm:
 
 **Do not open a public issue for a security vulnerability.** Report it
 privately per [`SECURITY.md`](SECURITY.md), which lists the supported
-versions, the private reporting channel, and our response SLA. The 137-vector
+versions, the private reporting channel, and our response SLA. The sandbox
 containment suite (`src/tools/sandbox.rs`) is the regression net for the
 zero-trust boundary.
 
