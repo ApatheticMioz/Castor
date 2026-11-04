@@ -1,4 +1,4 @@
-<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 960 190" width="100%" height="100%" role="img" aria-label="Castor Workspace Containment Pipeline: 4 deterministic security stages with explicit flow arrows" style="font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif;">
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 960 150" width="100%" height="100%" role="img" aria-label="Castor Workspace Containment: 4 deterministic security stages with explicit flow arrows" style="font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif;">
   <defs>
     <!-- Obsidian Canvas -->
     <linearGradient id="bgSec3" x1="0%" y1="0%" x2="100%" y2="100%">
@@ -19,7 +19,7 @@
     </marker>
 
     <!-- Mid Beam Gradient (Blue transitioning to Amber) -->
-    <linearGradient id="secBeamMid" gradientUnits="userSpaceOnUse" x1="398" y1="80" x2="552" y2="80">
+    <linearGradient id="secBeamMid" gradientUnits="userSpaceOnUse" x1="398" y1="55" x2="552" y2="55">
       <stop offset="0%" stop-color="#38bdf8"/>
       <stop offset="50%" stop-color="#818cf8"/>
       <stop offset="100%" stop-color="#f59e0b"/>
@@ -32,61 +32,58 @@
   </defs>
 
   <!-- Container -->
-  <rect width="960" height="190" rx="14" fill="url(#bgSec3)" stroke="#1a2234" stroke-width="1.5"/>
-
-  <!-- Title -->
-  <text x="480" y="28" fill="#f8fafc" font-size="13" font-weight="800" letter-spacing="1" text-anchor="middle">WORKSPACE CONTAINMENT PIPELINE</text>
+  <rect width="960" height="150" rx="14" fill="url(#bgSec3)" stroke="#1a2234" stroke-width="1.5"/>
 
   <!-- ==================== CONNECTING PIPELINE ARROWS ==================== -->
   <!-- Arrow 1 -> 2 (Azure) -->
-  <line x1="178" y1="80" x2="332" y2="80" stroke="#38bdf8" stroke-width="2.5" marker-end="url(#arr-sec-blue)"/>
+  <line x1="178" y1="55" x2="332" y2="55" stroke="#38bdf8" stroke-width="2.5" marker-end="url(#arr-sec-blue)"/>
 
   <!-- Arrow 2 -> 3 (Phasing from Azure to Amber) -->
-  <line x1="398" y1="80" x2="552" y2="80" stroke="url(#secBeamMid)" stroke-width="2.5" marker-end="url(#arr-sec-mid)"/>
+  <line x1="398" y1="55" x2="552" y2="55" stroke="url(#secBeamMid)" stroke-width="2.5" marker-end="url(#arr-sec-mid)"/>
 
   <!-- Arrow 3 -> 4 (Amber) -->
-  <line x1="618" y1="80" x2="772" y2="80" stroke="#f59e0b" stroke-width="2.5" marker-end="url(#arr-sec-amber)"/>
+  <line x1="618" y1="55" x2="772" y2="55" stroke="#f59e0b" stroke-width="2.5" marker-end="url(#arr-sec-amber)"/>
 
   <!-- ==================== 4 PIPELINE NODES ==================== -->
 
   <!-- Node 1: Path Normalizer (x: 145) -->
-  <g transform="translate(145, 80)" filter="url(#shadowSec3)">
+  <g transform="translate(145, 55)" filter="url(#shadowSec3)">
     <circle cx="0" cy="0" r="28" fill="#091322" stroke="#38bdf8" stroke-width="2"/>
-    <text x="0" y="6" fill="#38bdf8" font-size="15" font-weight="800" text-anchor="middle">1</text>
-    <text x="0" y="46" fill="#f8fafc" font-size="12" font-weight="700" text-anchor="middle">Path Normalizer</text>
-    <text x="0" y="62" fill="#94a3b8" font-size="10" text-anchor="middle">Blocks ../ &amp; device escapes</text>
+    <text x="0" y="5" fill="#38bdf8" font-size="15" font-weight="800" text-anchor="middle">1</text>
+    <text x="0" y="44" fill="#f8fafc" font-size="12" font-weight="700" text-anchor="middle">Path Normalizer</text>
+    <text x="0" y="58" fill="#94a3b8" font-size="10" text-anchor="middle">Blocks ../ &amp; device escapes</text>
   </g>
 
   <!-- Node 2: Realpath Anchor (x: 365) -->
-  <g transform="translate(365, 80)" filter="url(#shadowSec3)">
+  <g transform="translate(365, 55)" filter="url(#shadowSec3)">
     <circle cx="0" cy="0" r="28" fill="#091322" stroke="#38bdf8" stroke-width="2"/>
-    <text x="0" y="6" fill="#38bdf8" font-size="15" font-weight="800" text-anchor="middle">2</text>
-    <text x="0" y="46" fill="#f8fafc" font-size="12" font-weight="700" text-anchor="middle">Realpath Anchor</text>
-    <text x="0" y="62" fill="#94a3b8" font-size="10" text-anchor="middle">Symlink containment audit</text>
+    <text x="0" y="5" fill="#38bdf8" font-size="15" font-weight="800" text-anchor="middle">2</text>
+    <text x="0" y="44" fill="#f8fafc" font-size="12" font-weight="700" text-anchor="middle">Realpath Anchor</text>
+    <text x="0" y="58" fill="#94a3b8" font-size="10" text-anchor="middle">Symlink containment audit</text>
   </g>
 
   <!-- Node 3: Command Filter (x: 585) -->
-  <g transform="translate(585, 80)" filter="url(#shadowSec3)">
+  <g transform="translate(585, 55)" filter="url(#shadowSec3)">
     <circle cx="0" cy="0" r="28" fill="#1c1206" stroke="#f59e0b" stroke-width="2"/>
-    <text x="0" y="6" fill="#f59e0b" font-size="15" font-weight="800" text-anchor="middle">3</text>
-    <text x="0" y="46" fill="#f8fafc" font-size="12" font-weight="700" text-anchor="middle">Command Filter</text>
-    <text x="0" y="62" fill="#94a3b8" font-size="10" text-anchor="middle">Blocks rm -rf &amp; fork bombs</text>
+    <text x="0" y="5" fill="#f59e0b" font-size="15" font-weight="800" text-anchor="middle">3</text>
+    <text x="0" y="44" fill="#f8fafc" font-size="12" font-weight="700" text-anchor="middle">Command Filter</text>
+    <text x="0" y="58" fill="#94a3b8" font-size="10" text-anchor="middle">Blocks rm -rf &amp; fork bombs</text>
   </g>
 
   <!-- Node 4: AST Syntax Gate (x: 805) -->
-  <g transform="translate(805, 80)" filter="url(#shadowSec3)">
+  <g transform="translate(805, 55)" filter="url(#shadowSec3)">
     <circle cx="0" cy="0" r="28" fill="#1c1206" stroke="#f59e0b" stroke-width="2"/>
-    <text x="0" y="6" fill="#f59e0b" font-size="15" font-weight="800" text-anchor="middle">4</text>
-    <text x="0" y="46" fill="#f8fafc" font-size="12" font-weight="700" text-anchor="middle">AST Syntax Gate</text>
-    <text x="0" y="62" fill="#fde68a" font-size="10" font-weight="700" text-anchor="middle">In-memory parse rollback</text>
+    <text x="0" y="5" fill="#f59e0b" font-size="15" font-weight="800" text-anchor="middle">4</text>
+    <text x="0" y="44" fill="#f8fafc" font-size="12" font-weight="700" text-anchor="middle">AST Syntax Gate</text>
+    <text x="0" y="58" fill="#fde68a" font-size="10" font-weight="700" text-anchor="middle">In-memory parse rollback</text>
   </g>
 
-  <!-- Bottom Subtitle / Synthesis (Generous vertical separation at y: 172) -->
-  <text x="480" y="172" fill="#64748b" font-size="10.5" font-weight="600" text-anchor="middle">
+  <!-- Bottom Synthesis (Generous vertical separation at y: 132) -->
+  <text x="480" y="132" fill="#64748b" font-size="10.5" font-weight="600" text-anchor="middle">
     <tspan fill="#38bdf8">Zero-Trust Workspace Boundary</tspan>
-    <tspan fill="#334155">  ──►  </tspan>
+    <tspan fill="#475569">  ──►  </tspan>
     <tspan fill="#818cf8">Deterministic Shell Verification</tspan>
-    <tspan fill="#334155">  ──►  </tspan>
+    <tspan fill="#475569">  ──►  </tspan>
     <tspan fill="#f59e0b">Rollback on Syntax Error</tspan>
   </text>
 </svg>

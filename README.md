@@ -49,7 +49,7 @@ npm install -g mcp-castor
 castor install --client all
 ```
 
-Prefer manual wiring? Drop this into your client's MCP config (`claude_desktop_config.json`, `~/.gemini/config/mcp_config.json`, or your Cursor MCP file):
+Prefer manual wiring? Drop this into your client's MCP config (`claude_desktop_config.json`, `~/.gemini/config/mcp_config.json`, or Cursor MCP settings):
 
 ```json
 {
@@ -65,8 +65,8 @@ Prefer manual wiring? Drop this into your client's MCP config (`claude_desktop_c
 ### 2. Connect Your Local Engine
 
 Castor auto-discovers any OpenAI-compatible endpoint at `http://127.0.0.1:18020/v1` by probing
-`/v1/models` — it detects the model name, context window (`max_model_len`), and engine backend
-(vLLM / llama.cpp / LM Studio / SGLang / Ollama) automatically. No config file, no env vars.
+`/v1/models` to detect the model name, context window (`max_model_len`), and engine backend
+(vLLM, llama.cpp, LM Studio, SGLang, Ollama) automatically. No config file or environment variables needed.
 
 For custom endpoints or non-default ports, set `CASTOR_BASE_URL`:
 
@@ -82,16 +82,16 @@ export CASTOR_BASE_URL="http://127.0.0.1:<port>/v1"
 ```
 
 See [docs/llama-cpp.md](docs/llama-cpp.md) for managed `llama-server` startup/shutdown and
-Windows/Linux examples. Configuration persists to `~/.castor/config.json`; env vars always win.
+Windows/Linux examples. Configuration persists to `~/.castor/config.json`; environment variables always win.
 
 ### 3. Pair Program at $0
 
-Prompt your cloud agent like this:
+Prompt your cloud agent:
 
 > *"Refactor auth middleware to use JWT and verify with `cargo test` using castor."*
 
-The cloud architect plans. Castor executes the edit-and-test loop against the local model —
-in-tree, at **$0 cloud token cost**. Only the concise, verified deliverable returns to the cloud.
+The cloud architect plans. Castor executes the edit-and-test loop against the local model
+in-tree at **$0 cloud token cost**. Only concise, verified deliverables return to the cloud.
 
 ---
 
@@ -99,18 +99,14 @@ in-tree, at **$0 cloud token cost**. Only the concise, verified deliverable retu
 
 | Dimension | Pure Cloud Agent | Local Model Alone | **Castor Dual-Agent** |
 |---|---|---|---|
-| **Architectural reasoning** | Top-tier | Limited by model size / capability | **Cloud frontier** (Claude, Gemini, Antigravity, Cursor) |
-| **Hands-on tool loop** | Every `read_file` / grep / compiler log is re-sent & re-billed at cloud rates per turn | Runs locally but with limited planning quality | **Local serving engine — $0 cloud tokens** |
-| **Cost per tool iteration** | Cloud API (billed per token, every turn) | ~$0 (but weak planning) | **~$0 cloud cost** — only the final deliverable crosses the wire |
-| **Context window pressure** | Grows with every file read, grep, log | Same | Isolated to local model |
-| **Latency** | Network round-trip per turn | Local | **Local** (in-process dispatch) |
-| **Safety & containment** | Varies by vendor | DIY | **Zero-trust workspace sandbox** (path / symlink / root / shell / AST) |
+| **Architectural reasoning** | Top-tier | Limited by model size & context | **Cloud frontier** (Claude, Gemini, Antigravity, Cursor) |
+| **Hands-on tool loop** | Every file read, grep, and log re-billed at cloud rates | Runs locally with limited planning quality | **Local serving engine ($0 cloud tokens)** |
+| **Cost per iteration** | Cloud API billed per token every turn | ~$0 (weak planning) | **~$0 cloud cost** (only verified deliverables cross the wire) |
+| **Context window load** | Grows rapidly with raw terminal dumps & logs | Same | Isolated entirely to local engine context |
+| **Loop latency** | Network round-trip per tool invocation | Local | **Local in-process tool dispatch** |
+| **Safety & containment** | Vendor-dependent | DIY | **Zero-trust workspace containment pipeline** |
 
-**The core insight:** In a cloud-only agent, every tool output — reading 20 files, running
-`cargo test`, grepping the tree — is re-sent and re-billed at cloud rates on every subsequent
-turn. Castor inverts this: tool loops execute **in-tree against the local serving engine at
-$0 cloud cost**. Only concise, verified deliverables (diffs, test verdicts, task summaries)
-return to the cloud.
+**The core insight:** In a cloud-only agent, every tool output (reading 20 files, running `cargo test`, grepping the codebase) is re-sent and re-billed at cloud rates on every subsequent turn. Castor inverts this: the hands-on tool loop executes in-tree against the local serving engine at **$0 cloud cost**, returning only verified deliverables to the cloud.
 
 ---
 
@@ -123,12 +119,12 @@ return to the cloud.
 
 1. **Cloud Architect** (Claude Code, Google Antigravity, Cursor) plans and dispatches a
    prompt via the MCP tool `castor_coworker(prompt, cwd)`.
-2. **stdio MCP transport** carries the request to the **Castor Microkernel** — a local
-   Rust execution server with an in-process 8-tool core and a zero-trust sandbox.
-3. **Castor → Local Serving Engine** over HTTP (`:18020`). The engine (vLLM / llama.cpp /
-   LM Studio / SGLang / Ollama) runs the in-tree tool loop — reading, editing, grepping,
-   `cargo test`, Python — at **$0 cloud token cost**.
-4. The **concise, verified deliverable** returns to the cloud architect for synthesis.
+2. **stdio MCP transport** carries the request to the **Castor Microkernel**, an in-process
+   Rust runtime providing an 8-tool core and zero-trust workspace containment.
+3. **Castor → Local Serving Engine** over HTTP (`:18020`). The engine (vLLM, llama.cpp,
+   LM Studio, SGLang, Ollama) executes the tool loop (reading, editing, grepping, running tests)
+   at **$0 cloud token cost**.
+4. The **concise, verified deliverable** returns to the cloud architect for final synthesis.
 
 For long tasks, the microkernel yields a durable task ID and a long-poll wait hook on
 `:18021` so the cloud supervisor sleeps at $0 and wakes the millisecond execution
@@ -151,11 +147,10 @@ REJECT  if delta_z > 1.5
 ```
 
 Near-tie margins are routed to an advisory review rather than silent admission.
-**Warm sessions** (continuations of an already-warm context) bypass the probe entirely —
-$0 cost, zero extra round-trip. The probe is **engine-agnostic**: vLLM uses a
-`guided_choice` single-token completion; llama.cpp uses a schema-constrained JSON chat
-decode. Same decision rule, DRY request-builder / verdict-decoder core in
-[`src/mcp/dgi.rs`](src/mcp/dgi.rs).
+**Warm sessions** (continuations of an already-warm context) bypass the probe entirely with
+zero overhead. The probe is **engine-agnostic**: vLLM uses a `guided_choice` single-token
+completion; llama.cpp uses a schema-constrained JSON chat decode. Same decision rule,
+DRY request-builder and verdict-decoder core in [`src/mcp/dgi.rs`](src/mcp/dgi.rs).
 
 ### 2. Zero-Turn Reactive Lifecycle
 
@@ -166,8 +161,8 @@ yield a durable task ID and a long-poll HTTP wait hook:
 curl -N "http://127.0.0.1:18021/task/<task-id>/wait"
 ```
 
-The cloud supervisor can block on that URL at **$0 token cost** and wakes reactively the
-millisecond execution completes — no poll storms, no prompt re-sends.
+The cloud supervisor blocks on that URL at **$0 token cost** and wakes reactively the
+millisecond execution completes without polling loops or prompt re-sends.
 Implemented in [`src/task/`](src/task/).
 
 ### 3. Token-Budget Semaphore & Cooperative Yielding
@@ -178,20 +173,17 @@ Zero-lock daemon. Slot admission is a **two-phase atomic `O_EXCL` lease**
 
 The admission budget is expressed in **tokens against the aggregate KV pool**
 (`pool_capacity_tokens`). When pressure builds, the **cooperative yield gate**
-(`pool_yield_gate`) lets younger sessions voluntarily yield to older ones —
+(`pool_yield_gate`) lets younger sessions voluntarily yield to older ones,
 preventing GPU VRAM thrashing under concurrency spikes.
 See [`src/task/semaphore.rs`](src/task/semaphore.rs).
 
 ### 4. Stream Proxy & Sanitizer
 
-A real-time SSE proxy that watches live model output on `:18022` for pathological behaviour:
+A real-time SSE proxy that monitors live model output on `:18022` for degenerate stream patterns:
 
-- **UTF-8 packet-fragment reassembly** — safe multi-byte / emoji boundaries across
-  TCP chunks.
-- **Repetition circuit breaker** — halts mid-stream degenerate loops (identical
-  content repeating within a rolling window) before they burn the whole context.
-- **Multimodal guards** — filters image / tool payload shapes that would corrupt
-  the downstream parser.
+- **UTF-8 packet-fragment reassembly**: Guarantees safe multi-byte and emoji boundaries across TCP chunks.
+- **Repetition circuit breaker**: Halts mid-stream degenerate loops (identical content repeating within a rolling window) before context exhaustion.
+- **Payload guards**: Filters malformed tool and image payloads before they reach the parser.
 
 See [`src/proxy/`](src/proxy/).
 
@@ -204,26 +196,23 @@ plateaus so the loop can be reset before drift accumulates.
 
 ### 6. Lean 8-Tool Core
 
-Eight tools in the core runtime — no bloat:
+Eight core tools cover all workspace execution without bloat:
 
 ```
 read_file · write_file · edit_file · list_dir · search_code · bash · web_search · web_fetch
 ```
 
-`git status / diff / log / commit` and ad-hoc `python3` run natively through `bash` —
-no separate git tool, no Python subprocess shim. Two **feature gates** extend the
-core for power users:
+Git operations (`git status`, `diff`, `log`, `commit`) and ad-hoc Python run natively through `bash`. Two optional feature gates extend capabilities for specialized workflows:
 
-- `ast` — structural `ast_search` / `ast_replace` via ast-grep, with automatic rollback on syntax error.
-- `paper` — `paper_lookup` against OpenAlex for verified academic metadata.
+- `ast`: Structural `ast_search` and `ast_replace` via ast-grep with automatic syntax rollback.
+- `paper`: Academic paper lookup (`paper_lookup`) against OpenAlex for verified research metadata and open-access PDFs.
 
 ### 7. Lazy Skills Engine
 
-Standard [`agentskills.io`](https://agentskills.io) `SKILL.md` catalog. Skills are
-**indexed in the system prompt** (just name + one-line summary) and **loaded on
-demand** — the full body is only injected when the current task matches. This keeps
-the **Turn-1 KV prefix cache warm and stable** across tasks in the same workspace,
-so a new prompt reuses the prior KV prefix instead of re-prefilling it.
+Compatible with the [`agentskills.io`](https://agentskills.io) `SKILL.md` standard. Skills are
+indexed in the system prompt with just their name and summary, and loaded on demand only when
+the active task requires them. This preserves the **Turn-1 KV prefix cache** across tasks in the
+same workspace so repeat prompts avoid full re-prefill penalties.
 
 ---
 
@@ -232,24 +221,24 @@ so a new prompt reuses the prior KV prefix instead of re-prefilling it.
 <img src="https://raw.githubusercontent.com/ApatheticMioz/Castor/main/docs/assets/security_sandbox.svg"
      alt="Castor workspace containment" width="100%">
 
-Castor enforces **zero-trust containment** at every tool boundary:
+Castor enforces zero-trust containment at every tool boundary:
 
 | Stage | Mechanism | What it blocks |
 |---|---|---|
-| **1 — Path normalizer** | Canonical path resolution & device namespace neutralization | `../../etc/passwd`, `C:\`, `NUL`, `CON` |
-| **2 — Realpath anchor** | Symlink traversal audit & workspace boundary guard (`refuse_out_of_tree`) | Symlink escapes, out-of-workspace writes, system directories |
-| **3 — Command filter** | Shell AST inspection & signature blocks (`shell.rs`) | `rm -rf /`, `format`, `dd`, fork bombs, `mkfs`, shell injection bypasses |
-| **4 — AST syntax gate** | Structural syntax parser validation before disk commit | In-memory rollback on syntax error across Rust, TS, JS, Python, JSON |
+| **1. Path normalizer** | Canonical path resolution & device namespace neutralization | `../../etc/passwd`, `C:\`, `NUL`, `CON` |
+| **2. Realpath anchor** | Symlink traversal audit & workspace boundary guard (`refuse_out_of_tree`) | Symlink escapes, out-of-workspace writes, system directories |
+| **3. Command filter** | Shell AST inspection & signature blocks (`shell.rs`) | `rm -rf /`, `format`, `dd`, fork bombs, `mkfs`, shell injection bypasses |
+| **4. AST syntax gate** | Structural syntax parser validation before disk commit | In-memory rollback on syntax error across Rust, TS, JS, Python, JSON |
 
-File edits in `fs.rs` use atomic fsync writes via `NamedTempFile` preventing torn states;
-structural mutations via `ast_replace` pass Layer 5 **before** the disk commit, atomically
-rolling back on syntax parse failure.
+File edits in `fs.rs` use atomic fsync writes via `NamedTempFile` to prevent torn states.
+Structural mutations via `ast_replace` validate syntax in-memory before writing to disk,
+atomically rolling back if parsing fails.
 
 ---
 
 ## MCP Tool Surface
 
-Castor registers **three stdio MCP tools** with any client:
+Castor registers three stdio MCP tools:
 
 | MCP Tool | Purpose | Actions / Parameters |
 |---|---|---|
@@ -257,21 +246,21 @@ Castor registers **three stdio MCP tools** with any client:
 | **`castor_task`** | Background task control & telemetry | `status` · `cancel` · `cancel_all` · `list` · `stats` · `extend_lease` |
 | **`castor_server`** | Local serving-engine supervisor | `status` · `start` · `stop` — managed engine lifecycle with health canaries and auto-healing |
 
-**Lean 8-tool core** (plus feature-gated extensions):
+**Tool Reference:**
 
 | Tool | Feature Gate | Capability |
 |---|---|---|
-| `read_file` | core | Read files, PDFs (native in-memory extraction), and images (PNG/JPG/WebP/GIF/BMP) |
-| `write_file` | core | Create or overwrite files (sandboxed to the workspace) |
-| `edit_file` | core | Exact-substring edit, uniqueness-guarded, atomic tempfile replacement |
-| `list_dir` | core | Directory listing with depth control |
-| `search_code` | core | Deterministic path-filtered text/regex search across the workspace |
-| `bash` | core | Isolated shell with the 5-layer filter; native `git` and `python3` |
-| `web_search` | core | Meta-search (SearXNG primary, Brave fallback) |
-| `web_fetch` | core | Fetch & convert HTML / PDF / plain text to clean Markdown |
+| `read_file` | core | Read files, PDFs (in-memory text extraction), and images (PNG/JPG/WebP/GIF/BMP) |
+| `write_file` | core | Create or overwrite files within the workspace root |
+| `edit_file` | core | Exact-substring edit with uniqueness checks and atomic tempfile replacement |
+| `list_dir` | core | Directory listing with optional depth control |
+| `search_code` | core | Deterministic path-filtered text and regex search |
+| `bash` | core | Sandboxed shell with AST command filter; native `git` and `python3` |
+| `web_search` | core | Web meta-search (SearXNG primary, Brave Search fallback) |
+| `web_fetch` | core | Fetch and convert HTML, PDF, or plaintext into clean Markdown |
 | `ast_search` | `ast` | Structural AST search via ast-grep (metavariables `$VAR`, `$$$ARGS`) |
-| `ast_replace` | `ast` | Structural AST replace with automatic rollback on syntax error |
-| `paper_lookup` | `paper` | Verified academic metadata via OpenAlex (title, DOI, affiliations, OA PDFs) |
+| `ast_replace` | `ast` | Structural AST refactoring with automatic rollback on syntax error |
+| `paper_lookup` | `paper` | Academic metadata via OpenAlex (titles, DOIs, affiliations, open-access PDFs) |
 
 ---
 
@@ -284,23 +273,21 @@ Castor registers **three stdio MCP tools** with any client:
 | **Claude Code** | `castor install --client claude` |
 | **Google Antigravity** | `castor install --client antigravity` (writes `~/.gemini/config/mcp_config.json`) |
 | **Claude Desktop** | `claude_desktop_config.json` (manual or via installer) |
-| **Cursor** | Cursor MCP config (manual) |
-| **Any MCP client** | stdio MCP — the JSON snippet in *Quickstart §1* works everywhere |
+| **Cursor** | Cursor MCP configuration |
+| **Any MCP client** | stdio MCP — standard JSON server configuration |
 
 **Supported Serving Engines**
 
 | Engine | Default Port | Notes |
 |---|---|---|
-| **vLLM** | 18020 | `owned_by: "vllm"` auto-detected via `/v1/models`; `guided_choice` DGI probe |
-| **llama.cpp** (`llama-server`) | 18020 | `owned_by: "llama.cpp"`; `--jinja` for tool-calling; managed start/stop via `castor server` |
-| **LM Studio** | 1234 | Override `CASTOR_BASE_URL` |
-| **SGLang** | 30000 | Override `CASTOR_BASE_URL` |
-| **Ollama** | 11434 | Override `CASTOR_BASE_URL` |
-| **Any OpenAI-compatible `/v1` endpoint** | any | Set `CASTOR_BASE_URL` |
+| **vLLM** | 18020 | Auto-detected via `/v1/models` (`owned_by: "vllm"`); `guided_choice` DGI probe |
+| **llama.cpp** (`llama-server`) | 18020 | Auto-detected via `/v1/models`; `--jinja` tool calling; managed start/stop via `castor server` |
+| **LM Studio** | 1234 | Configure via `CASTOR_BASE_URL` |
+| **SGLang** | 30000 | Configure via `CASTOR_BASE_URL` |
+| **Ollama** | 11434 | Configure via `CASTOR_BASE_URL` |
+| **Any OpenAI-compatible endpoint** | any | Configure via `CASTOR_BASE_URL` |
 
-Auto-detection reads `/v1/models` (model name, `max_model_len`) and wire-level
-fingerprints (`/health`, `/version`, `owned_by`) to pick the right engine profile
-without any user configuration.
+Auto-detection queries `/v1/models` (model name, `max_model_len`) and server fingerprints (`/health`, `/version`, `owned_by`) to apply optimal engine profiles without manual configuration.
 
 ---
 
@@ -313,7 +300,7 @@ castor mcp
 # Register with MCP clients (claude | antigravity | all)
 castor install --client all
 
-# Manage the local serving engine lifecycle (status | start | stop)
+# Manage local serving engine lifecycle (status | start | stop)
 castor server start
 
 # Operational telemetry dashboard (JSONL event ledger → live TUI)
@@ -326,32 +313,26 @@ castor config
 castor clean [--yes]
 ```
 
-Additional subcommands available: `castor status` (zero-turn HTTP wait server on
-`:18021`) and `castor proxy` (SSE stream proxy on `:18022`) — see
-[`src/cli.rs`](src/cli.rs) for the full surface.
+Additional subcommands include `castor status` (zero-turn HTTP wait server on `:18021`) and `castor proxy` (SSE stream proxy on `:18022`). See [`src/cli.rs`](src/cli.rs) for full CLI definitions.
 
 ---
 
 ## Building & Verification
 
 ```bash
-# Prerequisites: Rust ≥ 1.85 (2024 edition)
+# Clone repository
 git clone https://github.com/ApatheticMioz/Castor.git
 cd Castor
 
-# Release build
+# Build release binary
 cargo build --release
 
-# Offline test gate (unit + integration; deterministic mock/replay harnesses —
-# no running engine required; live GPU tests are #[ignore]-gated behind
-# ALLOW_ENGINE_INTERRUPT=1 and never run in this suite)
+# Offline test gate (deterministic unit and integration harnesses)
 cargo test --all-features
 
 # Strict Clippy gate (zero warnings enforced)
 cargo clippy --all-targets --all-features -- -D warnings
 ```
-
-Both gates run in CI; a PR that fails either is not mergeable.
 
 ---
 
