@@ -1,4 +1,4 @@
-<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1000 420" width="100%" height="100%" role="img" aria-label="Castor Architecture Diagram: Cloud Frontier and Local Frontier meet at the Castor MCP Bridge" style="font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif;">
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1000 460" width="100%" height="100%" role="img" aria-label="Castor Architecture Diagram: Cloud Frontier and Local Frontier meet at the Castor MCP Bridge" style="font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif;">
   <defs>
     <!-- Deep Obsidian Canvas -->
     <linearGradient id="bg" x1="0%" y1="0%" x2="100%" y2="100%">
@@ -20,126 +20,112 @@
       <stop offset="100%" stop-color="#ea580c"/>
     </linearGradient>
 
-    <!-- Center Convergence Gradient (Blue Meets Amber) -->
-    <linearGradient id="bridgeStreamTop" x1="0%" y1="0%" x2="100%" y2="0%">
+    <!-- Smooth Continuous Phasing: Blue -> Amber (Top Highway) -->
+    <linearGradient id="phaseBlueToAmber" x1="0%" y1="0%" x2="100%" y2="0%">
       <stop offset="0%" stop-color="#38bdf8"/>
-      <stop offset="50%" stop-color="#60a5fa"/>
-      <stop offset="52%" stop-color="#f59e0b"/>
+      <stop offset="35%" stop-color="#60a5fa"/>
+      <stop offset="50%" stop-color="#818cf8"/>
+      <stop offset="65%" stop-color="#fb923c"/>
       <stop offset="100%" stop-color="#f59e0b"/>
     </linearGradient>
 
-    <linearGradient id="bridgeStreamBottom" x1="100%" y1="0%" x2="0%" y2="0%">
+    <!-- Smooth Continuous Phasing: Amber -> Blue (Bottom Highway) -->
+    <linearGradient id="phaseAmberToBlue" x1="100%" y1="0%" x2="0%" y2="0%">
       <stop offset="0%" stop-color="#f59e0b"/>
-      <stop offset="48%" stop-color="#f59e0b"/>
-      <stop offset="50%" stop-color="#38bdf8"/>
+      <stop offset="35%" stop-color="#fb923c"/>
+      <stop offset="50%" stop-color="#818cf8"/>
+      <stop offset="65%" stop-color="#60a5fa"/>
       <stop offset="100%" stop-color="#38bdf8"/>
     </linearGradient>
 
-    <!-- Glow & Shadow Filters -->
-    <filter id="softGlowAzure" x="-20%" y="-20%" width="140%" height="140%">
-      <feGaussianBlur stdDeviation="8" result="blur"/>
-      <feComposite in="SourceGraphic" in2="blur" operator="over"/>
-    </filter>
-
-    <filter id="softGlowAmber" x="-20%" y="-20%" width="140%" height="140%">
-      <feGaussianBlur stdDeviation="8" result="blur"/>
-      <feComposite in="SourceGraphic" in2="blur" operator="over"/>
-    </filter>
-
     <!-- Arrow Markers -->
-    <marker id="arr-top" viewBox="0 0 10 10" refX="6" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse">
+    <marker id="arr-to-local" viewBox="0 0 10 10" refX="6" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse">
       <path d="M 0 1 L 9 5 L 0 9 z" fill="#f59e0b"/>
     </marker>
-    <marker id="arr-bottom" viewBox="0 0 10 10" refX="6" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse">
+    <marker id="arr-to-cloud" viewBox="0 0 10 10" refX="6" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse">
       <path d="M 0 1 L 9 5 L 0 9 z" fill="#38bdf8"/>
     </marker>
+
+    <!-- Soft Drop Shadow -->
+    <filter id="shadow" x="-10%" y="-10%" width="120%" height="120%">
+      <feDropShadow dx="0" dy="4" stdDeviation="6" flood-color="#000000" flood-opacity="0.6"/>
+    </filter>
   </defs>
 
   <!-- Background Canvas -->
-  <rect width="1000" height="420" rx="16" fill="url(#bg)" stroke="#1a2234" stroke-width="1.5"/>
+  <rect width="1000" height="460" rx="16" fill="url(#bg)" stroke="#1a2234" stroke-width="1.5"/>
 
   <!-- Subtle Horizon Bridge Baseline -->
-  <line x1="80" y1="200" x2="920" y2="200" stroke="#162032" stroke-width="1" stroke-dasharray="4 6"/>
+  <line x1="80" y1="210" x2="920" y2="210" stroke="#141c2c" stroke-width="1" stroke-dasharray="4 6"/>
 
   <!-- ========================================================================= -->
-  <!-- THE BRIDGE HIGHWAY: BLUE AND AMBER STREAMS MEETING IN THE MIDDLE           -->
+  <!-- HIGHWAY STREAMS: BLUE AND AMBER PHASING INTO EACH OTHER ACROSS THE BRIDGE  -->
   <!-- ========================================================================= -->
 
-  <!-- Top Highway Stream: Prompt & Task (Cloud -> Castor -> Local) -->
-  <path d="M 230 160 Q 500 100 770 160" fill="none" stroke="url(#bridgeStreamTop)" stroke-width="3" stroke-linecap="round" marker-end="url(#arr-top)"/>
+  <!-- Top Highway Stream: Prompt & Task (from Cloud x:230, y:160 -> sweeps up -> Local x:770, y:160) -->
+  <path d="M 230 160 Q 500 80 770 160" fill="none" stroke="url(#phaseBlueToAmber)" stroke-width="3" stroke-linecap="round" marker-end="url(#arr-to-local)"/>
 
-  <!-- Prompt Dispatch Pill (On the top highway) -->
-  <g transform="translate(440, 115)">
-    <rect width="120" height="24" rx="12" fill="#0c1524" stroke="url(#bridgeStreamTop)" stroke-width="1.2"/>
-    <text x="60" y="16" fill="#f8fafc" font-size="11" font-weight="700" text-anchor="middle" letter-spacing="0.5">TASK DISPATCH</text>
+  <!-- Prompt Dispatch Pill (Stationed directly on top highway, clear of center hub) -->
+  <g transform="translate(435, 78)" filter="url(#shadow)">
+    <rect width="130" height="24" rx="12" fill="#0c1524" stroke="url(#phaseBlueToAmber)" stroke-width="1.2"/>
+    <text x="65" y="16" fill="#f8fafc" font-size="10.5" font-weight="700" text-anchor="middle" letter-spacing="0.5">TASK DISPATCH</text>
   </g>
 
-  <!-- Bottom Highway Stream: Verified Diffs (Local -> Castor -> Cloud) -->
-  <path d="M 770 240 Q 500 300 230 240" fill="none" stroke="url(#bridgeStreamBottom)" stroke-width="3" stroke-linecap="round" marker-end="url(#arr-bottom)"/>
+  <!-- Bottom Highway Stream: Verified Diffs (from Local x:770, y:260 -> sweeps down -> Cloud x:230, y:260) -->
+  <path d="M 770 260 Q 500 340 230 260" fill="none" stroke="url(#phaseAmberToBlue)" stroke-width="3" stroke-linecap="round" marker-end="url(#arr-to-cloud)"/>
 
-  <!-- Verified Diffs Pill (On the bottom highway) -->
-  <g transform="translate(430, 260)">
-    <rect width="140" height="24" rx="12" fill="#0c1524" stroke="url(#bridgeStreamBottom)" stroke-width="1.2"/>
-    <text x="70" y="16" fill="#f8fafc" font-size="11" font-weight="700" text-anchor="middle" letter-spacing="0.5">GROUNDED DIFFS</text>
+  <!-- Grounded Diffs Pill (Stationed directly on bottom highway, clear of center hub) -->
+  <g transform="translate(425, 342)" filter="url(#shadow)">
+    <rect width="150" height="24" rx="12" fill="#0c1524" stroke="url(#phaseAmberToBlue)" stroke-width="1.2"/>
+    <text x="75" y="16" fill="#f8fafc" font-size="10.5" font-weight="700" text-anchor="middle" letter-spacing="0.5">GROUNDED DIFFS</text>
   </g>
 
   <!-- ========================================================================= -->
   <!-- 1. LEFT HUB: CLOUD FRONTIER (AZURE BLUE)                                 -->
   <!-- ========================================================================= -->
-  <g transform="translate(180, 200)">
+  <g transform="translate(180, 210)">
     <!-- Halo Glow -->
-    <circle cx="0" cy="0" r="64" fill="#0c1a30" stroke="#1d4ed8" stroke-width="1.5"/>
-    <circle cx="0" cy="0" r="54" fill="#0a1222" stroke="#2563eb" stroke-width="1"/>
+    <circle cx="0" cy="0" r="60" fill="#0c1a30" stroke="#1d4ed8" stroke-width="1.5" filter="url(#shadow)"/>
+    <circle cx="0" cy="0" r="50" fill="#0a1222" stroke="#2563eb" stroke-width="1"/>
 
     <!-- Cloud & Brain Vector Illustration -->
     <g transform="translate(-24, -18)">
-      <!-- Cloud Path -->
       <path d="M 10 24 A 12 12 0 0 1 22 12 A 16 16 0 0 1 44 14 A 12 12 0 0 1 54 26 A 10 10 0 0 1 50 36 L 8 36 A 10 10 0 0 1 10 24 Z" 
             fill="url(#azureGlow)"/>
-      <!-- Reasoning Spark -->
       <circle cx="32" cy="23" r="3.5" fill="#ffffff"/>
     </g>
 
     <!-- Cloud Typography -->
-    <text x="0" y="85" fill="#f8fafc" font-size="16" font-weight="800" text-anchor="middle" letter-spacing="0.5">Cloud Frontier</text>
-    <text x="0" y="103" fill="#94a3b8" font-size="11.5" text-anchor="middle">Claude Code · Antigravity · Cursor</text>
+    <text x="0" y="80" fill="#f8fafc" font-size="16" font-weight="800" text-anchor="middle" letter-spacing="0.5">Cloud Frontier</text>
+    <text x="0" y="98" fill="#94a3b8" font-size="11.5" text-anchor="middle">Claude Code · Antigravity · Cursor</text>
 
     <!-- Capability Pill -->
-    <g transform="translate(-75, 114)">
+    <g transform="translate(-75, 110)">
       <rect width="150" height="22" rx="11" fill="#0c1626" stroke="#2563eb" stroke-width="0.8"/>
       <text x="75" y="15" fill="#93c5fd" font-size="10" font-weight="700" text-anchor="middle">High-Reasoning Planning</text>
     </g>
   </g>
 
   <!-- ========================================================================= -->
-  <!-- 2. CENTER HUB: CASTOR BRIDGE (THE CONVERGENCE JUNCTION)                  -->
+  <!-- 2. CENTER HUB: CASTOR (WHERE BLUE & AMBER MEET)                          -->
   <!-- ========================================================================= -->
-  <g transform="translate(500, 200)">
-    <!-- Outer Dual-Color Convergence Ring (Blue on Left, Amber on Right) -->
-    <!-- Left Azure Arc -->
-    <path d="M 0 -58 A 58 58 0 0 0 0 58" fill="none" stroke="#38bdf8" stroke-width="3" stroke-linecap="round"/>
-    <!-- Right Amber Arc -->
-    <path d="M 0 58 A 58 58 0 0 0 0 -58" fill="none" stroke="#f59e0b" stroke-width="3" stroke-linecap="round"/>
+  <g transform="translate(500, 210)">
+    <!-- Phasing Outer Convergence Ring (Blue phases smoothly into Amber) -->
+    <circle cx="0" cy="0" r="52" fill="#080d16" stroke="url(#phaseBlueToAmber)" stroke-width="2.5" filter="url(#shadow)"/>
 
-    <!-- Center Bridge Core Orb -->
-    <circle cx="0" cy="0" r="48" fill="#090e17" stroke="#334155" stroke-width="1.5"/>
-
-    <!-- Castor Dioscuri Dyad Emblem (Miniature of logo.svg) -->
+    <!-- Core Dioscuri Dyad Emblem -->
     <g transform="translate(-20, -20) scale(0.078)">
-      <!-- Azure Arc -->
       <path d="M 416 104 A 215 215 0 0 0 98 119 L 151 172 A 141 141 0 0 1 364 156 Z" fill="url(#azureGlow)"/>
-      <!-- Amber Arc -->
       <path d="M 88 132 A 215 215 0 0 0 416 408 L 364 356 A 141 141 0 0 1 142 185 Z" fill="url(#amberGlow)"/>
     </g>
 
-    <!-- Center Typography -->
-    <text x="0" y="-72" fill="#f8fafc" font-size="16" font-weight="800" text-anchor="middle" letter-spacing="0.8">CASTOR BRIDGE</text>
-    <text x="0" y="-88" fill="#64748b" font-size="10.5" font-weight="600" text-anchor="middle">STDIO MCP RUNTIME</text>
+    <!-- Title Directly Above Center Hub (Clear of top highway) -->
+    <text x="0" y="-66" fill="#f8fafc" font-size="14" font-weight="800" text-anchor="middle" letter-spacing="1.5">CASTOR</text>
 
-    <!-- Microkernel Core Pillars (Centered Below) -->
-    <g transform="translate(-135, 76)">
-      <rect width="270" height="24" rx="12" fill="#0b121e" stroke="#1e293b" stroke-width="1"/>
-      <text x="135" y="16" fill="#cbd5e1" font-size="10.5" font-weight="600" text-anchor="middle">
+    <!-- Microkernel Core Pillars (Centered Directly Below Hub, Clear of bottom highway) -->
+    <g transform="translate(-130, 68)">
+      <rect width="260" height="22" rx="11" fill="#0b121e" stroke="#1e293b" stroke-width="1"/>
+      <text x="130" y="15" fill="#cbd5e1" font-size="10" font-weight="600" text-anchor="middle">
         <tspan fill="#38bdf8">DGI Firewall</tspan>
         <tspan fill="#475569">  ·  </tspan>
         <tspan fill="#f8fafc">Zero-Turn Wait</tspan>
@@ -152,10 +138,10 @@
   <!-- ========================================================================= -->
   <!-- 3. RIGHT HUB: LOCAL FRONTIER (AMBER GOLD)                                -->
   <!-- ========================================================================= -->
-  <g transform="translate(820, 200)">
+  <g transform="translate(820, 210)">
     <!-- Halo Glow -->
-    <circle cx="0" cy="0" r="64" fill="#1f140a" stroke="#b45309" stroke-width="1.5"/>
-    <circle cx="0" cy="0" r="54" fill="#140d06" stroke="#ea580c" stroke-width="1"/>
+    <circle cx="0" cy="0" r="60" fill="#1f140a" stroke="#b45309" stroke-width="1.5" filter="url(#shadow)"/>
+    <circle cx="0" cy="0" r="50" fill="#140d06" stroke="#ea580c" stroke-width="1"/>
 
     <!-- Terminal Monitor Vector Illustration -->
     <g transform="translate(-20, -18)">
@@ -167,11 +153,11 @@
     </g>
 
     <!-- Local Typography -->
-    <text x="0" y="85" fill="#f8fafc" font-size="16" font-weight="800" text-anchor="middle" letter-spacing="0.5">Local Frontier</text>
-    <text x="0" y="103" fill="#94a3b8" font-size="11.5" text-anchor="middle">vLLM · llama.cpp · LM Studio · SGLang</text>
+    <text x="0" y="80" fill="#f8fafc" font-size="16" font-weight="800" text-anchor="middle" letter-spacing="0.5">Local Frontier</text>
+    <text x="0" y="98" fill="#94a3b8" font-size="11.5" text-anchor="middle">vLLM · llama.cpp · LM Studio · SGLang</text>
 
     <!-- In-Tree Tool Loop Pill -->
-    <g transform="translate(-100, 114)">
+    <g transform="translate(-100, 110)">
       <rect width="200" height="22" rx="11" fill="#1c0f05" stroke="#f59e0b" stroke-width="0.8"/>
       <text x="100" y="15" fill="#fde68a" font-size="10" font-weight="700" text-anchor="middle">
         🔄 Tool Loop: read · edit · bash · test
@@ -179,7 +165,7 @@
     </g>
 
     <!-- $0 Cost Badge Attached Directly to Local Hub -->
-    <g transform="translate(-65, 142)">
+    <g transform="translate(-65, 138)">
       <rect width="130" height="20" rx="5" fill="#451a03" stroke="#d97706" stroke-width="0.8"/>
       <text x="65" y="14" fill="#fef08a" font-size="9.5" font-weight="800" text-anchor="middle" letter-spacing="0.4">★ $0 CLOUD TOKENS ★</text>
     </g>
@@ -188,7 +174,7 @@
   <!-- ========================================================================= -->
   <!-- 4. BOTTOM VALUE SUMMARY BAR                                              -->
   <!-- ========================================================================= -->
-  <g transform="translate(100, 375)">
+  <g transform="translate(100, 415)">
     <text x="400" y="16" fill="#64748b" font-size="11.5" font-weight="600" text-anchor="middle">
       <tspan fill="#38bdf8">Cloud reasons once</tspan>
       <tspan fill="#334155">  ──►  </tspan>
