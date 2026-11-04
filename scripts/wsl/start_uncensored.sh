@@ -21,9 +21,9 @@ export EMBED_UVA=${EMBED_UVA:-1}
 export MAX_SEQS=${MAX_SEQS:-1}
 export REQ_METRICS=1
 
-# Reasoning default: medium effort
+# Reasoning default: xhigh effort
 if [ -z "${EXTRA_ARGS:-}" ]; then
-  export EXTRA_ARGS='--default-chat-template-kwargs {"reasoning_effort":"medium"}'
+  export EXTRA_ARGS='--default-chat-template-kwargs {"reasoning_effort":"xhigh"}'
 fi
 
 # Universal Stateful UTF-8 & SSE Stream Sanitizer Proxy (port 18022 -> 18020)

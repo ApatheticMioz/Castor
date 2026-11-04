@@ -243,7 +243,7 @@ impl EngineClient {
                         "medium" | "med" => Some("medium"),
                         "low" => Some("low"),
                         "none" | "off" | "false" | "0" | "" => None,
-                        _ => Some("medium"),
+                        _ => Some("xhigh"),
                     };
                     if let Some(tier) = normalized {
                         body["reasoning_effort"] = json!(tier);

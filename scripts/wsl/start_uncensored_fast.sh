@@ -15,7 +15,7 @@ export PYTORCH_CUDA_ALLOC_CONF=expandable_segments:False
 export VLLM_WSL2_ENABLE_PIN_MEMORY=1
 
 if [ -z "${EXTRA_ARGS:-}" ]; then
-  export EXTRA_ARGS='--default-chat-template-kwargs {"reasoning_effort":"medium"}'
+  export EXTRA_ARGS='--default-chat-template-kwargs {"reasoning_effort":"xhigh"}'
 fi
 
 pkill -9 -f 'stream_proxy.js' 2>/dev/null || true

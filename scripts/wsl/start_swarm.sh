@@ -21,7 +21,7 @@ export EMBED_UVA=${EMBED_UVA:-1}
 export PYTORCH_CUDA_ALLOC_CONF=expandable_segments:False
 export VLLM_WSL2_ENABLE_PIN_MEMORY=1
 export REQ_METRICS=1
-export EXTRA_ARGS='--default-chat-template-kwargs {"reasoning_effort":"medium"}'
+export EXTRA_ARGS='--default-chat-template-kwargs {"reasoning_effort":"xhigh"}'
 
 castor_spawn_proxy
 exec bash single-user/start_qwen.sh

@@ -22,7 +22,7 @@ export MAX_SEQS=${MAX_SEQS:-2}
 export MAX_LEN=${MAX_LEN:-245760}
 export KV_MEM=${KV_MEM:-5261334938}
 export REQ_METRICS=1
-export EXTRA_ARGS='--default-chat-template-kwargs {"reasoning_effort":"medium"}'
+export EXTRA_ARGS='--default-chat-template-kwargs {"reasoning_effort":"xhigh"}'
 
 castor_spawn_proxy
 exec bash single-user/start_qwen.sh

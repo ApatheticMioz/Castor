@@ -10,8 +10,8 @@ export DFLASH_TOKENS=15
 export PREFIX_CACHE=1
 export PYTORCH_CUDA_ALLOC_CONF=expandable_segments:False
 export VLLM_WSL2_ENABLE_PIN_MEMORY=1
-# Server-side reasoning default: medium effort when no per-request override is sent.
-export EXTRA_ARGS='--default-chat-template-kwargs {"reasoning_effort":"medium"}'
+# Server-side reasoning default: xhigh effort when no per-request override is sent.
+export EXTRA_ARGS='--default-chat-template-kwargs {"reasoning_effort":"xhigh"}'
 # Universal Stateful UTF-8 & SSE Stream Sanitizer Proxy (port 18022 -> 18020)
 pkill -9 -f 'stream_proxy.js' 2>/dev/null || true
 setsid node ~/qwen-serving/stream_proxy.js < /dev/null > /tmp/stream_proxy.log 2>&1 &

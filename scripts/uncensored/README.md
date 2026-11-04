@@ -12,7 +12,7 @@ This directory serves the **Uncensored (Abliterated) Qwen3.8-27B** model with **
 
 ## Launchers
 
-* **`start.bat`**: Default launcher. Boots the huge config (245,760 context, KVarN 4/2-bit, DFlash2, medium reasoning effort).
+* **`start.bat`**: Default launcher. Boots the huge config (245,760 context, KVarN 4/2-bit, DFlash2, xhigh reasoning effort).
 * **`start_fast.bat`**: Low-latency launcher (57,344 context, ~107-130 tok/s).
 * **`start_noreason.bat`**: Boots with `reasoning_effort: none` for direct answers without `<think>` traces.
 * **`stop.bat`**: Stops any running vLLM server in WSL.

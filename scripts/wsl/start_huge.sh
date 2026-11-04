@@ -20,8 +20,8 @@ export MAX_SEQS=${MAX_SEQS:-4}
 export MAX_LEN=${MAX_LEN:-245760}
 export KV_MEM=${KV_MEM:-5261334938}
 export REQ_METRICS=1
-# Server-side reasoning default: medium effort when no per-request override is sent.
-export EXTRA_ARGS='--default-chat-template-kwargs {"reasoning_effort":"medium"}'
+# Server-side reasoning default: xhigh effort when no per-request override is sent.
+export EXTRA_ARGS='--default-chat-template-kwargs {"reasoning_effort":"xhigh"}'
 # Universal Stateful UTF-8 & SSE Stream Sanitizer Proxy (port 18022 -> 18020)
 # Derive the proxy binary from this script's own location so the repo is
 # portable (no hardcoded /mnt/d/ drive mount).
