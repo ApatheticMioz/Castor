@@ -43,7 +43,7 @@ which one it is before acting.
 | Persona | Runtime | Mandate | Hard Limits |
 |---|---|---|---|
 | **Lead Architect** | Cloud (Claude Code: GLM 5.3 text-only Plan / GLM 5.3-flash vision Exec; Antigravity: Gemini 3.8 Flash vision) | Architecture, task decomposition, plan & manifest authorship, supervisory steering, final synthesis. Proactively parallelizes independent work across concurrent coworker tasks. | **Never** bulk-read source into cloud context; **never** author code; offloads exploration in single-concern slices; sizes concurrent dispatches against the engine's aggregate KV pool, not a fixed slot count (MTP Swarm `MAX_SEQS=4`, 150k budget: up to 4 fresh/low-history short tasks, 2 medium, 1 heavy — further dispatches FIFO-queue on the slot semaphore, and the token-budget gate refuses any admission that would overcommit the pool); dispatch concurrent slices per-workspace so they share one warm KV prefix; **never** falls back to direct shell/file execution when coworker is offline. |
-| **Autonomous Execution Coworker** | Local peer programmer (Ternary-Bonsai-2-27B or configured model) inside the sandboxed 16-tool Castor runtime | Hands-on execution & peer engineering: explore, structural AST surgery, file editing, git inspection/committing, stateful Python scratchpad, local visual inspection (images and PDFs), web/paper research, and shell — all inside the sandbox. Proactively challenges flawed assumptions, proposes architectural alternatives, and returns grounded facts. The 16 in-tree tools are: `read_file`, `write_file`, `edit_file`, `list_dir`, `search_code`, `ast_search`, `ast_replace`, `git_status`, `git_diff`, `git_log`, `git_commit`, `python_repl`, `paper_lookup`, `web_search`, `web_fetch`, `bash`. | **Never** authors high-level plans/roadmaps; **never** escapes the sandbox root. |
+| **Autonomous Execution Coworker** | Local peer programmer (Ternary-Bonsai-2-27B or configured model) inside the sandboxed Castor runtime (lean 8-tool core) | Hands-on execution & peer engineering: explore, file editing, git and Python via the `bash` shell, structural AST surgery (feature-gated), local visual inspection (images and PDFs), web and academic research (the latter feature-gated) — all inside the sandbox. Proactively challenges flawed assumptions, proposes architectural alternatives, and returns grounded facts. The lean 8-tool core is: `read_file`, `write_file`, `edit_file`, `list_dir`, `search_code`, `bash`, `web_search`, `web_fetch`; the `ast` feature gate adds `ast_search` / `ast_replace` and the `paper` feature gate adds `paper_lookup`. Git operations and ad-hoc Python execution run natively through `bash`. | **Never** authors high-level plans/roadmaps; **never** escapes the sandbox root. |
 | **Autonomous Optimizer (Evo)** | Local, offline batch runner | Closed-loop mutation: propose -> evaluate -> select/revert against a deterministic fitness metric. | **Snapshot before mutating**; **revert on regression**; never edits files outside the candidate's snapshot list. |
 
 > **Honest attribution:** No agent may claim "we" or coworker collaboration
@@ -161,7 +161,8 @@ Use structural AST tools, not string matching, for syntactic discovery and refac
 ### 3.4 Module layout
 
 Feature flags (`Cargo.toml`): `default = ["mcp"]`; `mcp`, `evals`,
-`evo` (= `evals`), `full` (= `mcp` + `evo` + `evals`).
+`evo` (= `evals`), `ast` (structural AST surgery), `paper` (OpenAlex
+`paper_lookup`), `full` (= `mcp` + `evo` + `evals` + `ast` + `paper`).
 
 ```
 Cargo.toml               # Single root crate manifest (dual-target: lib + bin)
@@ -202,15 +203,13 @@ src/
     events.rs            # Session event ledger writer and replayer
     loop_detector.rs     # Action-hash sliding window loop breaker
   tools/
-    mod.rs               # Composite tool executor (16 builtin tools) implementing runner::ToolExecutor
+    mod.rs               # Composite tool executor (lean 8-tool core + feature-gated ast/paper) implementing runner::ToolExecutor
     fs.rs                # Filesystem tools (read, write, edit, list, search)
     sandbox.rs           # 5-layer path containment and 137-vector security policy
-    shell.rs             # Safe bash executor and command AST validator
-    ast.rs               # Structural AST search and replace via native ast-grep
-    git.rs               # Native git status/diff/log/commit primitives
-    repl.rs              # Stateful Python REPL scratchpad
+    shell.rs             # Safe bash executor and command AST validator (git ops and Python run here)
+    ast.rs               # [feature: ast] Structural AST search and replace via native ast-grep
     web.rs               # Web search (SearXNG -> Brave) and fetch (markdown conversion)
-    paper.rs             # Academic paper lookup via OpenAlex (metadata, affiliations, OA PDFs)
+    paper.rs             # [feature: paper] Academic paper lookup via OpenAlex (metadata, affiliations, OA PDFs)
     extensions.rs        # MCP extension bridges (rmcp child processes)
   evals/
     mod.rs               # Eval harness root

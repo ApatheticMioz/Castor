@@ -143,19 +143,37 @@ impl CastorMcpServer {
     /// Build the three `Tool` definitions with their JSON schemas.
     pub fn tools(&self) -> Vec<Tool> {
         let empty = std::sync::Arc::new(serde_json::Map::new());
+        // The coworker description is feature-aware: the default build exposes
+        // the lean 8-tool surface; `ast` adds structural AST surgery and
+        // `paper` adds OpenAlex `paper_lookup`. Git and Python run via `bash`.
+        let coworker_desc = if cfg!(feature = "ast") && cfg!(feature = "paper") {
+            "Autonomous Senior Peer Engineer (Castor Microkernel). Executes single-concern \
+             slices across a sandboxed environment: structural AST search/replace \
+             (ast_search, ast_replace), file I/O with native image & PDF inspection \
+             (read_file, write_file, edit_file, list_dir, search_code), Git & Python via the \
+             isolated shell (bash), academic & web research (paper_lookup, web_search, \
+             web_fetch)."
+        } else if cfg!(feature = "ast") {
+            "Autonomous Senior Peer Engineer (Castor Microkernel). Executes single-concern \
+             slices across a sandboxed environment: structural AST search/replace \
+             (ast_search, ast_replace), file I/O with native image & PDF inspection \
+             (read_file, write_file, edit_file, list_dir, search_code), Git & Python via the \
+             isolated shell (bash), and web research (web_search, web_fetch)."
+        } else if cfg!(feature = "paper") {
+            "Autonomous Senior Peer Engineer (Castor Microkernel). Executes single-concern \
+             slices across a sandboxed environment: file I/O with native image & PDF \
+             inspection (read_file, write_file, edit_file, list_dir, search_code), Git & \
+             Python via the isolated shell (bash), and academic & web research \
+             (paper_lookup, web_search, web_fetch)."
+        } else {
+            "Autonomous Senior Peer Engineer (Castor Microkernel). Executes single-concern \
+             slices across a lean 8-tool sandboxed environment: file I/O with native image & \
+             PDF inspection (read_file, write_file, edit_file, list_dir, search_code), Git & \
+             Python via the isolated shell (bash), and web research (web_search, web_fetch)."
+        };
         vec![
-            Tool::new(
-                self.tool_name(TOOL_COWORKER),
-                "Autonomous Senior Peer Engineer (Castor Microkernel). Executes single-concern \
-                 slices across a 16-tool sandboxed environment: structural AST search/replace \
-                 (ast_search, ast_replace), file I/O with native image & PDF inspection \
-                 (read_file, write_file, edit_file, list_dir, search_code), native Git \
-                 primitives (git_status, git_diff, git_log, git_commit), stateful Python \
-                 scratchpad (python_repl), academic & web research (paper_lookup, web_search, \
-                 web_fetch), and isolated shell execution (bash).",
-                empty.clone(),
-            )
-            .with_input_schema::<CoworkerParams>(),
+            Tool::new(self.tool_name(TOOL_COWORKER), coworker_desc, empty.clone())
+                .with_input_schema::<CoworkerParams>(),
             Tool::new(
                 self.tool_name(TOOL_TASK),
                 "Manage coworker tasks and telemetry: inspect live turn metrics and output \

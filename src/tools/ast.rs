@@ -1,3 +1,4 @@
+#![cfg(feature = "ast")]
 //! Structural AST search/replace powered by `ast-grep` (tree-sitter).
 //!
 //! Structural capabilities:

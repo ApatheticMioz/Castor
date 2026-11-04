@@ -2,14 +2,18 @@
 //!
 //! Provides [`CompositeExecutor`], the aggregate implementation of
 //! [`crate::runner::ToolExecutor`] that routes tool calls to filesystem,
-//! sandboxed shell, ast-grep, web search/fetch, or stdio extensions.
+//! sandboxed shell, web search/fetch, or stdio extensions.
+//!
+//! Capability gates: the default build exposes a lean 8-tool surface
+//! (file I/O, search, shell, web). `ast` adds structural AST surgery
+//! (`ast_search` / `ast_replace`) and `paper` adds OpenAlex `paper_lookup`.
 
+#[cfg(feature = "ast")]
 pub mod ast;
 pub mod extensions;
 pub mod fs;
-pub mod git;
+#[cfg(feature = "paper")]
 pub mod paper;
-pub mod repl;
 pub mod sandbox;
 pub mod shell;
 pub mod web;
@@ -20,10 +24,10 @@ use std::time::Duration;
 use async_trait::async_trait;
 use serde_json::{Value, json};
 
+#[cfg(feature = "paper")]
+use self::paper::PaperClient;
 use self::extensions::ExtensionBridge;
 use self::fs::FsExecutor;
-use self::paper::PaperClient;
-use self::repl::PythonRepl;
 use self::web::WebClient;
 use crate::engine::ToolSchema;
 use crate::runner::{ToolError, ToolExecutor, ToolOutcome};
@@ -33,8 +37,8 @@ pub struct CompositeExecutor {
     workspace_root: PathBuf,
     fs: FsExecutor,
     web: WebClient,
+    #[cfg(feature = "paper")]
     paper: PaperClient,
-    repl: PythonRepl,
     brave_api_key: Option<String>,
     extensions: Option<ExtensionBridge>,
 }
@@ -48,7 +52,11 @@ impl CompositeExecutor {
         Self::with_config(workspace_root, None, None, None, None, extensions)
     }
 
-    /// Create a new executor with explicit search and academic paper configuration.
+    /// Create a new executor with explicit search configuration.
+    ///
+    /// The OpenAlex credentials (`openalex_email` / `openalex_api_key`) only
+    /// take effect when the `paper` feature is enabled; they are ignored
+    /// otherwise so the signature stays stable across feature sets.
     pub fn with_config(
         workspace_root: impl Into<PathBuf>,
         searxng_url: Option<String>,
@@ -64,13 +72,14 @@ impl CompositeExecutor {
         let searx_base =
             searxng_url.or_else(|| crate::tools::web::DEFAULT_SEARXNG.map(str::to_string));
         let web = WebClient::with_base_urls(searx_base, None);
-        let paper = PaperClient::with_credentials(openalex_email, openalex_api_key);
+        #[allow(unused_variables)]
+        let (paper_email, paper_key) = (openalex_email, openalex_api_key);
         Ok(Self {
             fs,
             workspace_root: root.clone(),
             web,
-            paper,
-            repl: PythonRepl::new(root),
+            #[cfg(feature = "paper")]
+            paper: PaperClient::with_credentials(paper_email, paper_key),
             brave_api_key,
             extensions,
         })
@@ -83,6 +92,7 @@ impl CompositeExecutor {
     }
 
     /// Set an explicit PaperClient (useful for testing with mock base URLs).
+    #[cfg(feature = "paper")]
     pub fn with_paper_client(mut self, paper: PaperClient) -> Self {
         self.paper = paper;
         self
@@ -108,8 +118,16 @@ impl CompositeExecutor {
 }
 
 /// The standard set of built-in tool schemas exposed to the model.
+///
+/// The default build exposes the lean 8-tool surface
+/// (`read_file`, `write_file`, `edit_file`, `list_dir`, `search_code`,
+/// `bash`, `web_search`, `web_fetch`). `ast` appends the structural AST
+/// surgery tools; `paper` appends OpenAlex `paper_lookup`.
 pub fn builtin_tool_schemas() -> Vec<ToolSchema> {
-    vec![
+    // `mut` is needed only for the feature-gated `push` blocks below (`ast`,
+    // `paper`); allow the warning on builds where both are off.
+    #[allow(unused_mut)]
+    let mut schemas = vec![
         ToolSchema {
             name: "read_file".to_string(),
             description: "Read a file from disk (whole file or 1-based line range). Natively extracts text from PDFs and loads images (.png, .jpg, .webp, .gif, .bmp) for visual inspection. Prefer a single encompassing line range over repeated small reads on the same file.".to_string(),
@@ -176,7 +194,7 @@ pub fn builtin_tool_schemas() -> Vec<ToolSchema> {
         },
         ToolSchema {
             name: "bash".to_string(),
-            description: "Execute a shell command with process-group isolation and safety validation. Reserve for builds, test suites, linters, and external CLIs (e.g. cargo, gh); do NOT use bash for file reading, text search, git status/diff/log/commit, or Python calculations where native tools exist.".to_string(),
+            description: "Execute a shell command with process-group isolation and safety validation. Use for builds, test suites, linters, git operations (status/diff/log/commit), Python execution, and external CLIs (e.g. cargo, gh); do NOT use bash for reading files, text search, or directory listing where native tools exist.".to_string(),
             parameters: json!({
                 "type": "object",
                 "properties": {
@@ -184,33 +202,6 @@ pub fn builtin_tool_schemas() -> Vec<ToolSchema> {
                     "timeout_ms": { "type": "integer", "description": "Execution timeout in milliseconds (default: 30000)" }
                 },
                 "required": ["command"]
-            }),
-        },
-        ToolSchema {
-            name: "ast_search".to_string(),
-            description: "Structural AST search using ast-grep pattern syntax with metavariables ($VAR, $$$ARGS). Prefer over regex or search_code when matching syntactic constructs (functions, structs, call sites, imports).".to_string(),
-            parameters: json!({
-                "type": "object",
-                "properties": {
-                    "pattern": { "type": "string", "description": "ast-grep pattern (e.g. 'function $NAME($$$ARGS) { $$$BODY }')" },
-                    "lang": { "type": "string", "description": "Target language (js, ts, py, rs, etc.)" },
-                    "path": { "type": "string", "description": "Optional file or directory path to search within (defaults to workspace root)" }
-                },
-                "required": ["pattern", "lang"]
-            }),
-        },
-        ToolSchema {
-            name: "ast_replace".to_string(),
-            description: "Structural AST search-and-replace across files with automatic rollback if any modified file fails syntax validation.".to_string(),
-            parameters: json!({
-                "type": "object",
-                "properties": {
-                    "pattern": { "type": "string", "description": "ast-grep pattern to match" },
-                    "replacement": { "type": "string", "description": "Replacement pattern" },
-                    "lang": { "type": "string", "description": "Target language" },
-                    "path": { "type": "string", "description": "Optional file or directory path to replace within (defaults to workspace root)" }
-                },
-                "required": ["pattern", "replacement", "lang"]
             }),
         },
         ToolSchema {
@@ -238,7 +229,42 @@ pub fn builtin_tool_schemas() -> Vec<ToolSchema> {
                 "required": ["url"]
             }),
         },
-        ToolSchema {
+    ];
+
+    #[cfg(feature = "ast")]
+    {
+        schemas.push(ToolSchema {
+            name: "ast_search".to_string(),
+            description: "Structural AST search using ast-grep pattern syntax with metavariables ($VAR, $$$ARGS). Prefer over regex or search_code when matching syntactic constructs (functions, structs, call sites, imports).".to_string(),
+            parameters: json!({
+                "type": "object",
+                "properties": {
+                    "pattern": { "type": "string", "description": "ast-grep pattern (e.g. 'function $NAME($$$ARGS) { $$$BODY }')" },
+                    "lang": { "type": "string", "description": "Target language (js, ts, py, rs, etc.)" },
+                    "path": { "type": "string", "description": "Optional file or directory path to search within (defaults to workspace root)" }
+                },
+                "required": ["pattern", "lang"]
+            }),
+        });
+        schemas.push(ToolSchema {
+            name: "ast_replace".to_string(),
+            description: "Structural AST search-and-replace across files with automatic rollback if any modified file fails syntax validation.".to_string(),
+            parameters: json!({
+                "type": "object",
+                "properties": {
+                    "pattern": { "type": "string", "description": "ast-grep pattern to match" },
+                    "replacement": { "type": "string", "description": "Replacement pattern" },
+                    "lang": { "type": "string", "description": "Target language" },
+                    "path": { "type": "string", "description": "Optional file or directory path to replace within (defaults to workspace root)" }
+                },
+                "required": ["pattern", "replacement", "lang"]
+            }),
+        });
+    }
+
+    #[cfg(feature = "paper")]
+    {
+        schemas.push(ToolSchema {
             name: "paper_lookup".to_string(),
             description: "Search peer-reviewed academic literature via OpenAlex (250M+ works) by query, DOI, OpenAlex ID, or arXiv ID. Returns verified titles, authors, affiliations, citations, abstracts, and Open Access PDF links.".to_string(),
             parameters: json!({
@@ -249,65 +275,10 @@ pub fn builtin_tool_schemas() -> Vec<ToolSchema> {
                 },
                 "required": ["query"]
             }),
-        },
-        ToolSchema {
-            name: "python_repl".to_string(),
-            description: "Execute Python code in a persistent, stateful workspace-scoped interpreter session. Variables, imports, and functions persist across calls within the session. Prefer over repeated bash python -c invocations.".to_string(),
-            parameters: json!({
-                "type": "object",
-                "properties": {
-                    "code": { "type": "string", "description": "Python code to evaluate. May contain multiple statements; if the final statement is a bare expression, its repr is returned." },
-                    "reset": { "type": "boolean", "description": "If true, discard the current session and start a fresh one before evaluating (default: false)" }
-                },
-                "required": ["code"]
-            }),
-        },
-        ToolSchema {
-            name: "git_status".to_string(),
-            description: "Return structured repository status (branch, clean/dirty state, and staged/unstaged/untracked file lists) without spawning bash. Prefer over bash git status.".to_string(),
-            parameters: json!({
-                "type": "object",
-                "properties": {
-                    "path": { "type": "string", "description": "Optional relative path to limit status to" }
-                }
-            }),
-        },
-        ToolSchema {
-            name: "git_diff".to_string(),
-            description: "Return unified git diff for working tree or staged index (--cached), optionally scoped to specific sandbox-validated file paths. Prefer over bash git diff.".to_string(),
-            parameters: json!({
-                "type": "object",
-                "properties": {
-                    "staged": { "type": "boolean", "description": "Show staged changes instead of unstaged (default: false)" },
-                    "stat": { "type": "boolean", "description": "Show summary stats only (default: false)" },
-                    "path": { "type": "string", "description": "Optional relative path to limit diff to" }
-                }
-            }),
-        },
-        ToolSchema {
-            name: "git_log".to_string(),
-            description: "Return structured recent commit history (hash, short_hash, author, date, subject). Prefer over bash git log.".to_string(),
-            parameters: json!({
-                "type": "object",
-                "properties": {
-                    "limit": { "type": "integer", "description": "Number of commits to show (default: 10, max: 100)" },
-                    "path": { "type": "string", "description": "Optional relative path to limit log to" }
-                }
-            }),
-        },
-        ToolSchema {
-            name: "git_commit".to_string(),
-            description: "Stage and commit changes inside the sandboxed workspace. When paths are provided, commits ONLY those paths (git commit --only) without sweeping unrelated pre-staged index entries; when paths is omitted, validates all staged index entries against sandbox write policy.".to_string(),
-            parameters: json!({
-                "type": "object",
-                "properties": {
-                    "message": { "type": "string", "description": "Commit message (must not be empty)" },
-                    "paths": { "type": "array", "items": { "type": "string" }, "description": "Optional list of file paths to stage before committing" }
-                },
-                "required": ["message"]
-            }),
-        },
-    ]
+        });
+    }
+
+    schemas
 }
 
 #[async_trait]
@@ -368,7 +339,8 @@ impl ToolExecutor for CompositeExecutor {
                 }
             }
 
-            // AST tools
+            // AST tools (feature-gated)
+            #[cfg(feature = "ast")]
             "ast_search" => {
                 let pattern = args.get("pattern").and_then(|v| v.as_str()).unwrap_or("");
                 let lang = args.get("lang").and_then(|v| v.as_str()).unwrap_or("");
@@ -407,6 +379,7 @@ impl ToolExecutor for CompositeExecutor {
                 }
             }
 
+            #[cfg(feature = "ast")]
             "ast_replace" => {
                 let pattern = args.get("pattern").and_then(|v| v.as_str()).unwrap_or("");
                 let replacement = args
@@ -486,6 +459,7 @@ impl ToolExecutor for CompositeExecutor {
                 }
             }
 
+            #[cfg(feature = "paper")]
             "paper_lookup" => {
                 let query = args.get("query").and_then(|v| v.as_str()).unwrap_or("");
                 let limit = args
@@ -507,82 +481,6 @@ impl ToolExecutor for CompositeExecutor {
                                 .join("\n\n---\n\n");
                             Ok(ToolOutcome { text: formatted })
                         }
-                    }
-                    Err(e) => Ok(ToolOutcome {
-                        text: format!("Error: {e}"),
-                    }),
-                }
-            }
-
-            // Git tools
-            "git_status" => {
-                let path = args.get("path").and_then(|v| v.as_str());
-                let policy = self.fs.policy();
-                match git::git_status(policy, path).await {
-                    Ok(text) => Ok(ToolOutcome { text }),
-                    Err(e) => Ok(ToolOutcome {
-                        text: format!("Error: {e}"),
-                    }),
-                }
-            }
-
-            "git_diff" => {
-                let staged = args
-                    .get("staged")
-                    .and_then(|v| v.as_bool())
-                    .unwrap_or(false);
-                let stat = args.get("stat").and_then(|v| v.as_bool()).unwrap_or(false);
-                let path = args.get("path").and_then(|v| v.as_str());
-                let policy = self.fs.policy();
-                match git::git_diff(policy, staged, stat, path).await {
-                    Ok(text) => Ok(ToolOutcome { text }),
-                    Err(e) => Ok(ToolOutcome {
-                        text: format!("Error: {e}"),
-                    }),
-                }
-            }
-
-            "git_log" => {
-                let limit = args.get("limit").and_then(|v| v.as_u64()).map(|l| l as u32);
-                let path = args.get("path").and_then(|v| v.as_str());
-                let policy = self.fs.policy();
-                match git::git_log(policy, limit, path).await {
-                    Ok(text) => Ok(ToolOutcome { text }),
-                    Err(e) => Ok(ToolOutcome {
-                        text: format!("Error: {e}"),
-                    }),
-                }
-            }
-
-            "git_commit" => {
-                let message = args.get("message").and_then(|v| v.as_str()).unwrap_or("");
-                let paths: Option<Vec<String>> =
-                    args.get("paths").and_then(|v| v.as_array()).map(|a| {
-                        a.iter()
-                            .filter_map(|v| v.as_str().map(|s| s.to_string()))
-                            .collect()
-                    });
-                let policy = self.fs.policy();
-                match git::git_commit(policy, message, paths.as_deref()).await {
-                    Ok(text) => Ok(ToolOutcome { text }),
-                    Err(e) => Ok(ToolOutcome {
-                        text: format!("Error: {e}"),
-                    }),
-                }
-            }
-
-            // In-session Python REPL
-            "python_repl" => {
-                let code = args.get("code").and_then(|v| v.as_str()).unwrap_or("");
-                let reset = args.get("reset").and_then(|v| v.as_bool()).unwrap_or(false);
-                match self.repl.eval(code, reset).await {
-                    Ok(text) => {
-                        let text = if text.is_empty() {
-                            "(no output)".to_string()
-                        } else {
-                            text
-                        };
-                        Ok(ToolOutcome { text })
                     }
                     Err(e) => Ok(ToolOutcome {
                         text: format!("Error: {e}"),
@@ -633,14 +531,38 @@ mod tests {
         let ws = temp_workspace();
         let executor = CompositeExecutor::new(&ws, None).expect("failed to create executor");
 
-        // Check schemas list
+        // Check schemas list (feature-aware: 8 default, +2 under `ast`,
+        // +1 under `paper`).
         let schemas = executor.tool_schemas();
-        assert_eq!(schemas.len(), 16);
+        let expected = 8
+            + {
+                #[cfg(feature = "ast")]
+                {
+                    2
+                }
+                #[cfg(not(feature = "ast"))]
+                {
+                    0
+                }
+            }
+            + {
+                #[cfg(feature = "paper")]
+                {
+                    1
+                }
+                #[cfg(not(feature = "paper"))]
+                {
+                    0
+                }
+            };
+        assert_eq!(schemas.len(), expected);
         let names: Vec<&str> = schemas.iter().map(|s| s.name.as_str()).collect();
         assert!(names.contains(&"read_file"));
         assert!(names.contains(&"bash"));
-        assert!(names.contains(&"ast_search"));
         assert!(names.contains(&"web_search"));
+        #[cfg(feature = "ast")]
+        assert!(names.contains(&"ast_search"));
+        #[cfg(feature = "paper")]
         assert!(names.contains(&"paper_lookup"));
 
         // Write a file

@@ -1,3 +1,4 @@
+#![cfg(feature = "paper")]
 //! Academic paper lookup client querying OpenAlex (`api.openalex.org`).
 //!
 //! Provides deterministic bibliographic metadata (title, year, venue, DOI,

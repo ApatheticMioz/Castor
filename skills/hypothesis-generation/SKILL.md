@@ -18,7 +18,7 @@ is not a hypothesis — do not propose it.
    - Code structure around the failing frame: `ast_search` and
      `search_code` for the symbols and call sites; `read_file` for the
      exact region.
-   - Recent history: `git_log` (what changed) and `git_diff` (how it
+   - Recent history: `git log` (what changed) and `git diff` (how it
      changed) for the relevant paths.
 2. **Ranked Falsifiable Hypotheses** — Formulate **1–3**
    single-variable hypotheses, in decreasing order of probability.
@@ -28,7 +28,7 @@ is not a hypothesis — do not propose it.
    - **(b)** the **predicted mechanism** — one sentence: "Changing X
      will cause Y because <mechanism>";
    - **(c)** the **minimal reproduction or measurement command**
-     (`python_repl` for arithmetic/data checks, `bash` for
+     (`bash`: `python3` for arithmetic/data checks, or the
      test/benchmark commands) that falsifies the hypothesis in a
      single pass.
 3. **Single-Variable Discrimination** — Test the highest-probability

@@ -107,7 +107,8 @@ Local Serving Engine (WSL2 / Linux, :18020)  ->  Serving Provider (Qwen3.8-27B d
 ### Module Layout
 
 Feature flags (`Cargo.toml`): `default = ["mcp"]`; `mcp`, `evals`,
-`evo` (= `evals`), `full` (= `mcp` + `evo` + `evals`).
+`evo` (= `evals`), `ast` (structural AST surgery), `paper` (OpenAlex
+`paper_lookup`), `full` (= `mcp` + `evo` + `evals` + `ast` + `paper`).
 
 ```
 Cargo.toml               # Single root crate manifest (dual-target: lib + bin)
@@ -148,15 +149,13 @@ src/
     events.rs            # Session event ledger writer and replayer
     loop_detector.rs     # Action-hash sliding window loop breaker
   tools/
-    mod.rs               # Composite tool executor (16 builtin tools) implementing runner::ToolExecutor
+    mod.rs               # Composite tool executor (lean 8-tool core + feature-gated ast/paper) implementing runner::ToolExecutor
     fs.rs                # Filesystem tools (read, write, edit, list, search)
     sandbox.rs           # 5-layer path containment and 137-vector security policy
-    shell.rs             # Safe bash executor and command AST validator
-    ast.rs               # Structural AST search and replace via native ast-grep
-    git.rs               # Native git status/diff/log/commit primitives
-    repl.rs              # Stateful Python REPL scratchpad
+    shell.rs             # Safe bash executor and command AST validator (git ops and Python run here)
+    ast.rs               # [feature: ast] Structural AST search and replace via native ast-grep
     web.rs               # Web search (SearXNG -> Brave) and fetch (markdown conversion)
-    paper.rs             # Academic paper lookup via OpenAlex (metadata, affiliations, OA PDFs)
+    paper.rs             # [feature: paper] Academic paper lookup via OpenAlex (metadata, affiliations, OA PDFs)
     extensions.rs        # MCP extension bridges (rmcp child processes)
   evals/
     mod.rs               # Eval harness root

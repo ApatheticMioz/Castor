@@ -18,17 +18,24 @@ default = ["mcp"]
 mcp = []
 evals = []
 evo = ["evals"]
-full = ["mcp", "evo", "evals"]
+# Opt-in capability gates. The default build exposes a lean 8-tool surface
+# (file I/O, search, shell, web). `ast` adds structural AST surgery
+# (ast_search / ast_replace) and its `ast-grep-core` dependency; `paper` adds
+# the OpenAlex `paper_lookup` tool. `full` enables everything.
+ast = ["dep:ast-grep-core", "dep:ast-grep-language"]
+paper = []
+full = ["mcp", "evo", "evals", "ast", "paper"]
 
 [[bin]]
 name = "castor"
 path = "src/main.rs"
 
 [dependencies]
-ast-grep-core = "0.45"
+# Optional under the `ast` feature (structural AST surgery tools).
 # The `builtin-parser` feature enables all 28 bundled tree-sitter grammars in
 # one shot, so `SupportLang::from_path` can resolve any of them.
-ast-grep-language = { version = "0.45", default-features = false, features = ["builtin-parser"] }
+ast-grep-core = { version = "0.45", optional = true }
+ast-grep-language = { version = "0.45", default-features = false, features = ["builtin-parser"], optional = true }
 rmcp = { version = "3.5.0", features = ["server", "client", "transport-child-process", "transport-io"] }
 tokio = { version = "1.53.1", features = ["full"] }
 axum = "0.8.9"

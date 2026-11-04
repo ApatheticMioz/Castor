@@ -53,7 +53,8 @@ impl FsExecutor {
         Self { policy }
     }
 
-    /// Access the underlying [`SandboxPolicy`] (used by git tools to validate paths).
+    /// Access the underlying [`SandboxPolicy`] (used by the filesystem and
+    /// shell executors to validate paths).
     pub fn policy(&self) -> &SandboxPolicy {
         &self.policy
     }

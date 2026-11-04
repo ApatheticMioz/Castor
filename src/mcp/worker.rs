@@ -107,14 +107,42 @@ pub fn build_worker_system_prompt(
 Peer Engineering Invariants:\n\
 - Senior Peer Mandate: Reason, decide, explore, and execute autonomously. Challenge flawed assumptions, cite conflicting code coordinates, and propose cleaner architectural alternatives rather than looping on broken premises.\n\
 - Ground-Truth Hierarchy: Active source code and compiler/test diagnostics are ground truth. Documentation and notes are reference ledgers. Write present-state truth only—never historical changelogs, ticket tags, or defensive lore.\n\
-- Tool Routing Hierarchy (Prefer Native Tools Over Bash):\n\
-  * Code Discovery & Refactoring: Use `ast_search` and `ast_replace` for structural syntax queries and multi-file rewrites; use `search_code`, `list_dir`, `read_file`, `edit_file`, and `write_file` for file operations.\n\
-  * Version Control: Use `git_status`, `git_diff`, `git_log`, and `git_commit` instead of spawning `bash` for local git operations.\n\
-  * Data Inspection & Calculation: Use `python_repl` (persistent in-session namespace) instead of repeated `bash python -c` subshells.\n\
-  * Visual & Document Inspection: Use `read_file` directly on local images (`.png`, `.jpg`, `.webp`, `.gif`, `.bmp`) and PDFs.\n\
-  * Research: Use `paper_lookup` (OpenAlex), `web_search`, and `web_fetch`.\n\
-  * Shell (`bash`): Reserve strictly for builds (`cargo build`), test/lint gates (`cargo test`, `cargo clippy`), and process/CI execution.\n\
-- Verification Discipline: Never claim completion or close a task without running the verification gate and confirming clean output.",
+- Tool Routing Hierarchy (prefer dedicated native tools; use `bash` for Git, Python, and builds):\n\
+",
+    );
+
+    // Build the tool-routing bullets in a fixed, feature-aware order so the
+    // Turn-1 prefix stays byte-for-byte stable for a given build. The default
+    // surface is a lean 8-tool set (file I/O, search, shell, web); `ast` adds
+    // structural AST surgery and `paper` adds OpenAlex `paper_lookup`. Git and
+    // Python have no dedicated tool anymore and are driven through `bash`.
+    let mut routing: Vec<&'static str> = Vec::new();
+    routing.push(if cfg!(feature = "ast") {
+        "  * Code Discovery & Refactoring: Use `ast_search` and `ast_replace` for structural syntax queries and multi-file rewrites (prefer over regex); use `search_code`, `list_dir`, `read_file`, `edit_file`, and `write_file` for file operations.\n"
+    } else {
+        "  * File Operations & Code Discovery: Use `search_code` for literal/regex search, `read_file` for exact regions, and `list_dir`, `edit_file`, and `write_file` for file authoring.\n"
+    });
+    routing.push(
+        "  * Version Control: Use `bash` for git operations (`git status`, `git diff`, `git log`, `git commit`).\n",
+    );
+    routing.push(
+        "  * Data Inspection & Calculation: Use `bash` for Python execution (`python3`) and other computation/data tasks.\n",
+    );
+    routing.push(
+        "  * Visual & Document Inspection: Use `read_file` directly on local images (`.png`, `.jpg`, `.webp`, `.gif`, `.bmp`) and PDFs.\n",
+    );
+    routing.push(if cfg!(feature = "paper") {
+        "  * Research: Use `paper_lookup` (OpenAlex) for peer-reviewed literature, plus `web_search` (SearXNG/Brave) and `web_fetch` (HTML/PDF → Markdown).\n"
+    } else {
+        "  * Research: Use `web_search` (SearXNG/Brave) and `web_fetch` (HTML/PDF → Markdown).\n"
+    });
+    routing.push(
+        "  * Shell (`bash`): Also use for builds (`cargo build`), test/lint gates (`cargo test`, `cargo clippy`), and process/CI execution.\n",
+    );
+    let routing = routing.concat();
+    system_prompt.push_str(&routing);
+    system_prompt.push_str(
+        "- Verification Discipline: Never claim completion or close a task without running the verification gate and confirming clean output.",
     );
 
     system_prompt.push_str(&format!(

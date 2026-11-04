@@ -99,9 +99,9 @@ Castor provides an **in-process Rust execution server** as a Model Context Proto
       ▼
   Castor Server (Local Rust Execution Server over stdio)
       │
-      ├─── 16 in-tree tools: read_file, write_file, edit_file, list_dir,
-      │    search_code, ast_search, ast_replace, git_status/diff/log/commit,
-      │    python_repl, paper_lookup, web_search, web_fetch, bash
+      ├─── lean 8-tool core: read_file, write_file, edit_file, list_dir,
+      │    search_code, bash (native git ops & Python), web_search, web_fetch;
+      │    feature-gated: ast (ast_search / ast_replace), paper (paper_lookup)
       │    └── Validated against sandbox boundaries & AST syntax gates
       │
       ▼  Inference requests over HTTP (:18020)
@@ -208,33 +208,32 @@ Castor registers three stdio tools across any MCP client:
 
 | Tool | Purpose | Primary Actions & Parameters |
 |---|---|---|
-| **`castor_coworker`** | Hands-on execution & peer programming | Dispatches a prompt to the sandboxed 16 builtin-tool runtime: `read_file`, `write_file`, `edit_file`, `list_dir`, `search_code`, `ast_search`, `ast_replace`, `git_status`, `git_diff`, `git_log`, `git_commit`, `python_repl`, `paper_lookup`, `web_search`, `web_fetch`, `bash`. |
+| **`castor_coworker`** | Hands-on execution & peer programming | Dispatches a prompt to the sandboxed lean 8-tool runtime: `read_file`, `write_file`, `edit_file`, `list_dir`, `search_code`, `bash` (native git ops & Python), `web_search`, `web_fetch`; plus feature-gated `ast_search` / `ast_replace` (`ast`) and `paper_lookup` (`paper`). |
 | **`castor_task`** | Background task control & telemetry | Actions: `status`, `cancel`, `cancel_all`, `list`, `stats`, `extend_lease`. |
 | **`castor_server`** | Local inference engine supervisor | Actions: `status`, `start`, `stop`. Manages engine boots, health canaries, and auto-healing. |
 
-### The 16 Built-in Coworker Tools
+### The Built-in Coworker Tools
 
-`castor_coworker` runs inside a sandboxed runtime exposing exactly these 16
-in-tree tools (defined in `src/tools/mod.rs`):
+`castor_coworker` runs inside a sandboxed runtime exposing a **lean 8-tool core**
+(`read_file`, `write_file`, `edit_file`, `list_dir`, `search_code`, `bash`,
+`web_search`, `web_fetch`), optionally extended by the `ast` feature gate
+(`ast_search` / `ast_replace`) and the `paper` feature gate (`paper_lookup`).
+Git operations and ad-hoc Python execution run natively through `bash`. All
+tools are defined in `src/tools/mod.rs`:
 
-| Tool | Capability |
-|---|---|
-| `read_file` | Read source, PDFs (native in-memory extraction), and images for local visual inspection. |
-| `write_file` | Create or overwrite a file (sandboxed to the workspace). |
-| `edit_file` | Exact-substring, uniqueness-guarded edit with in-memory AST validation before commit. |
-| `list_dir` | Directory listing with depth control. |
-| `search_code` | Text/pattern search across the workspace. |
-| `ast_search` | Structural AST search via native ast-grep. |
-| `ast_replace` | Structural AST replace with automatic rollback on syntax error. |
-| `git_status` | Short working-tree status. |
-| `git_diff` | Staged or unstaged diff. |
-| `git_log` | Recent commit history. |
-| `git_commit` | Stage paths and commit. |
-| `python_repl` | Stateful Python REPL scratchpad for computation and data analysis. |
-| `paper_lookup` | Verified academic metadata via OpenAlex (titles, venues, DOIs, affiliations, OA PDFs). |
-| `web_search` | Meta-search via SearXNG with Brave fallback. |
-| `web_fetch` | Fetch and convert HTML/PDF/plain text to clean Markdown. |
-| `bash` | Isolated shell with a 5-layer dangerous-command filter. |
+| Tool | Gate | Capability |
+|---|---|---|
+| `read_file` | core | Read source, PDFs (native in-memory extraction), and images for local visual inspection. |
+| `write_file` | core | Create or overwrite a file (sandboxed to the workspace). |
+| `edit_file` | core | Exact-substring, uniqueness-guarded edit with in-memory AST validation before commit. |
+| `list_dir` | core | Directory listing with depth control. |
+| `search_code` | core | Text/pattern search across the workspace. |
+| `bash` | core | Isolated shell with a 5-layer dangerous-command filter; natively runs git operations (status/diff/log/commit) and ad-hoc Python. |
+| `web_search` | core | Meta-search via SearXNG with Brave fallback. |
+| `web_fetch` | core | Fetch and convert HTML/PDF/plain text to clean Markdown. |
+| `ast_search` | `ast` | Structural AST search via native ast-grep. |
+| `ast_replace` | `ast` | Structural AST replace with automatic rollback on syntax error. |
+| `paper_lookup` | `paper` | Verified academic metadata via OpenAlex (titles, venues, DOIs, affiliations, OA PDFs). |
 
 ---
 
@@ -345,7 +344,7 @@ Castor/
     proxy/                  # Stream proxy (:18022), SSE sanitizer, loop breaker
     engine/                 # Provider interface, backend, lifecycle, supervisor, detached
     runner/                 # Multi-turn autonomous loop & event ledgers
-    tools/                  # 16 builtin tools: fs, ast, git, repl, web, paper, shell, sandbox
+    tools/                  # lean 8-tool core (fs, shell, web) + feature-gated ast/paper, sandbox, extensions
     evals/                  # Offline replay harness (fixture, replay, runner)
     evo/                    # Evolutionary optimizer & lineage DAG
   evals/                    # Tier A offline replay, golden test tasks, DGI datasets

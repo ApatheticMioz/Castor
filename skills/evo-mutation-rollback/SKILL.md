@@ -13,9 +13,9 @@ leaves the tree dirty.
 
 1. **Baseline & Snapshot Verification** — Confirm the working tree is
    clean before mutating:
-   - `git_status` → must report no pending changes (this is the
+   - `git status` (via `bash`) → must report no pending changes (this is the
      rollback anchor; if the tree is dirty, stop and reconcile first).
-   - `git_diff` → must be empty; record any intentionally pre-staged
+   - `git diff` (via `bash`) → must be empty; record any intentionally pre-staged
      context.
    - Record the **baseline fitness score** (the current
      test/benchmark result for the metric under optimization) and the
@@ -39,12 +39,12 @@ leaves the tree dirty.
 4. **Selection or Atomic Rollback** — Decide on the digest:
    - **Select**: fitness strictly improved (or held neutral on an
      explicit simplification pass) with **zero regressions**. Commit
-     the candidate via `git_commit(paths: [...])` listing exactly the
+     the candidate via `git add <paths> && git commit` (run through `bash`) listing exactly the
      mutated files.
    - **Rollback**: fitness regressed, any test failed, or the digest
      shows a real bug. Immediately restore the touched files via
      `bash`: `git checkout -- <paths>`, then confirm a clean tree via
-     `git_status` before continuing.
+     `git status` before continuing.
 
 ## Rules
 
