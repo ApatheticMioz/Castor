@@ -151,7 +151,24 @@ pub async fn run_job(spec: &JobSpec, state: &StateDir, config: &Config) -> Resul
             .await;
         return Err(err_msg);
     }
-    let engine = match EngineClient::from_config(config) {
+
+    // Resolve the effective configuration dynamically: when `model`,
+    // `max_context`, or `engine_type` are not pinned, adopt the values
+    // discovered from the live engine profile.
+    let mut effective_config = config.clone();
+    if let Ok(profile) = lc.profile().await {
+        if effective_config.model.is_none() {
+            effective_config.model = Some(profile.model_id);
+        }
+        if effective_config.max_context.is_none() {
+            effective_config.max_context = profile.max_context;
+        }
+        if effective_config.engine_type.is_none() {
+            effective_config.engine_type = Some(profile.backend.as_str().to_string());
+        }
+    }
+
+    let engine = match EngineClient::from_config(&effective_config) {
         Ok(eng) => eng,
         Err(e) => {
             let err_msg = e.to_string();
@@ -161,7 +178,7 @@ pub async fn run_job(spec: &JobSpec, state: &StateDir, config: &Config) -> Resul
             return Err(err_msg);
         }
     };
-    run_job_with_engine(spec, state, config, &engine).await
+    run_job_with_engine(spec, state, &effective_config, &engine).await
 }
 
 /// The slot's static per-lease token reserve for the Turn-1 system-prompt

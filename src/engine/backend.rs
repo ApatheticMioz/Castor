@@ -123,6 +123,17 @@ impl Backend {
         }
     }
 
+    /// The backend's canonical `engine_type` string identifier.
+    #[inline]
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Legacy => "legacy",
+            Self::LlamaCpp => "llama.cpp",
+            Self::Vllm => "vllm",
+            Self::Generic => "generic",
+        }
+    }
+
     /// Whether this backend is llama.cpp or compatible.
     #[inline]
     pub fn is_llama_cpp(self) -> bool {
