@@ -15,7 +15,7 @@ use tokio::io::{AsyncBufReadExt, BufReader};
 use tokio::process::Command;
 use tokio::sync::Mutex;
 
-use super::backend::{Backend, api_url};
+use super::backend::{Backend, EngineProfile, api_url};
 use crate::config::Config;
 use crate::platform::{is_wsl, wsl_normalize};
 use crate::state::{AcquireResult, Locks, StateDir, WedgeCounter};
@@ -82,6 +82,11 @@ impl EngineLifecycle {
     }
 
     /// Check engine health and the configured model identity.
+    ///
+    /// Adaptive model resolution: when `config.model` is `None` or
+    /// `"auto"`, the canary binds to the engine's single reported model;
+    /// an explicitly configured model must match one the engine reports
+    /// (id or alias) or the canary fails.
     pub async fn canary(&self) -> bool {
         if Backend::from_config(&self.config) == Backend::LlamaCpp {
             return self.readiness().await.is_ok();
@@ -90,9 +95,10 @@ impl EngineLifecycle {
     }
 
     async fn legacy_canary(&self) -> bool {
-        let Some(model) = &self.config.model else {
-            return false;
-        };
+        let auto = !matches!(
+            self.config.model.as_deref(),
+            Some(model) if !model.is_empty() && model != "auto"
+        );
         let url = format!("http://127.0.0.1:{}/v1/models", self.config.ports.engine);
         let res = match self.client.get(&url).send().await {
             Ok(r) => r,
@@ -106,6 +112,17 @@ impl EngineLifecycle {
             Err(_) => return false,
         };
         let Some(ids) = v.get("data").and_then(|d| d.as_array()) else {
+            return false;
+        };
+        if auto {
+            // Auto-bind: healthy when the engine reports exactly one model.
+            let count = ids
+                .iter()
+                .filter(|m| m.get("id").and_then(|i| i.as_str()).is_some())
+                .count();
+            return count == 1;
+        }
+        let Some(model) = &self.config.model else {
             return false;
         };
         ids.iter().any(|m| {
@@ -124,6 +141,46 @@ impl EngineLifecycle {
                 .unwrap_or(false);
             id_match || alias_match
         })
+    }
+
+    /// Fingerprint the running engine: backend, bound model id, engine
+    /// context window, and resolved capabilities.
+    ///
+    /// Delegates to [`EngineProfile::discover`], which probes `/v1/models`,
+    /// `/health`, and `/version`. Adaptive model resolution: `None` /
+    /// `"auto"` binds to the engine's single reported model; an explicit
+    /// value is bound as-is and validated by [`Self::canary`].
+    pub async fn profile(&self) -> Result<EngineProfile, LifecycleError> {
+        EngineProfile::discover(&self.config, &self.client)
+            .await
+            .map_err(LifecycleError::Readiness)
+    }
+
+    /// The effective context window: the config-pinned `max_context`, else
+    /// the engine-reported `max_model_len` from `/v1/models`.
+    pub async fn effective_max_context(&self) -> Option<u32> {
+        if let Some(pinned) = self.config.max_context {
+            return Some(pinned);
+        }
+        let base = self.config.base_url.as_deref()?;
+        let models_url = format!("{}/models", base.trim_end_matches('/'));
+        let mut request = self.client.get(&models_url);
+        if let Some(key) = &self.config.api_key {
+            request = request.bearer_auth(key);
+        }
+        let Ok(response) = request.send().await else {
+            return None;
+        };
+        if !response.status().is_success() {
+            return None;
+        }
+        let Ok(value) = response.json::<Value>().await else {
+            return None;
+        };
+        let data = value.get("data").and_then(Value::as_array)?;
+        data.iter()
+            .find_map(|e| e.get("max_model_len").and_then(Value::as_u64))
+            .and_then(|v| u32::try_from(v).ok())
     }
 
     /// Check readiness with diagnostics for the configured llama.cpp endpoint.
@@ -747,6 +804,123 @@ mod tests {
         cfg2.ports.engine = port;
         let lc2 = EngineLifecycle::new(&cfg2, &state);
         assert!(!lc2.canary().await);
+    }
+
+    #[tokio::test]
+    async fn canary_auto_binds_to_single_model_when_model_is_auto() {
+        let state = tmp_state();
+        let (_base, port) = start_mock(vec!["test-model".into()], 0).await;
+
+        // `model = "auto"`: binds to the engine's single reported model.
+        let mut cfg = test_config(&state, None, None);
+        cfg.model = Some("auto".into());
+        cfg.ports.engine = port;
+        assert!(EngineLifecycle::new(&cfg, &state).canary().await);
+
+        // `model = None`: same adaptive behavior.
+        let mut cfg2 = test_config(&state, None, None);
+        cfg2.model = None;
+        cfg2.ports.engine = port;
+        assert!(EngineLifecycle::new(&cfg2, &state).canary().await);
+    }
+
+    #[tokio::test]
+    async fn canary_auto_refuses_when_multiple_models_served() {
+        let state = tmp_state();
+        let (_base, port) = start_mock(vec!["a".into(), "b".into()], 0).await;
+
+        // `"auto"` with multiple served models: the canary fails (ambiguous).
+        let mut cfg = test_config(&state, None, None);
+        cfg.model = Some("auto".into());
+        cfg.ports.engine = port;
+        assert!(!EngineLifecycle::new(&cfg, &state).canary().await);
+
+        // Explicit model still matches the multi-model list correctly.
+        let mut cfg2 = test_config(&state, None, None);
+        cfg2.model = Some("b".into());
+        cfg2.ports.engine = port;
+        assert!(EngineLifecycle::new(&cfg2, &state).canary().await);
+    }
+
+    /// vLLM-shaped mock: `/v1/models` (with `owned_by` + `max_model_len`)
+    /// and root `/version`.
+    async fn start_vllm_mock() -> String {
+        let app = Router::new()
+            .route(
+                "/v1/models",
+                get(|| async {
+                    Json(json!({
+                        "object": "list",
+                        "data": [{
+                            "id": "qwen3.8-27b",
+                            "owned_by": "vllm",
+                            "max_model_len": 150000,
+                        }]
+                    }))
+                }),
+            )
+            .route(
+                "/version",
+                get(|| async { Json(json!({"version": "0.31.0"})) }),
+            );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            let _ = axum::serve(listener, app).await;
+        });
+        format!("http://127.0.0.1:{}", addr.port())
+    }
+
+    #[tokio::test]
+    async fn profile_fingerprints_vllm_and_adopts_max_model_len() {
+        let state = tmp_state();
+        let root = start_vllm_mock().await;
+        let mut cfg = test_config(&state, None, None);
+        cfg.model = None;
+        cfg.base_url = Some(format!("{root}/v1"));
+        let lc = EngineLifecycle::new(&cfg, &state);
+
+        let profile = lc.profile().await.unwrap();
+        assert_eq!(profile.backend, Backend::Vllm);
+        assert_eq!(profile.model_id, "qwen3.8-27b");
+        assert_eq!(profile.max_context, Some(150000));
+        assert_eq!(profile.engine_version.as_deref(), Some("0.31.0"));
+
+        assert_eq!(lc.effective_max_context().await, Some(150000));
+    }
+
+    #[tokio::test]
+    async fn profile_keeps_pinned_context_over_engine_reported() {
+        let state = tmp_state();
+        let root = start_vllm_mock().await;
+        let mut cfg = test_config(&state, None, None);
+        cfg.model = Some("auto".into());
+        cfg.base_url = Some(format!("{root}/v1"));
+        cfg.max_context = Some(32768);
+        let lc = EngineLifecycle::new(&cfg, &state);
+
+        let profile = lc.profile().await.unwrap();
+        assert_eq!(profile.backend, Backend::Vllm);
+        assert_eq!(profile.model_id, "qwen3.8-27b");
+        assert_eq!(profile.max_context, Some(32768));
+        assert_eq!(lc.effective_max_context().await, Some(32768));
+    }
+
+    #[tokio::test]
+    async fn profile_fails_when_no_models_served() {
+        let state = tmp_state();
+        let root = start_vllm_mock().await;
+        let mut cfg = test_config(&state, None, None);
+        cfg.model = Some("auto".into());
+        // Point at a closed port: discovery cannot fingerprint the engine.
+        cfg.base_url = Some("http://127.0.0.1:1/v1".into());
+        let _ = root;
+        let lc = EngineLifecycle::new(&cfg, &state);
+        let err = lc.profile().await.unwrap_err().to_string();
+        assert!(
+            err.contains("connection to") || err.contains("no models"),
+            "{err}"
+        );
     }
 
     #[tokio::test]
