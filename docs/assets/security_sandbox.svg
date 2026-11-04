@@ -12,14 +12,14 @@
       <path d="M 0 1 L 9 5 L 0 9 z" fill="#38bdf8"/>
     </marker>
     <marker id="arr-sec-mid" viewBox="0 0 10 10" refX="6" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse">
-      <path d="M 0 1 L 9 5 L 0 9 z" fill="#818cf8"/>
+      <path d="M 0 1 L 9 5 L 0 9 z" fill="#f59e0b"/>
     </marker>
     <marker id="arr-sec-amber" viewBox="0 0 10 10" refX="6" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse">
       <path d="M 0 1 L 9 5 L 0 9 z" fill="#f59e0b"/>
     </marker>
 
     <!-- Mid Beam Gradient (Blue transitioning to Amber) -->
-    <linearGradient id="secBeamMid" x1="0%" y1="0%" x2="100%" y2="0%">
+    <linearGradient id="secBeamMid" gradientUnits="userSpaceOnUse" x1="398" y1="80" x2="552" y2="80">
       <stop offset="0%" stop-color="#38bdf8"/>
       <stop offset="50%" stop-color="#818cf8"/>
       <stop offset="100%" stop-color="#f59e0b"/>

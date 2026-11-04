@@ -234,13 +234,12 @@ so a new prompt reuses the prior KV prefix instead of re-prefilling it.
 
 Castor enforces **zero-trust containment** at every tool boundary:
 
-| Layer | Mechanism | What it blocks |
+| Stage | Mechanism | What it blocks |
 |---|---|---|
 | **1 — Path normalizer** | Canonical path resolution & device namespace neutralization | `../../etc/passwd`, `C:\`, `NUL`, `CON` |
-| **2 — Symlink realpath** | Resolves canonical `realpath` of every target before acting | Symlinks pointing out of the workspace root |
-| **3 — Out-of-tree guard** | Enforces workspace boundary (`refuse_out_of_tree`) | Direct mutations targeting system or parent directories |
-| **4 — Dangerous command filter** | Signature & pattern blocks on shell commands (`shell.rs`) | `rm -rf /`, `format`, `dd`, fork bombs, `mkfs`, shell injection bypasses |
-| **5 — In-memory AST syntax gate** | Structural AST parser validation on `ast_replace` | Syntax parse errors on Rust / TS / JS / Python / JSON → **automatic in-memory rollback** |
+| **2 — Realpath anchor** | Symlink traversal audit & workspace boundary guard (`refuse_out_of_tree`) | Symlink escapes, out-of-workspace writes, system directories |
+| **3 — Command filter** | Shell AST inspection & signature blocks (`shell.rs`) | `rm -rf /`, `format`, `dd`, fork bombs, `mkfs`, shell injection bypasses |
+| **4 — AST syntax gate** | Structural syntax parser validation before disk commit | In-memory rollback on syntax error across Rust, TS, JS, Python, JSON |
 
 File edits in `fs.rs` use atomic fsync writes via `NamedTempFile` preventing torn states;
 structural mutations via `ast_replace` pass Layer 5 **before** the disk commit, atomically
