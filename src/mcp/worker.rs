@@ -164,6 +164,36 @@ pub async fn run_job(spec: &JobSpec, state: &StateDir, config: &Config) -> Resul
     run_job_with_engine(spec, state, config, &engine).await
 }
 
+/// The slot's static per-lease token reserve for the Turn-1 system-prompt
+/// prefix, in tokens. The reserve is a fixed slice of the pool's `max_context`
+/// budget charged per lease to cover the static system-prompt prefix (persona,
+/// `[Workspace]` root, workspace skeleton, and the active-skills index) that
+/// every dispatched session shares. A static *fraction* of `max_context`
+/// (e.g. `max_context / 6`) over-reserves on large pools — on a 150k pool it
+/// pins ~25k per slot, and 4 concurrent slots burn ~100k of the pool as static
+/// overhead before any real working set is admitted. Instead, the reserve is a
+/// zero-latency, zero-cost deterministic function of the *pre-built* system
+/// prompt, clamped to this calibrated band: 4,000 is a safe floor (the prompt
+/// never realistically reserves less than it) and 8,000 is the ceiling for the
+/// largest workspaces' system prompts.
+const TURN1_RESERVE_MIN: u32 = 4_000;
+const TURN1_RESERVE_MAX: u32 = 8_000;
+
+/// Compute the slot's static per-lease Turn-1 prefix reserve (tokens) as a pure
+/// function of the pre-built system prompt — no engine call, no probe, no
+/// latency.
+///
+/// The estimate is a coarse bytes-to-tokens conversion (`len / 3`, a
+/// conservative over-approximation for the English-dominant system prompt, so
+/// the result never under-reserves) clamped to
+/// [`TURN1_RESERVE_MIN`..=TURN1_RESERVE_MAX]. Because the user prompt is
+/// accounted for separately by the caller (`new_prompt_tokens`), only the
+/// system-prompt prefix is reserved here.
+fn turn1_prefix_reserve(system_prompt: &str) -> u32 {
+    let est = (system_prompt.len() / 3) as u32;
+    est.clamp(TURN1_RESERVE_MIN, TURN1_RESERVE_MAX)
+}
+
 /// Execute a job specification with a provided [`ChatEngine`] (supports mock engines in tests).
 pub async fn run_job_with_engine(
     spec: &JobSpec,
@@ -174,7 +204,6 @@ pub async fn run_job_with_engine(
     let registry = TaskRegistry::new(state);
     let max_slots = config.max_concurrent_tasks as usize;
     let max_ctx = config.max_context.unwrap_or(0);
-    let sem = TaskSemaphore::new(state, max_slots).with_token_budget(max_ctx, max_ctx / 6);
 
     // 1. DGI gatekeeper: classify the dispatch BEFORE committing to a slot
     //    lease. A rejected dispatch never holds a lease (no release
@@ -237,42 +266,15 @@ pub async fn run_job_with_engine(
         }
     }
 
-    // 2. Acquire execution slot (token-budgeted).
-    // Include any resumed-history tokens so the slot's initial budget
-    // reflects the true working set (history + new prompt).
-    let resumed_tokens = runner::resumed_history_tokens(state, &spec.session_id, Some(max_ctx));
-    let initial_tokens = ((spec.prompt.chars().count() / 4) as u32).saturating_add(resumed_tokens);
-    let lease = sem.acquire_with_tokens(&spec.task_id, initial_tokens).await;
-    let shared_lease = std::sync::Arc::new(std::sync::Mutex::new(lease));
-
-    // 3. Transition status to Executing and stamp worker PID.
-    let now = now_epoch_ms();
-    let _ = registry
-        .update(&spec.task_id, |r| {
-            r.status = TaskStatus::Executing;
-            r.pid = Some(std::process::id());
-            r.started_at = Some(now);
-            r.heartbeat = now;
-        })
-        .await;
-
-    // 4. Initialize EventLogger and record session start.
-    let logger = EventLogger::new(state, &spec.session_id);
-    // The effective tier is recorded on session_start (null when unset) so
-    // the session ledger is self-explanatory: null = "server default applied".
-    let _ = logger.append(json!({
-        "type": "session_start",
-        "sessionId": spec.session_id,
-        "taskId": spec.task_id,
-        "cwd": spec.cwd,
-        "prompt": spec.prompt,
-        "reasoning_effort": spec.reasoning_effort,
-    }));
-
+    // 2. Build the system prompt BEFORE committing to a slot lease, so the
+    //    slot's static per-lease token reserve can be computed from the
+    //    pre-built prompt's footprint (step 3). This only reads the
+    //    filesystem (workspace root, skills, skeleton) — no engine call and
+    //    no lease is taken, so it never blocks dispatch.
     let host_raw_path = crate::platform::to_host_path(&spec.cwd);
     let workspace_root = find_workspace_root(&host_raw_path);
 
-    // 5. Discover and index skills.
+    // Discover and index skills (the highest-churn part of the prefix).
     let skill_dirs = [
         workspace_root.join(".agents").join("skills"),
         workspace_root.join("skills"),
@@ -289,9 +291,9 @@ pub async fn run_job_with_engine(
     };
     let skills_index = skills::render_index(&active_skills);
 
-    // 6. Build system prompt in strict low-churn -> high-churn KV prefix order
-    //    (delegated to the pure [`build_worker_system_prompt`] helper so the
-    //    ordering is unit-testable).
+    // Build the system prompt in strict low-churn -> high-churn KV prefix
+    // order (delegated to the pure [`build_worker_system_prompt`] helper so the
+    // ordering is unit-testable).
     let skeleton = if config.workspace_skeleton_prefix {
         // A byte-identical, deterministic `[Workspace Skeleton]` block (a pure
         // function of the workspace's stable top-level shape) — a warm KV prefix
@@ -307,7 +309,52 @@ pub async fn run_job_with_engine(
         &skills_index,
     );
 
-    // 7. Initialize optional extensions and composite tool executor.
+    // 3. Acquire execution slot (token-budgeted). The slot's static per-lease
+    //    overhead is a deterministic Turn-1 prefix reserve computed from the
+    //    pre-built system prompt's footprint (step 2), not a static fraction of
+    //    `max_context` (a fraction like `max_ctx / 6` pins ~25k per slot on a
+    //    150k pool, so 4 concurrent slots burn ~100k of the pool as static
+    //    overhead before any working set is admitted). The reserve is a pure,
+    //    zero-cost function of the prompt length clamped to
+    //    [`TURN1_RESERVE_MIN`..=TURN1_RESERVE_MAX].
+    let prefix_reserve = turn1_prefix_reserve(&system_prompt);
+    let sem = TaskSemaphore::new(state, max_slots).with_token_budget(max_ctx, prefix_reserve);
+
+    // Include any resumed-history tokens so the slot's initial budget reflects
+    // the true working set (prefix + history + new prompt).
+    let resumed_tokens = runner::resumed_history_tokens(state, &spec.session_id, Some(max_ctx));
+    let new_prompt_tokens = (spec.prompt.chars().count() / 4) as u32;
+    let initial_tokens = prefix_reserve
+        .saturating_add(new_prompt_tokens)
+        .saturating_add(resumed_tokens);
+    let lease = sem.acquire_with_tokens(&spec.task_id, initial_tokens).await;
+    let shared_lease = std::sync::Arc::new(std::sync::Mutex::new(lease));
+
+    // 4. Transition status to Executing and stamp worker PID.
+    let now = now_epoch_ms();
+    let _ = registry
+        .update(&spec.task_id, |r| {
+            r.status = TaskStatus::Executing;
+            r.pid = Some(std::process::id());
+            r.started_at = Some(now);
+            r.heartbeat = now;
+        })
+        .await;
+
+    // 5. Initialize EventLogger and record session start.
+    let logger = EventLogger::new(state, &spec.session_id);
+    // The effective tier is recorded on session_start (null when unset) so
+    // the session ledger is self-explanatory: null = "server default applied".
+    let _ = logger.append(json!({
+        "type": "session_start",
+        "sessionId": spec.session_id,
+        "taskId": spec.task_id,
+        "cwd": spec.cwd,
+        "prompt": spec.prompt,
+        "reasoning_effort": spec.reasoning_effort,
+    }));
+
+    // 6. Initialize optional extensions and composite tool executor.
     let ext_bridge = if let Some(ref exts) = spec.extensions {
         ExtensionBridge::spawn(exts).await.ok()
     } else {
@@ -751,6 +798,43 @@ mod tests {
         assert!(
             !prompt.contains("[Workspace Skeleton]"),
             "skeleton must be omitted when disabled"
+        );
+    }
+
+    /// The per-lease Turn-1 prefix reserve is a pure, zero-cost function of the
+    /// pre-built system prompt: a conservative `len / 3` bytes-to-tokens
+    /// over-approximation clamped to the calibrated
+    /// [`TURN1_RESERVE_MIN`..=TURN1_RESERVE_MAX] band. This guards the
+    /// deterministic replacement for the old live-probe calibration — the
+    /// reserve must never under-provision (floor) or over-provision (ceiling)
+    /// the pool, regardless of how large or small the assembled prompt is.
+    #[test]
+    fn turn1_prefix_reserve_is_deterministic_and_clamped_to_band() {
+        // Tiny / empty prompt: the estimate is below the floor and clamps up.
+        assert_eq!(
+            turn1_prefix_reserve(""),
+            TURN1_RESERVE_MIN,
+            "an empty prompt must reserve at least the floor"
+        );
+        assert_eq!(
+            turn1_prefix_reserve(&"x".repeat(9_000)),
+            TURN1_RESERVE_MIN,
+            "a small prompt (9000/3=3000) must clamp up to the floor"
+        );
+
+        // A mid-band estimate is returned verbatim (no clamp either way).
+        // 18000 bytes / 3 = 6000 tokens — inside [4000, 8000].
+        assert_eq!(
+            turn1_prefix_reserve(&"x".repeat(18_000)),
+            6_000,
+            "a mid-band estimate must be used verbatim"
+        );
+
+        // A very large prompt: the estimate exceeds the ceiling and clamps down.
+        assert_eq!(
+            turn1_prefix_reserve(&"x".repeat(36_000)),
+            TURN1_RESERVE_MAX,
+            "a huge prompt (36000/3=12000) must clamp down to the ceiling"
         );
     }
 }

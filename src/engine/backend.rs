@@ -523,7 +523,7 @@ mod tests {
         assert_eq!(profile.model_id, "qwen3.8-27b");
         assert_eq!(profile.max_context, Some(150000));
         assert_eq!(profile.engine_version.as_deref(), Some("0.31.0"));
-        assert!(profile.capabilities.is_managed == false);
+        assert!(!profile.capabilities.is_managed);
     }
 
     #[tokio::test]

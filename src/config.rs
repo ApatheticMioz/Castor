@@ -1,14 +1,41 @@
 //! Configuration loading and management.
 //!
 //! Precedence (highest first): environment variables (`CASTOR_*`) >
-//! `<state_dir>/config.json` > built-in defaults.
+//! `<state_dir>/config.json` (top-level keys, or a named `profiles` entry
+//! selected by `CASTOR_PROFILE` / the file's `profile`) > built-in defaults.
 //!
-//! The state dir is `$CASTOR_STATE_DIR` or `~/.castor`. There are no
-//! aliases, no migration, and no profiles: one key per setting.
+//! The state dir is `$CASTOR_STATE_DIR` or `~/.castor`. There are no aliases
+//! and no migration: one key per setting. The only profile the binary ships
+//! is the **Swarm baseline** (the built-in defaults below); every other named
+//! profile is user-defined in `config.json`.
 
 use std::path::PathBuf;
 
 use serde::{Deserialize, Serialize};
+
+/// The Swarm serving baseline baked in as the out-of-the-box default.
+///
+/// These are the only profile values the binary ships with. They match the
+/// repo's canonical Swarm launcher (`scripts/wsl/start_swarm.sh`: a vLLM
+/// engine on port 18020 running `MAX_SEQS=4`). Named profiles such as
+/// `turbo` or `bonsai` are user-defined in `~/.castor/config.json`, not
+/// compiled in here.
+const SWARM_BASE_URL: &str = "http://127.0.0.1:18020/v1";
+/// Swarm baseline concurrency: matches the launcher's `MAX_SEQS=4`.
+const SWARM_MAX_CONCURRENT_TASKS: u32 = 4;
+
+/// The repository start launcher for the Swarm baseline, per platform.
+///
+/// `pub(crate)` so the lifecycle layer can fall back to it when a non-llama
+/// backend boots with no `launch_command` configured, letting a bare
+/// `castor server start` bring up the Swarm baseline out of the box.
+pub(crate) fn default_launch_command() -> String {
+    if cfg!(windows) {
+        "cmd /c scripts\\main\\start.bat".to_string()
+    } else {
+        "bash scripts/wsl/start_swarm.sh".to_string()
+    }
+}
 
 /// Where a field's effective value came from.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -232,132 +259,6 @@ pub struct PartialPorts {
     pub proxy: Option<u16>,
 }
 
-pub fn builtin_profiles() -> std::collections::HashMap<String, PartialProfile> {
-    let mut map = std::collections::HashMap::new();
-    map.insert(
-        "bonsai-max".to_string(),
-        PartialProfile {
-            model: Some("Ternary-Bonsai-2-27B-PQ2_0".to_string()),
-            base_url: Some("http://127.0.0.1:18020".to_string()),
-            api_key: None,
-            engine_type: Some("llama.cpp".to_string()),
-            launch_command: Some("cmd /c scripts\\bonsai\\start_bonsai_24gb.bat".to_string()),
-            stop_command: Some("taskkill /F /IM llama-server.exe".to_string()),
-            max_context: Some(524288),
-            ports: None,
-            max_concurrent_tasks: Some(4),
-            tool_prefix: None,
-            probe_budget: None,
-            searxng_url: None,
-            brave_api_key: None,
-            openalex_email: None,
-            openalex_api_key: None,
-            boot_timeout_secs: None,
-        },
-    );
-    map.insert(
-        "bonsai-8gb".to_string(),
-        PartialProfile {
-            model: Some("Ternary-Bonsai-2-27B-PQ2_0".to_string()),
-            base_url: Some("http://127.0.0.1:18020/v1".to_string()),
-            api_key: None,
-            engine_type: Some("llama_cpp".to_string()),
-            launch_command: Some("cmd /c scripts\\bonsai\\start_bonsai_8gb.bat".to_string()),
-            stop_command: Some("taskkill /F /IM llama-server.exe".to_string()),
-            max_context: Some(8192),
-            ports: Some(PartialPorts {
-                engine: Some(18020),
-                status: None,
-                proxy: None,
-            }),
-            max_concurrent_tasks: Some(1),
-            tool_prefix: None,
-            probe_budget: None,
-            searxng_url: None,
-            brave_api_key: None,
-            openalex_email: None,
-            openalex_api_key: None,
-            boot_timeout_secs: None,
-        },
-    );
-    map.insert(
-        "bonsai-12gb".to_string(),
-        PartialProfile {
-            model: Some("Ternary-Bonsai-2-27B-PQ2_0".to_string()),
-            base_url: Some("http://127.0.0.1:18020/v1".to_string()),
-            api_key: None,
-            engine_type: Some("llama_cpp".to_string()),
-            launch_command: Some("cmd /c scripts\\bonsai\\start_bonsai_12gb.bat".to_string()),
-            stop_command: Some("taskkill /F /IM llama-server.exe".to_string()),
-            max_context: Some(65536),
-            ports: Some(PartialPorts {
-                engine: Some(18020),
-                status: None,
-                proxy: None,
-            }),
-            max_concurrent_tasks: Some(1),
-            tool_prefix: None,
-            probe_budget: None,
-            searxng_url: None,
-            brave_api_key: None,
-            openalex_email: None,
-            openalex_api_key: None,
-            boot_timeout_secs: None,
-        },
-    );
-    map.insert(
-        "bonsai-16gb".to_string(),
-        PartialProfile {
-            model: Some("Ternary-Bonsai-2-27B-PQ2_0".to_string()),
-            base_url: Some("http://127.0.0.1:18020/v1".to_string()),
-            api_key: None,
-            engine_type: Some("llama_cpp".to_string()),
-            launch_command: Some("cmd /c scripts\\bonsai\\start_bonsai_16gb.bat".to_string()),
-            stop_command: Some("taskkill /F /IM llama-server.exe".to_string()),
-            max_context: Some(131072),
-            ports: Some(PartialPorts {
-                engine: Some(18020),
-                status: None,
-                proxy: None,
-            }),
-            max_concurrent_tasks: Some(1),
-            tool_prefix: None,
-            probe_budget: None,
-            searxng_url: None,
-            brave_api_key: None,
-            openalex_email: None,
-            openalex_api_key: None,
-            boot_timeout_secs: None,
-        },
-    );
-    map.insert(
-        "hyperqwen-huge".to_string(),
-        PartialProfile {
-            model: Some("qwen3.8-27b".to_string()),
-            base_url: Some("http://127.0.0.1:18020".to_string()),
-            api_key: None,
-            engine_type: Some("vllm".to_string()),
-            launch_command: Some(
-                "wsl -d Ubuntu -- bash ~/qwen-serving/launchers/start_huge.sh".to_string(),
-            ),
-            stop_command: Some(
-                "wsl -d Ubuntu -- bash ~/qwen-serving/launchers/stop_server.sh".to_string(),
-            ),
-            max_context: Some(245760),
-            ports: None,
-            max_concurrent_tasks: Some(1),
-            tool_prefix: None,
-            probe_budget: None,
-            searxng_url: None,
-            brave_api_key: None,
-            openalex_email: None,
-            openalex_api_key: None,
-            boot_timeout_secs: None,
-        },
-    );
-    map
-}
-
 /// Load the effective configuration from the real environment.
 pub fn load() -> Result<LoadedConfig, ConfigError> {
     load_with(|key| std::env::var(key).ok())
@@ -387,54 +288,49 @@ pub fn load_with(get_env: impl Fn(&str) -> Option<String>) -> Result<LoadedConfi
         None
     };
 
-    let builtins = builtin_profiles();
+    // Named profiles are user-defined: `CASTOR_PROFILE` (or the file's
+    // `profile`) selects an entry from the file's `profiles` map. The binary
+    // ships no compiled-in profiles — its out-of-the-box default is the Swarm
+    // baseline (see `SWARM_*`), so a requested profile that the file does not
+    // define is an error.
     let (file_synthetic, profile_name) = match file {
         Some(f) => {
             let selected = get_env("CASTOR_PROFILE")
                 .filter(|s| !s.is_empty())
                 .or_else(|| f.profile.clone());
             if let Some(ref name) = selected {
-                let prof = f
-                    .profiles
-                    .get(name)
-                    .or_else(|| builtins.get(name))
-                    .ok_or_else(|| {
-                        let mut names: Vec<&str> = f
-                            .profiles
-                            .keys()
-                            .chain(builtins.keys())
-                            .map(String::as_str)
-                            .collect();
-                        names.sort_unstable();
-                        names.dedup();
-                        ConfigError::InvalidValue {
-                            key: "profile".into(),
-                            value: name.clone(),
-                            reason: format!("unknown profile (defined: [{}])", names.join(", ")),
-                        }
-                    })?;
+                let prof = f.profiles.get(name).ok_or_else(|| {
+                    let mut names: Vec<&str> = f.profiles.keys().map(String::as_str).collect();
+                    names.sort_unstable();
+                    names.dedup();
+                    ConfigError::InvalidValue {
+                        key: "profile".into(),
+                        value: name.clone(),
+                        reason: format!(
+                            "unknown profile (defined in config.json: [{}])",
+                            names.join(", ")
+                        ),
+                    }
+                })?;
                 (Some(file_with_profile(&f, Some(prof))), selected)
             } else {
                 (Some(f.clone()), None)
             }
         }
         None => {
-            if let Some(name) = get_env("CASTOR_PROFILE").filter(|s| !s.is_empty()) {
-                if let Some(prof) = builtins.get(&name) {
-                    let empty_file = FileConfig::default();
-                    (Some(file_with_profile(&empty_file, Some(prof))), Some(name))
-                } else {
-                    let mut names: Vec<&str> = builtins.keys().map(String::as_str).collect();
-                    names.sort_unstable();
-                    return Err(ConfigError::InvalidValue {
-                        key: "CASTOR_PROFILE".into(),
-                        value: name,
-                        reason: format!("unknown profile (builtin: [{}])", names.join(", ")),
-                    });
-                }
-            } else {
-                (None, None)
+            let name = get_env("CASTOR_PROFILE").filter(|s| !s.is_empty());
+            if let Some(ref name) = name {
+                return Err(ConfigError::InvalidValue {
+                    key: "CASTOR_PROFILE".into(),
+                    value: name.clone(),
+                    reason: format!(
+                        "unknown profile {name:?}: the binary ships no compiled-in profiles \
+                         (its default is the Swarm baseline); define it under \"profiles\" in \
+                         config.json"
+                    ),
+                });
             }
+            (None, None)
         }
     };
     let file = file_synthetic.as_ref();
@@ -535,9 +431,13 @@ pub fn load_with(get_env: impl Fn(&str) -> Option<String>) -> Result<LoadedConfi
     let file_ports = file.and_then(|f| f.ports.as_ref());
 
     let (model, src_model) = pick_str(env_str("CASTOR_MODEL"), file.and_then(|f| f.model.clone()));
-    let (base_url, src_base_url) = pick_str(
+    // `base_url` defaults to the Swarm endpoint so that the engine can be
+    // discovered at boot. The binary's out-of-the-box default is the Swarm
+    // baseline (see `SWARM_BASE_URL`), which is the only built-in profile.
+    let (base_url, src_base_url) = pick_str_default(
         env_str("CASTOR_BASE_URL"),
         file.and_then(|f| f.base_url.clone()),
+        SWARM_BASE_URL.to_string(),
     );
     let (api_key, src_api_key) = pick_str(
         env_str("CASTOR_API_KEY"),
@@ -547,6 +447,11 @@ pub fn load_with(get_env: impl Fn(&str) -> Option<String>) -> Result<LoadedConfi
         env_str("CASTOR_ENGINE_TYPE"),
         file.and_then(|f| f.engine_type.clone()),
     );
+    // `launch_command` / `stop_command` are optional, profile-provided
+    // settings (AGENTS.md): they default to `None`, not a baked-in command.
+    // A bare install therefore boots the Swarm baseline via the lifecycle's
+    // `default_launch_command()` fallback (non-llama) or the llama.cpp
+    // supervisor (llama backend), never via a config-time default.
     let (launch_command, src_launch_command) = pick_str(
         env_str("CASTOR_LAUNCH_COMMAND"),
         file.and_then(|f| f.launch_command.clone()),
@@ -574,10 +479,12 @@ pub fn load_with(get_env: impl Fn(&str) -> Option<String>) -> Result<LoadedConfi
 
     let (max_context, src_max_context) =
         pick_opt_u32(env_max_context, file.and_then(|f| f.max_context));
+    // Concurrency defaults to the Swarm baseline `MAX_SEQS` (4); `max_context`
+    // is deliberately left `None` to delegate to dynamic engine discovery.
     let (max_concurrent_tasks, src_max_concurrent_tasks) = pick_u32(
         env_max_concurrent,
         file.and_then(|f| f.max_concurrent_tasks),
-        1,
+        SWARM_MAX_CONCURRENT_TASKS,
     );
     let (tool_prefix, src_tool_prefix) = pick_str_default(
         env_str("CASTOR_TOOL_PREFIX"),
@@ -655,7 +562,7 @@ pub fn load_with(get_env: impl Fn(&str) -> Option<String>) -> Result<LoadedConfi
     Ok(LoadedConfig {
         config: Config {
             model,
-            base_url,
+            base_url: Some(base_url),
             api_key,
             engine_type,
             launch_command,
@@ -1101,7 +1008,8 @@ mod tests {
         load_with(move |k: &str| env.iter().find(|(ek, _)| ek == k).map(|(_, v)| v.clone()))
     }
 
-    /// Check env > file > default for one optional string field.
+    /// Check env > file > default for one **optional** string field whose
+    /// out-of-the-box default is `None`.
     fn check_str_field(
         env_key: &str,
         json_key: &str,
@@ -1126,6 +1034,37 @@ mod tests {
         assert_eq!(
             get(&l),
             (None, Source::Default),
+            "{env_key}: default when unset"
+        );
+    }
+
+    /// Check env > file > default for one string field whose out-of-the-box
+    /// default is a concrete value (the Swarm baseline), not `None`.
+    fn check_str_field_default(
+        env_key: &str,
+        json_key: &str,
+        env_val: &str,
+        file_val: &str,
+        default_val: impl AsRef<str>,
+        get: impl Fn(&LoadedConfig) -> (String, Source),
+    ) {
+        let json = format!("{{\"{json_key}\":\"{file_val}\"}}");
+        let l = load_case(&[(env_key, env_val)], Some(&json));
+        assert_eq!(
+            get(&l),
+            (env_val.to_string(), Source::Env),
+            "{env_key}: env must beat file"
+        );
+        let l = load_case(&[], Some(&json));
+        assert_eq!(
+            get(&l),
+            (file_val.to_string(), Source::File),
+            "{env_key}: file must beat default"
+        );
+        let l = load_case(&[], None);
+        assert_eq!(
+            get(&l),
+            (default_val.as_ref().to_string(), Source::Default),
             "{env_key}: default when unset"
         );
     }
@@ -1205,9 +1144,16 @@ mod tests {
         check_str_field("CASTOR_MODEL", "model", "env-model", "file-model", |l| {
             (l.config.model.clone(), l.sources.model)
         });
-        check_str_field("CASTOR_BASE_URL", "base_url", "env-bu", "file-bu", |l| {
-            (l.config.base_url.clone(), l.sources.base_url)
-        });
+        // `base_url` has a concrete Swarm-baseline default, so use the
+        // default-aware helper (env > file > swarm default).
+        check_str_field_default(
+            "CASTOR_BASE_URL",
+            "base_url",
+            "env-bu",
+            "file-bu",
+            SWARM_BASE_URL,
+            |l| (l.config.base_url.clone().unwrap_or_default(), l.sources.base_url),
+        );
         check_str_field("CASTOR_API_KEY", "api_key", "env-key", "file-key", |l| {
             (l.config.api_key.clone(), l.sources.api_key)
         });
@@ -1316,7 +1262,10 @@ mod tests {
                 l.config.max_concurrent_tasks,
                 l.sources.max_concurrent_tasks
             ),
-            (1, Source::Default)
+            (
+                SWARM_MAX_CONCURRENT_TASKS,
+                Source::Default
+            )
         );
     }
 
@@ -1397,13 +1346,17 @@ mod tests {
             (l.config.ports.proxy, l.sources.port_proxy),
             (18022, Source::Default)
         );
-        // other defaults
+        // other defaults: concurrency is the Swarm baseline, `max_context` is
+        // delegated to discovery (None), and `base_url` is the Swarm endpoint.
         assert_eq!(
             (
                 l.config.max_concurrent_tasks,
                 l.sources.max_concurrent_tasks
             ),
-            (1, Source::Default)
+            (
+                SWARM_MAX_CONCURRENT_TASKS,
+                Source::Default
+            )
         );
         assert_eq!(
             (l.config.tool_prefix.as_str(), l.sources.tool_prefix),
@@ -1413,7 +1366,10 @@ mod tests {
             (l.config.max_context, l.sources.max_context),
             (None, Source::Default)
         );
-        assert_eq!(l.config.base_url, None);
+        assert_eq!(
+            (l.config.base_url.as_deref(), l.sources.base_url),
+            (Some(SWARM_BASE_URL), Source::Default)
+        );
     }
 
     #[test]
@@ -1625,39 +1581,89 @@ mod tests {
     }
 
     #[test]
-    fn profile_resolution_precedence() {
+    fn swarm_baseline_defaults() {
+        // The out-of-the-box config (no file, no env) is the Swarm baseline:
+        // concurrency 4, the Swarm `base_url`, engine/model/context left to
+        // dynamic discovery, and `launch_command` / `stop_command` left unset
+        // (they are optional, profile-provided settings; the lifecycle layer
+        // supplies the Swarm launcher at boot time for non-llama backends).
+        let l = load_case(&[], None);
+        assert_eq!(
+            (l.config.max_concurrent_tasks, l.sources.max_concurrent_tasks),
+            (SWARM_MAX_CONCURRENT_TASKS, Source::Default)
+        );
+        assert_eq!(
+            (l.config.engine_type.as_deref(), l.sources.engine_type),
+            (None, Source::Default)
+        );
+        assert_eq!(
+            (l.config.model.as_deref(), l.sources.model),
+            (None, Source::Default)
+        );
+        assert_eq!(
+            (l.config.max_context, l.sources.max_context),
+            (None, Source::Default)
+        );
+        assert_eq!(
+            (l.config.base_url.as_deref(), l.sources.base_url),
+            (Some(SWARM_BASE_URL), Source::Default)
+        );
+        assert_eq!(
+            (
+                l.config.launch_command.as_deref(),
+                l.sources.launch_command
+            ),
+            (None, Source::Default)
+        );
+        assert_eq!(
+            (l.config.stop_command.as_deref(), l.sources.stop_command),
+            (None, Source::Default)
+        );
+        assert_eq!(l.profile_name, None);
+    }
+
+    #[test]
+    fn file_defined_profile_resolution_precedence() {
+        // Named profiles are user-defined in the file's `profiles` map. Here the
+        // file defines `turbo` and `bonsai`; the top-level selector picks one.
         let json = r#"{
             "profile": "bonsai",
             "model": "top-level-model",
             "profiles": {
+                "turbo": {
+                    "engine_type": "vllm",
+                    "max_context": 245760,
+                    "max_concurrent_tasks": 2
+                },
                 "bonsai": {
                     "model": "bonsai-model",
                     "engine_type": "llama.cpp",
-                    "max_concurrent_tasks": 4,
+                    "max_concurrent_tasks": 1,
                     "max_context": 524288
-                },
-                "hyperqwen": {
-                    "model": "hyperqwen-model",
-                    "engine_type": "vllm"
                 }
             }
         }"#;
 
-        // Top-level field beats profile; profile beats built-in defaults
+        // Top-level field beats the selected profile; the profile beats the
+        // Swarm baseline default where it does not override.
         let l = load_case(&[], Some(json));
         assert_eq!(l.profile_name.as_deref(), Some("bonsai"));
         assert_eq!(l.config.model.as_deref(), Some("top-level-model"));
         assert_eq!(l.config.engine_type.as_deref(), Some("llama.cpp"));
-        assert_eq!(l.config.max_concurrent_tasks, 4);
+        assert_eq!(l.config.max_concurrent_tasks, 1); // profile overrides the 4-slot default
         assert_eq!(l.config.max_context, Some(524288));
 
-        // CASTOR_PROFILE env var overrides file profile selector
-        let l = load_case(&[("CASTOR_PROFILE", "hyperqwen")], Some(json));
-        assert_eq!(l.profile_name.as_deref(), Some("hyperqwen"));
+        // CASTOR_PROFILE env var overrides the file's profile selector.
+        let l = load_case(&[("CASTOR_PROFILE", "turbo")], Some(json));
+        assert_eq!(l.profile_name.as_deref(), Some("turbo"));
         assert_eq!(l.config.engine_type.as_deref(), Some("vllm"));
-        assert_eq!(l.config.max_concurrent_tasks, 1); // default when unspecified in profile
+        assert_eq!(l.config.max_concurrent_tasks, 2);
+        // `turbo` does not set `model`; the top-level file key still wins, so
+        // the Swarm-baseline `model` fallback is exercised in the dedicated
+        // `file_defined_profile_falls_back_to_swarm_defaults` test instead.
+        assert_eq!(l.config.model.as_deref(), Some("top-level-model"));
 
-        // Env var overrides both top-level and profile
+        // An env var overrides both the top-level field and the selected profile.
         let l = load_case(
             &[("CASTOR_MODEL", "env-model"), ("CASTOR_PROFILE", "bonsai")],
             Some(json),
@@ -1667,135 +1673,84 @@ mod tests {
     }
 
     #[test]
-    fn unknown_profile_rejected() {
-        let json = r#"{"profile":"nonexistent","profiles":{"bonsai":{"model":"b"}}}"#;
-        let dir = tmp_dir();
-        let config_file = dir.join("config.json");
-        std::fs::write(&config_file, json).unwrap();
-
-        let res = load_with(|key| match key {
-            "CASTOR_STATE_DIR" => Some(dir.to_string_lossy().into()),
-            _ => None,
-        });
-        assert!(res.is_err());
-        let err = res.err().unwrap().to_string();
-        assert!(err.contains("unknown profile"), "{err}");
-    }
-
-    #[test]
-    fn builtin_profile_resolves_without_config_file() {
-        let dir = tmp_dir();
-        let res = load_with(|key| match key {
-            "CASTOR_STATE_DIR" => Some(dir.to_string_lossy().into()),
-            "CASTOR_PROFILE" => Some("bonsai-max".into()),
-            _ => None,
-        })
-        .unwrap();
-        assert_eq!(res.profile_name.as_deref(), Some("bonsai-max"));
+    fn file_defined_profile_falls_back_to_swarm_defaults() {
+        // A profile that sets only a couple of keys inherits the Swarm baseline
+        // for everything it omits (base_url, engine_type, concurrency, context).
+        let json = r#"{
+            "profile": "turbo",
+            "profiles": {
+                "turbo": { "max_context": 245760 }
+            }
+        }"#;
+        let l = load_case(&[], Some(json));
+        assert_eq!(l.profile_name.as_deref(), Some("turbo"));
+        assert_eq!(l.config.max_context, Some(245760)); // from the profile
         assert_eq!(
-            res.config.model.as_deref(),
-            Some("Ternary-Bonsai-2-27B-PQ2_0")
+            (l.config.max_concurrent_tasks, l.sources.max_concurrent_tasks),
+            (SWARM_MAX_CONCURRENT_TASKS, Source::Default)
         );
-        assert_eq!(res.config.engine_type.as_deref(), Some("llama.cpp"));
-        assert_eq!(res.config.max_concurrent_tasks, 4);
-        assert_eq!(res.config.max_context, Some(524288));
-    }
-
-    #[test]
-    fn builtin_profile_bonsai_12gb_resolves() {
-        let dir = tmp_dir();
-        let res = load_with(|key| match key {
-            "CASTOR_STATE_DIR" => Some(dir.to_string_lossy().into()),
-            "CASTOR_PROFILE" => Some("bonsai-12gb".into()),
-            _ => None,
-        })
-        .unwrap();
-        assert_eq!(res.profile_name.as_deref(), Some("bonsai-12gb"));
+        assert_eq!(l.config.engine_type.as_deref(), None);
+        assert_eq!(l.config.model.as_deref(), None);
         assert_eq!(
-            res.config.model.as_deref(),
-            Some("Ternary-Bonsai-2-27B-PQ2_0")
-        );
-        assert_eq!(res.config.engine_type.as_deref(), Some("llama_cpp"));
-        assert_eq!(
-            res.config.base_url.as_deref(),
-            Some("http://127.0.0.1:18020/v1")
-        );
-        assert_eq!(
-            res.config.launch_command.as_deref(),
-            Some(r"cmd /c scripts\bonsai\start_bonsai_12gb.bat")
-        );
-        assert_eq!(
-            res.config.stop_command.as_deref(),
-            Some("taskkill /F /IM llama-server.exe")
-        );
-        assert_eq!(res.config.max_context, Some(65536));
-        assert_eq!(res.config.max_concurrent_tasks, 1);
-        // profile pins the engine port
-        assert_eq!(
-            (res.config.ports.engine, res.sources.port_engine),
-            (18020, Source::File)
+            (l.config.base_url.as_deref(), l.sources.base_url),
+            (Some(SWARM_BASE_URL), Source::Default)
         );
     }
 
     #[test]
-    fn builtin_profile_bonsai_8gb_resolves() {
+    fn unknown_profile_rejected_lists_file_defined_profiles() {
+        let json = r#"{"profile":"nonexistent","profiles":{"bonsai":{"model":"b"},"turbo":{"engine_type":"vllm"}}}"#;
         let dir = tmp_dir();
-        let res = load_with(|key| match key {
+        std::fs::write(dir.join("config.json"), json).unwrap();
+
+        let err = load_with(|key| match key {
             "CASTOR_STATE_DIR" => Some(dir.to_string_lossy().into()),
-            "CASTOR_PROFILE" => Some("bonsai-8gb".into()),
             _ => None,
         })
-        .unwrap();
-        assert_eq!(res.profile_name.as_deref(), Some("bonsai-8gb"));
-        assert_eq!(
-            res.config.model.as_deref(),
-            Some("Ternary-Bonsai-2-27B-PQ2_0")
-        );
-        assert_eq!(res.config.engine_type.as_deref(), Some("llama_cpp"));
-        assert_eq!(res.config.max_context, Some(8192));
-        assert_eq!(res.config.max_concurrent_tasks, 1);
-        assert_eq!(
-            res.config.launch_command.as_deref(),
-            Some(r"cmd /c scripts\bonsai\start_bonsai_8gb.bat")
-        );
+        .unwrap_err();
+        let msg = err.to_string();
+        // The error names the offending profile and lists only the file-defined
+        // ones (there are no compiled-in profiles anymore).
+        assert!(msg.contains("nonexistent"), "{msg}");
+        assert!(msg.contains("bonsai"), "{msg}");
+        assert!(msg.contains("turbo"), "{msg}");
     }
 
     #[test]
-    fn builtin_profile_bonsai_16gb_resolves() {
+    fn profile_env_without_config_file_errors() {
+        // With no config file there are no profiles to resolve against, so
+        // requesting one via the environment is an error (not a builtin hit).
         let dir = tmp_dir();
-        let res = load_with(|key| match key {
+        let err = load_with(|key| match key {
             "CASTOR_STATE_DIR" => Some(dir.to_string_lossy().into()),
-            "CASTOR_PROFILE" => Some("bonsai-16gb".into()),
+            "CASTOR_PROFILE" => Some("turbo".into()),
             _ => None,
         })
-        .unwrap();
-        assert_eq!(res.profile_name.as_deref(), Some("bonsai-16gb"));
-        assert_eq!(
-            res.config.model.as_deref(),
-            Some("Ternary-Bonsai-2-27B-PQ2_0")
-        );
-        assert_eq!(res.config.engine_type.as_deref(), Some("llama_cpp"));
-        assert_eq!(res.config.max_context, Some(131072));
-        assert_eq!(res.config.max_concurrent_tasks, 1);
-        assert_eq!(
-            res.config.launch_command.as_deref(),
-            Some(r"cmd /c scripts\bonsai\start_bonsai_16gb.bat")
-        );
+        .unwrap_err();
+        let msg = err.to_string();
+        assert!(msg.contains("turbo"), "{msg}");
+        assert!(msg.contains("profiles"), "{msg}");
     }
 
     #[test]
-    fn builtin_profile_hyperqwen_huge_resolves() {
-        let dir = tmp_dir();
-        let res = load_with(|key| match key {
-            "CASTOR_STATE_DIR" => Some(dir.to_string_lossy().into()),
-            "CASTOR_PROFILE" => Some("hyperqwen-huge".into()),
-            _ => None,
-        })
-        .unwrap();
-        assert_eq!(res.profile_name.as_deref(), Some("hyperqwen-huge"));
-        assert_eq!(res.config.model.as_deref(), Some("qwen3.8-27b"));
-        assert_eq!(res.config.engine_type.as_deref(), Some("vllm"));
-        assert_eq!(res.config.max_concurrent_tasks, 1);
-        assert_eq!(res.config.max_context, Some(245760));
+    fn profile_env_overrides_file_profile_selector() {
+        // The environment selector wins over the file's `profile` key and both
+        // resolve against the file's `profiles` map.
+        let json = r#"{
+            "profile": "turbo",
+            "profiles": {
+                "turbo": { "max_context": 245760 },
+                "bonsai": { "model": "bonsai-model", "engine_type": "llama.cpp" }
+            }
+        }"#;
+        let l = load_case(&[("CASTOR_PROFILE", "bonsai")], Some(json));
+        assert_eq!(l.profile_name.as_deref(), Some("bonsai"));
+        assert_eq!(l.config.model.as_deref(), Some("bonsai-model"));
+        assert_eq!(l.config.engine_type.as_deref(), Some("llama.cpp"));
+        // `bonsai` does not pin `max_context`, so it inherits the Swarm default.
+        assert_eq!(
+            (l.config.max_context, l.sources.max_context),
+            (None, Source::Default)
+        );
     }
 }

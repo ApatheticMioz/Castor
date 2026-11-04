@@ -47,81 +47,98 @@ Rather than maintaining ad-hoc if/else branches across the codebase, Castor mode
 
 ## 3. Configuring an Engine Profile
 
-An engine profile is declared in `~/.castor/config.json` (or via environment variables).
+An engine profile is declared in `~/.castor/config.json` (or via `CASTOR_*` environment variables; see the inventory in [`AGENTS.md`](../AGENTS.md) §2.5). The microkernel resolves a profile through **dynamic capability discovery** rather than a hard-coded profile table: the running engine is fingerprinted at boot, and the model / context window are auto-adopted from it when you leave them unset.
 
 ```json
 {
-  "engine_type": "llama.cpp",
   "base_url": "http://127.0.0.1:18020/v1",
-  "model": "Ternary-Bonsai-2-27B-PQ2_0",
-  "max_context": 524288,
   "max_concurrent_tasks": 4,
-  "launch_command": "cmd /c scripts\\bonsai\\start_bonsai_24gb.bat",
-  "stop_command": "taskkill /F /IM llama-server.exe",
+  "launch_command": "bash scripts/wsl/start_swarm.sh",
+  "stop_command": "bash scripts/wsl/stop_server.sh",
   "boot_timeout_secs": 180
 }
 ```
 
+The minimal profile above is the **Swarm baseline**: point it at the engine endpoint and let discovery fill in the rest. `model` and `max_context` are deliberately omitted so they are auto-resolved (below).
+
+### Dynamic Capability Discovery
+
+At boot, `EngineProfile::discover` (`src/engine/backend.rs`) probes the running endpoint with three standard OpenAI-compatible calls and derives the backend, model, and context window from the evidence:
+
+| Probe | Endpoint | What it yields |
+|---|---|---|
+| Model list | `GET {base}/models` (`/v1/models`) | served model ids + per-model `max_model_len`; `owned_by` fingerprint |
+| Health | `GET /health` | llama.cpp returns `{"status":"ok"}`; vLLM returns an empty 200 at the server root |
+| Version | `GET /version` | vLLM reports a JSON `version` (a strong vLLM fingerprint) |
+
+**Backend identification** (most specific wins):
+
+- `vllm` — `/v1/models` reports `owned_by: "vllm"` on any entry, **or** `/version` returns a JSON `version`.
+- `llama.cpp` — `/health` returns `{"status":"ok"}`, **or** `/v1/models` reports `owned_by: "llama.cpp"`.
+- `generic` — a healthy model list with no engine-specific fingerprint.
+- fallback — when no live fingerprint matches, the `engine_type` setting selects the capability profile.
+
+**Model auto-binding**: when `model` is unset (or `"auto"`), the profile binds to the *single* model reported by `/v1/models`. If the engine serves zero models, discovery fails; if it serves multiple, discovery errors and asks you to pin `CASTOR_MODEL` to one of them. An explicitly set model is bound as-is and validated against the engine by the boot canary.
+
+**Context auto-adoption**: when `max_context` is unset, the profile adopts the engine-reported `max_model_len` from `/v1/models`. Set it explicitly to override the engine-reported value (e.g. to cap a 245k window down to a smaller budget).
+
 ### Key Configuration Keys
 
-- `engine_type`: Selects or aliases the capability profile (`llama.cpp`, `vllm`, `generic`, `openai`, `sglang`, `ollama`, `lmstudio`).
-- `base_url`: HTTP(S) endpoint URL of the serving engine.
-- `model`: Target model identifier reported by `/v1/models`.
-- `max_context`: Context window size in tokens.
-- `max_concurrent_tasks`: Concurrency slots allocated for simultaneous worker execution (file-backed lease semaphore).
-- `launch_command`: Optional managed startup script.
-- `stop_command`: Optional process teardown command.
+- `engine_type`: aliases the capability profile — `llama.cpp` / `llama` / `bonsai` → `LlamaCpp`; `vllm` / `hyperqwen` → `Vllm`; `generic` / `openai` / `sglang` / `ollama` / `lmstudio` → `Generic`. (Only used as the fallback when no live fingerprint matches.)
+- `base_url`: HTTP(S) endpoint URL of the serving engine (default `http://127.0.0.1:18020/v1`).
+- `model`: target model identifier; when unset, auto-bound to the engine's single served model.
+- `max_context`: context window in tokens; when unset, auto-adopted from the engine's `max_model_len`.
+- `max_concurrent_tasks`: concurrency slots for simultaneous worker execution (file-backed lease semaphore); default `4` (the Swarm baseline `MAX_SEQS=4`).
+- `launch_command` / `stop_command`: managed startup/teardown scripts (default: the Swarm launcher for the active platform).
 
 ---
 
-## 4. Shipped Example Profiles
+## 4. The Swarm Baseline & User-Defined Profiles
 
-Castor ships with tuned profiles as reference implementations. All profiles are equal citizens in the microkernel harness:
+The microkernel ships **no compiled-in engine profiles** — its only built-in default is the **Swarm baseline** (the `SWARM_*` constants in `src/config.rs`). Every other named profile (`turbo`, `bonsai`, …) is **user-defined**: declared in the file's `profiles` map and selected by `CASTOR_PROFILE` (or the file's `profile` key). Selecting a name the file does not define is an error.
 
-### 4.1 `bonsai-max` (Native Windows llama.cpp)
-- **Engine**: PRISM CUDA `llama-server.exe`
-- **Model**: `Ternary-Bonsai-2-27B-PQ2_0.gguf` (1.58-bit ternary, 6.70 GiB)
-- **Drafter**: `Bonsai-2-27B-DFlash2-Q8_0.gguf` (speculative lookup draft)
-- **Concurrency**: 4 dynamic slots (`-np 4`), 524,288 token unified KV pool (`-kvu`)
-- **Reasoning**: DeepSeek format via `delta.reasoning_content`
+### 4.1 Swarm Baseline (the built-in default)
 
-### 4.2 `hyperqwen-huge` (WSL2 / Linux vLLM)
-- **Engine**: vLLM OpenAI-compatible server
-- **Model**: `qwen3.8-27b`
-- **Concurrency**: 8 slots (matches daemon MAX_SEQS), external daemon management
-- **Reasoning**: `chat_template_kwargs: {"reasoning_effort": effort}`
+The out-of-the-box default. A bare install with no `config.json` boots and talks to this:
 
-### 4.3 `generic` (Ollama / LM Studio / SGLang / Remote API)
-- **Engine**: Any OpenAI-compatible chat completion provider
-- **Reasoning**: Standard top-level parameters with fallback to content parsing
-- **Concurrency**: Configurable cross-process slots via `CASTOR_MAX_CONCURRENT_TASKS`
+- **Engine**: vLLM OpenAI-compatible server (WSL2 / Linux) — `base_url: http://127.0.0.1:18020/v1`.
+- **Concurrency**: `4` slots — matches the launcher's `MAX_SEQS=4`.
+- **Context**: **150k** (`max_len: 150000`) — auto-adopted from the engine's `max_model_len` when `max_context` is unset.
+- **Model**: auto-bound to the single served model (Qwen3.8-27B on the Swarm launcher) when `model` is unset.
+- **Launcher**: `bash scripts/wsl/start_swarm.sh` (`MAX_SEQS=4`, `CTX=long`, MTP+PTH_FA speculative decoding, prefix caching).
+- **Reasoning**: `chat_template_kwargs: {"reasoning_effort": effort}` (vLLM capability profile).
 
-### 4.4 `bonsai-8gb` (Native Windows llama.cpp, 8GB VRAM)
-- **Engine**: PRISM CUDA `llama-server.exe` (native Windows)
-- **Model**: `Ternary-Bonsai-2-27B-PQ2_0` (1.58-bit ternary base, 6.70 GB weights)
-- **Drafter**: None (Zero-VRAM Dynamic N-Gram Lookup via `-lcd`)
-- **Concurrency**: 1 dedicated slot (`-np 1`)
-- **Context**: 8,192 tokens (`-c 8192`), quantized KV `-ctk q4_0 -ctv q4_0`
-- **Reasoning**: DeepSeek format via `delta.reasoning_content`
-- **Launcher**: `scripts/bonsai/start_bonsai_8gb.bat`
+Each of the 4 concurrent workers additionally token-budgets the shared 150k KV pool (a deterministic per-lease prefix reserve clamped to 4k–8k, plus the task's own prompt/history tokens) so the 4 streams never overcommit the aggregate footprint — further dispatches FIFO-queue on the slot semaphore.
 
-### 4.5 `bonsai-12gb` (Native Windows llama.cpp, 12GB VRAM)
-- **Engine**: PRISM CUDA `llama-server.exe` (native Windows)
-- **Model**: `Ternary-Bonsai-2-27B-PQ2_0` (DFlash2 draft) — 1.58-bit ternary base
-- **Drafter**: `Bonsai-2-27B-DFlash2-Q8_0` (fine-tuned; falls back to `Qwen3.8-27B-DFlash2-Q4_K_M`)
-- **Concurrency**: 1 dedicated slot (`-np 1`)
-- **Context**: 65,536 tokens (`-c 65536`), quantized KV `-ctk q4_0 -ctv q4_0`
-- **Reasoning**: DeepSeek format via `delta.reasoning_content`
-- **Launcher**: `scripts/bonsai/start_bonsai_12gb.bat`
+### 4.2 User-Defined JSON Profiles
 
-### 4.6 `bonsai-16gb` (Native Windows llama.cpp, 16GB VRAM)
-- **Engine**: PRISM CUDA `llama-server.exe` (native Windows)
-- **Model**: `Ternary-Bonsai-2-27B-PQ2_0` (DFlash2 draft) — 1.58-bit ternary base
-- **Drafter**: `Bonsai-2-27B-DFlash2-Q8_0` (fine-tuned; falls back to `Qwen3.8-27B-DFlash2-Q4_K_M`)
-- **Concurrency**: 1 dedicated slot (`-np 1`)
-- **Context**: 131,072 tokens (`-c 131072`), quantized KV `-ctk q4_0 -ctv q4_0`
-- **Reasoning**: DeepSeek format via `delta.reasoning_content`
-- **Launcher**: `scripts/bonsai/start_bonsai_16gb.bat`
+Named profiles are ordinary entries in the file's `profiles` map. Each is a partial profile — it overrides only the keys it sets and **inherits the Swarm baseline for everything it omits** (base URL, engine type, concurrency, context). Precedence: `CASTOR_*` env vars > the file's top-level keys > the selected profile > the Swarm baseline.
+
+```json
+{
+  "profile": "turbo",
+  "profiles": {
+    "turbo": {
+      "engine_type": "vllm",
+      "max_context": 245760,
+      "max_concurrent_tasks": 2,
+      "launch_command": "bash scripts/wsl/start_turbo.sh"
+    },
+    "bonsai": {
+      "engine_type": "llama.cpp",
+      "model": "Ternary-Bonsai-2-27B-PQ2_0",
+      "max_context": 524288,
+      "max_concurrent_tasks": 1,
+      "launch_command": "cmd /c scripts\\bonsai\\start_bonsai_24gb.bat"
+    }
+  }
+}
+```
+
+- **`turbo`** — peak single-user burst: `MAX_SEQS=2`, `max_context: 245760` (DFlash2 + KVarN 245k context). Launches via `scripts/wsl/start_turbo.sh`.
+- **`bonsai`** — native Windows `llama.cpp`: a 1-slot, 524,288-token unified KV pool, model pinned explicitly. Launches via the `scripts/bonsai/` launchers.
+
+Because profiles are partial, a profile that sets only `max_context` (e.g. `{"max_context": 245760}`) inherits the Swarm baseline's `base_url`, concurrency, and launcher for all other keys.
 
 ---
 

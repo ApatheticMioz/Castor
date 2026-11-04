@@ -2,7 +2,9 @@
 //!
 //! Subsystem architecture: a cross-process boot lock, a canary that probes the
 //! configured model id, a wedge counter with a serialized heal, and a stop that
-//! prefers the configured `stop_command` over a process-group kill.
+//! honors the llama.cpp `llama-owner.json` record first (for the llama backend)
+//! and prefers a configured `stop_command` otherwise (falling back to a
+//! process-group kill when the engine is managed in-process).
 
 use std::collections::VecDeque;
 use std::process::Stdio;
@@ -16,7 +18,7 @@ use tokio::process::Command;
 use tokio::sync::Mutex;
 
 use super::backend::{Backend, EngineProfile, api_url};
-use crate::config::Config;
+use crate::config::{Config, default_launch_command};
 use crate::platform::{is_wsl, wsl_normalize};
 use crate::state::{AcquireResult, Locks, StateDir, WedgeCounter};
 
@@ -94,11 +96,69 @@ impl EngineLifecycle {
         self.legacy_canary().await
     }
 
+    /// The model id validated by the canary: the auto-bound model when
+    /// `config.model` is `None`/`"auto"` (the engine's single served model),
+    /// or the configured model when it matches a served id/alias.
+    ///
+    /// Returns `None` when the canary cannot confirm a model — zero or
+    /// multiple served models (auto), no match for an explicit model, or an
+    /// unreachable/unhealthy engine. This is the same evidence the canary uses,
+    /// exposed so callers (e.g. `server status`) can report the *detected* id
+    /// without a second, inconsistent probe.
+    pub async fn canary_model(&self) -> Option<String> {
+        let is_auto = match self.config.model.as_deref() {
+            None => true,
+            Some(m) => m.is_empty() || m == "auto",
+        };
+        let url = format!("http://127.0.0.1:{}/v1/models", self.config.ports.engine);
+        let res = self.client.get(&url).send().await.ok()?;
+        if res.status() != 200 {
+            return None;
+        }
+        let v: Value = res.json().await.ok()?;
+        let ids = v.get("data")?.as_array()?.to_vec();
+        if is_auto {
+            // Auto-bind: the engine must report exactly one model.
+            let bound: Vec<&str> = ids
+                .iter()
+                .filter_map(|m| m.get("id").and_then(|i| i.as_str()))
+                .collect();
+            return match bound.as_slice() {
+                [single] => Some(single.to_string()),
+                _ => None,
+            };
+        }
+        let Some(model) = &self.config.model else {
+            return None;
+        };
+        // Explicit: the configured model must match a served id or alias.
+        let mut matched = None;
+        for m in &ids {
+            let id = m.get("id").and_then(|i| i.as_str());
+            let id_match = id.is_some_and(|s| s.eq_ignore_ascii_case(model));
+            let alias_match = m
+                .get("aliases")
+                .and_then(|a| a.as_str())
+                .is_some_and(|s| {
+                    s.split(|c: char| c.is_whitespace() || c == ',')
+                        .any(|alias| alias.eq_ignore_ascii_case(model))
+                });
+            if id_match || alias_match {
+                matched = id.map(str::to_string);
+                break;
+            }
+        }
+        matched
+    }
+
     async fn legacy_canary(&self) -> bool {
-        let auto = !matches!(
-            self.config.model.as_deref(),
-            Some(model) if !model.is_empty() && model != "auto"
-        );
+        let is_auto = match self.config.model.as_deref() {
+            None => true,
+            Some(m) => m.is_empty() || m == "auto",
+        };
+        if is_auto {
+            return self.canary_model().await.is_some();
+        }
         let url = format!("http://127.0.0.1:{}/v1/models", self.config.ports.engine);
         let res = match self.client.get(&url).send().await {
             Ok(r) => r,
@@ -114,14 +174,6 @@ impl EngineLifecycle {
         let Some(ids) = v.get("data").and_then(|d| d.as_array()) else {
             return false;
         };
-        if auto {
-            // Auto-bind: healthy when the engine reports exactly one model.
-            let count = ids
-                .iter()
-                .filter(|m| m.get("id").and_then(|i| i.as_str()).is_some())
-                .count();
-            return count == 1;
-        }
         let Some(model) = &self.config.model else {
             return false;
         };
@@ -300,11 +352,18 @@ impl EngineLifecycle {
             self.wedge.reset()?;
             return Err(LifecycleError::AlreadyRunning);
         }
+        // `launch_command` is optional / profile-provided (AGENTS.md), so a
+        // bare install has none. It is only consumed by the non-llama shell
+        // path; there, a `None` falls back to the repository Swarm launcher so
+        // `castor server start` boots the Swarm baseline out of the box. The
+        // llama.cpp backend ignores this value — its separate supervisor reads
+        // `config.launch_command` directly and errors with `NoLaunchCommand`
+        // when it is unset — so computing the fallback here is inert for llama.
         let cmd = self
             .config
             .launch_command
             .clone()
-            .ok_or(LifecycleError::NoLaunchCommand)?;
+            .unwrap_or_else(default_launch_command);
 
         if Backend::from_config(&self.config) == Backend::LlamaCpp {
             return super::supervisor::start(
@@ -429,9 +488,17 @@ impl EngineLifecycle {
         }
     }
 
-    /// Stop the engine: run the configured `stop_command` if present, else
-    /// kill the spawned child's process group.
+    /// Stop the engine.
+    ///
+    /// llama.cpp: the detached supervisor is the strict owner, so stop always
+    /// goes through it (honoring and cleaning up `llama-owner.json`), never
+    /// through a configured `stop_command`. Every other backend runs the
+    /// configured `stop_command` when set, else kills the in-process child's
+    /// process group.
     pub async fn stop(&self) -> Result<(), LifecycleError> {
+        // llama.cpp: the supervisor owns the server, so its `llama-owner.json`
+        // record (not any `stop_command`) is the authoritative teardown; the
+        // boot lock is held to serialize stop against a concurrent boot.
         if Backend::from_config(&self.config) == Backend::LlamaCpp {
             match self.acquire_boot_lock().await? {
                 AcquireResult::HeldBy { pid } => return Err(LifecycleError::BootLockHeld { pid }),
@@ -447,21 +514,32 @@ impl EngineLifecycle {
     }
 
     async fn stop_inner(&self) -> Result<(), LifecycleError> {
-        if let Some(cmd) = &self.config.stop_command {
-            let out = Self::shell_command(cmd).output().await?;
-            if !out.status.success() {
-                return Err(LifecycleError::Stop(format!(
-                    "stop command exited {}: {}",
-                    out.status,
-                    String::from_utf8_lossy(&out.stderr).trim()
-                )));
-            }
-            return Ok(());
-        }
+        // llama.cpp: the supervisor is the strict owner, so its `llama-owner.json`
+        // record drives the stop and cleanup — even when a `stop_command` is
+        // also configured (e.g. a profile's platform script), an external shell
+        // teardown would otherwise leave the ownership record dangling. The
+        // configured stop command only ever runs for non-llama backends.
         if Backend::from_config(&self.config) == Backend::LlamaCpp {
             return super::supervisor::stop(&self.config, &self.state).await;
         }
+        // Non-llama: a configured stop command wins; otherwise kill the managed
+        // in-process child by group (a no-op when nothing was spawned here).
+        if let Some(cmd) = &self.config.stop_command {
+            return self.run_stop_command(cmd).await;
+        }
         self.kill_child().await
+    }
+
+    async fn run_stop_command(&self, cmd: &str) -> Result<(), LifecycleError> {
+        let out = Self::shell_command(cmd).output().await?;
+        if !out.status.success() {
+            return Err(LifecycleError::Stop(format!(
+                "stop command exited {}: {}",
+                out.status,
+                String::from_utf8_lossy(&out.stderr).trim()
+            )));
+        }
+        Ok(())
     }
 
     async fn kill_child(&self) -> Result<(), LifecycleError> {

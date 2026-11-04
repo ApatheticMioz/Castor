@@ -1,2 +1,3 @@
 @echo off
-call "%~dp0start_huge.bat"
+call "%~dp0start_swarm.bat"
+

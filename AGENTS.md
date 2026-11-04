@@ -42,7 +42,7 @@ which one it is before acting.
 
 | Persona | Runtime | Mandate | Hard Limits |
 |---|---|---|---|
-| **Lead Architect** | Cloud (Claude Code: GLM 5.3 text-only Plan / GLM 5.3-flash vision Exec; Antigravity: Gemini 3.8 Flash vision) | Architecture, task decomposition, plan & manifest authorship, supervisory steering, final synthesis. Proactively parallelizes independent work across concurrent coworker tasks. | **Never** bulk-read source into cloud context; **never** author code; offloads exploration in single-concern slices; sizes concurrent dispatches by workload tier (1 heavy / 2 medium / up to 4 short); **never** falls back to direct shell/file execution when coworker is offline. |
+| **Lead Architect** | Cloud (Claude Code: GLM 5.3 text-only Plan / GLM 5.3-flash vision Exec; Antigravity: Gemini 3.8 Flash vision) | Architecture, task decomposition, plan & manifest authorship, supervisory steering, final synthesis. Proactively parallelizes independent work across concurrent coworker tasks. | **Never** bulk-read source into cloud context; **never** author code; offloads exploration in single-concern slices; sizes concurrent dispatches against the engine's aggregate KV pool, not a fixed slot count (MTP Swarm `MAX_SEQS=4`, 150k budget: up to 4 fresh/low-history short tasks, 2 medium, 1 heavy — further dispatches FIFO-queue on the slot semaphore, and the token-budget gate refuses any admission that would overcommit the pool); dispatch concurrent slices per-workspace so they share one warm KV prefix; **never** falls back to direct shell/file execution when coworker is offline. |
 | **Autonomous Execution Coworker** | Local peer programmer (Ternary-Bonsai-2-27B or configured model) inside the sandboxed 16-tool Castor runtime | Hands-on execution & peer engineering: explore, structural AST surgery, file editing, git inspection/committing, stateful Python scratchpad, local visual inspection (images and PDFs), web/paper research, and shell — all inside the sandbox. Proactively challenges flawed assumptions, proposes architectural alternatives, and returns grounded facts. The 16 in-tree tools are: `read_file`, `write_file`, `edit_file`, `list_dir`, `search_code`, `ast_search`, `ast_replace`, `git_status`, `git_diff`, `git_log`, `git_commit`, `python_repl`, `paper_lookup`, `web_search`, `web_fetch`, `bash`. | **Never** authors high-level plans/roadmaps; **never** escapes the sandbox root. |
 | **Autonomous Optimizer (Evo)** | Local, offline batch runner | Closed-loop mutation: propose -> evaluate -> select/revert against a deterministic fitness metric. | **Snapshot before mutating**; **revert on regression**; never edits files outside the candidate's snapshot list. |
 
@@ -106,12 +106,12 @@ The exact list below is the present-state inventory from
 
 | Variable | Default | Meaning |
 |---|---|---|
-| `CASTOR_MODEL` | `Ternary-Bonsai-2-27B-PQ2_0` | Target model identifier for the coworker (or configured profile). |
+| `CASTOR_MODEL` | *(unset)* | Target model identifier. When unset, the engine auto-discovers the single model reported by `/v1/models` at boot (see [`docs/engine-profiles.md`](docs/engine-profiles.md) §3); pin it explicitly only when the engine serves multiple models. |
 | `CASTOR_BASE_URL` | `http://127.0.0.1:18020/v1` | OpenAI-compatible endpoint. |
 | `CASTOR_API_KEY` | `local-token` | API key sent to the engine (most local engines ignore it; required by strict endpoints). |
 | `CASTOR_ENGINE_TYPE` | *(unset)* | Serving backend: `llama.cpp` \| `vllm` \| `openai`. |
-| `CASTOR_PROFILE` | *(unset)* | Named profile selector: `bonsai-max` \| `hyperqwen-huge` (plus other builtin profiles) — overrides model/base URL/engine/slots/commands. |
-| `CASTOR_MAX_CONTEXT` | `65536` | Maximum context window passed to the engine. |
+| `CASTOR_PROFILE` | *(unset)* | Named profile selector. The binary ships **no compiled-in profiles** — every named profile (e.g. `turbo`, `bonsai`) is user-defined in the file's `profiles` map (see §4 below); selecting one that the file does not define is an error. The out-of-the-box default is the Swarm baseline. |
+| `CASTOR_MAX_CONTEXT` | *(unset)* | Maximum context window passed to the engine. When unset, the engine's reported `max_model_len` (`/v1/models`) is auto-adopted at discovery (see [`docs/engine-profiles.md`](docs/engine-profiles.md) §3); pin it explicitly to override the engine-reported value. |
 | `CASTOR_LAUNCH_COMMAND` / `CASTOR_STOP_COMMAND` | *(profile-provided)* | Optional custom engine launch/stop command overrides (e.g. per-profile `.bat` / `vllm serve` invocations). |
 | `CASTOR_BOOT_TIMEOUT_SECS` | `180` | Serving engine boot timeout in seconds before abort (default 3 minutes). |
 | `CASTOR_PORT_ENGINE` | `18020` | Local serving engine port. |
@@ -119,7 +119,7 @@ The exact list below is the present-state inventory from
 | `CASTOR_PORT_PROXY` | `18022` | Universal SSE streaming proxy (loopback only). |
 | `CASTOR_TOOL_PREFIX` | `castor` | Namespace prefix for MCP tools (`castor_coworker`, etc.). |
 | `CASTOR_STATE_DIR` | `~/.castor` | Root for task JSON, slot leases, session logs, Evo lineage. |
-| `CASTOR_MAX_CONCURRENT_TASKS` | `1` | Cross-process execution slots (disk-lease semaphore). Slot defaults: 1 top-level, 4 for `bonsai-max`, 1 for `hyperqwen-huge`. |
+| `CASTOR_MAX_CONCURRENT_TASKS` | `4` | Cross-process execution slots (disk-lease semaphore). Defaults to the Swarm baseline `MAX_SEQS=4`; user-defined profiles (e.g. `turbo`=2, `bonsai`=1) or an explicit env/file value override this. Each worker additionally token-budgets the pool at `max_context` so concurrent streams never overcommit the aggregate KV footprint. |
 | `CASTOR_MIN_EVICTION_DETECT_TOKENS` | `13056` | Minimum prompt tokens before KV-cache eviction detection engages. |
 | `CASTOR_CACHE_HIT_YIELD_RATIO` | `0.20` | KV prefix-cache hit ratio that justifies yielding a warm slot to a new task. |
 | `CASTOR_WORKSPACE_SKELETON` | `true` | Prepend a compact workspace-skeleton block to the system prompt (warm Turn-1 prefix for KV prefix caching). |

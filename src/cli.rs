@@ -359,12 +359,16 @@ fn now_epoch_ms() -> u64 {
 
 /// Run the `server` subcommand against the engine lifecycle.
 ///
-/// `status` runs the canary and returns one honest line (healthy: the
-/// configured model id is listed; unhealthy: the verbatim reason). `start`
-/// boots the engine (an already-healthy engine is a success short-circuit,
-/// printed as such). `stop` stops it. Returns the line to print plus whether
-/// the action succeeded (drives the exit code). Errors are returned as a
-/// typed message string.
+/// `status` runs the canary and returns one honest line: `healthy: model {id}
+/// listed` (where `{id}` is the detected model id) or `unhealthy: {reason}`
+/// (the verbatim reason). The model id is resolved dynamically — when
+/// `config.model` is `None` or `"auto"` the canary auto-binds to the engine's
+/// single served model, so the report names what is actually running (never a
+/// stale configured value, and never an `unwrap` panic). `start` boots the
+/// engine (an already-healthy engine is a success short-circuit, printed as
+/// such). `stop` stops it. Returns the line to print plus whether the action
+/// succeeded (drives the exit code). Errors are returned as a typed message
+/// string.
 pub async fn run_server(
     action: &str,
     config: &config::Config,
@@ -374,22 +378,30 @@ pub async fn run_server(
     match action {
         "status" => {
             if engine::backend::Backend::from_config(config) == engine::backend::Backend::LlamaCpp {
+                // llama.cpp serves a pinned model: the readiness gate is the
+                // canary, and the id is the configured one (llama.cpp has no
+                // adaptive auto-bind).
                 return match lc.readiness().await {
                     Ok(()) => Ok((
-                        format!("healthy: model {} listed", config.model.as_deref().unwrap()),
+                        format!(
+                            "healthy: model {} listed",
+                            config.model.as_deref().unwrap_or("auto")
+                        ),
                         true,
                     )),
                     Err(e) => Ok((format!("unhealthy: {e}"), false)),
                 };
             }
-            let healthy = match &config.model {
-                Some(_) => lc.canary().await,
-                None => false,
-            };
+            // Adaptive model resolution: `None` / `"auto"` binds to the
+            // engine's single served model; an explicit value is validated
+            // against `/v1/models`. `canary_model` returns the *same* detected
+            // id the canary validated (never a second, inconsistent probe).
+            let healthy = lc.canary().await;
             let line = if healthy {
-                format!("healthy: model {} listed", config.model.as_deref().unwrap())
-            } else if config.model.is_none() {
-                "unhealthy: no model configured".to_string()
+                let detected = lc.canary_model().await.unwrap_or_else(|| {
+                    config.model.clone().unwrap_or_else(|| "auto".into())
+                });
+                format!("healthy: model {detected} listed")
             } else {
                 "unhealthy: canary failed (engine not healthy)".to_string()
             };
@@ -1146,6 +1158,66 @@ mod tests {
         // Unknown action is a typed error.
         let err = run_server("reboot", &cfg, &state).await.unwrap_err();
         assert!(err.contains("unknown action"), "{err}");
+
+        let _ = std::fs::remove_dir_all(state.root());
+    }
+
+    /// vLLM-shaped mock: `/v1/models` reports `owned_by: "vllm"` and a
+    /// `max_model_len`, so [`engine::lifecycle::EngineLifecycle::profile`]
+    /// auto-binds to the single served model.
+    async fn start_vllm_status_mock() -> u16 {
+        let app = axum::Router::new()
+            .route(
+                "/v1/models",
+                axum::routing::get(|| async {
+                    axum::Json(serde_json::json!({
+                        "object": "list",
+                        "data": [{ "id": "auto-bound-model", "owned_by": "vllm", "max_model_len": 150000 }]
+                    }))
+                }),
+            )
+            .route(
+                "/version",
+                axum::routing::get(|| async { axum::Json(serde_json::json!({"version": "0.31.0"})) }),
+            );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        tokio::spawn(async move {
+            let _ = axum::serve(listener, app).await;
+        });
+        port
+    }
+
+    #[tokio::test]
+    async fn run_server_status_reports_auto_bound_model() {
+        let state = state::StateDir::new(clean_tmp_dir());
+        let _ = state.ensure();
+
+        let port = start_vllm_status_mock().await;
+
+        // Adaptive model: `model = None` (the Swarm baseline) auto-binds to
+        // the engine's single served model; the status reports that id.
+        let mut cfg_auto = server_test_config(&state, port);
+        cfg_auto.model = None;
+        let (line_auto, ok_auto) = run_server("status", &cfg_auto, &state).await.unwrap();
+        assert_eq!(line_auto, "healthy: model auto-bound-model listed");
+        assert!(ok_auto, "auto-bound healthy status must exit 0");
+
+        // Adaptive model: `model = "auto"` behaves identically.
+        let mut cfg_auto_kw = server_test_config(&state, port);
+        cfg_auto_kw.model = Some("auto".into());
+        let (line_kw, ok_kw) = run_server("status", &cfg_auto_kw, &state).await.unwrap();
+        assert_eq!(line_kw, "healthy: model auto-bound-model listed");
+        assert!(ok_kw, "auto-keyword healthy status must exit 0");
+
+        // `model = None` against an offline engine: the canary fails and the
+        // status is the honest canary message (never a panic, never the
+        // legacy "no model configured").
+        let mut cfg_off = server_test_config(&state, 1);
+        cfg_off.model = None;
+        let (line_off, ok_off) = run_server("status", &cfg_off, &state).await.unwrap();
+        assert_eq!(line_off, "unhealthy: canary failed (engine not healthy)");
+        assert!(!ok_off, "offline status must exit 1");
 
         let _ = std::fs::remove_dir_all(state.root());
     }
