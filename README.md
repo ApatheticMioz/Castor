@@ -9,11 +9,11 @@
 Pair high-reasoning cloud orchestrators (Claude Code, Google Antigravity, Cursor) with locally-served execution models at **$0 cloud token cost**.
 
 <p>
-  <a href=".github/workflows"><img alt="CI" src="https://img.shields.io/badge/CI-Passing-success?logo=githubactions&logoColor=white"></a>
-  <a href="https://www.npmjs.com/package/mcp-castor"><img alt="npm" src="https://img.shields.io/npm/v/mcp-castor.svg?color=CB3837&logo=npm"></a>
-  <a href="https://www.rust-lang.org/"><img alt="Rust" src="https://img.shields.io/badge/Rust-2024%20Edition-DEA584?logo=rust&logoColor=white"></a>
-  <a href="LICENSE"><img alt="License" src="https://img.shields.io/badge/License-AGPL--3.0-blue.svg"></a>
-  <a href="#building--verification"><img alt="Test Gate" src="https://img.shields.io/badge/Test_Gate-cargo_test_%2B_clippy-brightgreen.svg"></a>
+  <a href=".github/workflows"><img alt="CI" src="https://img.shields.io/badge/CI-Passing-1d4ed8?logo=githubactions&logoColor=white"></a>
+  <a href="https://www.npmjs.com/package/mcp-castor"><img alt="npm" src="https://img.shields.io/badge/npm-mcp--castor-d97706?logo=npm&logoColor=white"></a>
+  <a href="https://www.rust-lang.org/"><img alt="Rust" src="https://img.shields.io/badge/Rust-2024_Edition-1d4ed8?logo=rust&logoColor=white"></a>
+  <a href="LICENSE"><img alt="License" src="https://img.shields.io/badge/License-AGPL--3.0-161e2e"></a>
+  <a href="#building--verification"><img alt="Test Gate" src="https://img.shields.io/badge/Test_Gate-Passing-1d4ed8"></a>
 </p>
 
 <p>
