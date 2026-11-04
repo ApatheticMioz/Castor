@@ -13,7 +13,7 @@ Pair high-reasoning cloud orchestrators (Claude Code, Google Antigravity, Cursor
   <a href="https://www.npmjs.com/package/mcp-castor"><img alt="npm" src="https://img.shields.io/npm/v/mcp-castor.svg?color=CB3837&logo=npm"></a>
   <a href="https://www.rust-lang.org/"><img alt="Rust" src="https://img.shields.io/badge/Rust-2024%20Edition-DEA584?logo=rust&logoColor=white"></a>
   <a href="LICENSE"><img alt="License" src="https://img.shields.io/badge/License-AGPL--3.0-blue.svg"></a>
-  <a href="#building-from-source--offline-test-gate"><img alt="Test Gate" src="https://img.shields.io/badge/Test_Gate-cargo_test_%2B_clippy-brightgreen.svg"></a>
+  <a href="#building--verification"><img alt="Test Gate" src="https://img.shields.io/badge/Test_Gate-cargo_test_%2B_clippy-brightgreen.svg"></a>
 </p>
 
 <p>
@@ -34,7 +34,7 @@ Pair high-reasoning cloud orchestrators (Claude Code, Google Antigravity, Cursor
 
 ---
 
-## Quickstart — 30-Second Time-to-Value
+## Quickstart
 
 ### 1. Install & Register
 
@@ -62,7 +62,7 @@ Prefer manual wiring? Drop this into your client's MCP config (`claude_desktop_c
 }
 ```
 
-### 2. Connect a Local Serving Engine — Zero-Config
+### 2. Connect Your Local Engine
 
 Castor auto-discovers any OpenAI-compatible endpoint at `http://127.0.0.1:18020/v1` by probing
 `/v1/models` — it detects the model name, context window (`max_model_len`), and engine backend
@@ -95,7 +95,7 @@ in-tree, at **$0 cloud token cost**. Only the concise, verified deliverable retu
 
 ---
 
-## Why Castor? — The Re-Billing Asymmetry
+## Why Castor?
 
 | Dimension | Pure Cloud Agent | Local Model Alone | **Castor Dual-Agent** |
 |---|---|---|---|
@@ -132,13 +132,13 @@ return to the cloud.
 
 For long tasks, the microkernel yields a durable task ID and a long-poll wait hook on
 `:18021` so the cloud supervisor sleeps at $0 and wakes the millisecond execution
-completes (see § *Zero-Turn Reactive Asynchronous Lifecycle* below).
+completes (see § *Zero-Turn Reactive Lifecycle* below).
 
 ---
 
-## Key Innovations & Breakthroughs
+## Core Innovations
 
-### 1. DGI — Decomposition Granularity Index (Pre-Execution Decomposition Firewall)
+### 1. DGI (Decomposition Granularity Index)
 
 A **pre-execution firewall** that stops compound "mega-prompt" thrashing before it burns
 compute or leases a slot. A **sub-25 ms 1-forward-pass logit probe** against the serving
@@ -157,7 +157,7 @@ $0 cost, zero extra round-trip. The probe is **engine-agnostic**: vLLM uses a
 decode. Same decision rule, DRY request-builder / verdict-decoder core in
 [`src/mcp/dgi.rs`](src/mcp/dgi.rs).
 
-### 2. Zero-Turn Reactive Asynchronous Lifecycle (`:18021`)
+### 2. Zero-Turn Reactive Lifecycle
 
 Tasks exceeding the sync window (default **15 s**, tunable via `CASTOR_SYNC_TIMEOUT_SECS`)
 yield a durable task ID and a long-poll HTTP wait hook:
@@ -170,7 +170,7 @@ The cloud supervisor can block on that URL at **$0 token cost** and wakes reacti
 millisecond execution completes — no poll storms, no prompt re-sends.
 Implemented in [`src/task/`](src/task/).
 
-### 3. Cross-Process Token-Budget Semaphore & Cooperative Yielding
+### 3. Token-Budget Semaphore & Cooperative Yielding
 
 Zero-lock daemon. Slot admission is a **two-phase atomic `O_EXCL` lease**
 (claim → ownership-check release), with **zombie-aware Linux PID liveness**
@@ -182,9 +182,9 @@ The admission budget is expressed in **tokens against the aggregate KV pool**
 preventing GPU VRAM thrashing under concurrency spikes.
 See [`src/task/semaphore.rs`](src/task/semaphore.rs).
 
-### 4. In-Flight Stream Proxy & Sanitizer (`:18022`)
+### 4. Stream Proxy & Sanitizer
 
-A real-time SSE proxy that watches live model output for pathological behaviour:
+A real-time SSE proxy that watches live model output on `:18022` for pathological behaviour:
 
 - **UTF-8 packet-fragment reassembly** — safe multi-byte / emoji boundaries across
   TCP chunks.
@@ -195,14 +195,14 @@ A real-time SSE proxy that watches live model output for pathological behaviour:
 
 See [`src/proxy/`](src/proxy/).
 
-### 5. Autonomous Evolutionary Optimizer (Evo)
+### 5. Evolutionary Optimizer (Evo)
 
 Closed-loop code mutation guided by an **append-only, cycle-proof lineage DAG**
 (`src/evo/`). Each mutation is gated on a **deterministic test fitness** evaluation;
 a **stagnation watchdog** (`src/evo/watchdog.rs`) inspects the DAG head and flags
 plateaus so the loop can be reset before drift accumulates.
 
-### 6. Hyper-Lean 8-Tool Core & Native Shell Power
+### 6. Lean 8-Tool Core
 
 Eight tools in the core runtime — no bloat:
 
@@ -217,7 +217,7 @@ core for power users:
 - `ast` — structural `ast_search` / `ast_replace` via ast-grep, with automatic rollback on syntax error.
 - `paper` — `paper_lookup` against OpenAlex for verified academic metadata.
 
-### 7. Lazy-Injected Skills Engine
+### 7. Lazy Skills Engine
 
 Standard [`agentskills.io`](https://agentskills.io) `SKILL.md` catalog. Skills are
 **indexed in the system prompt** (just name + one-line summary) and **loaded on
@@ -227,7 +227,7 @@ so a new prompt reuses the prior KV prefix instead of re-prefilling it.
 
 ---
 
-## Workspace Containment & AST Safety
+## Workspace Containment
 
 <img src="https://raw.githubusercontent.com/ApatheticMioz/Castor/main/docs/assets/security_sandbox.svg"
      alt="Castor workspace containment" width="100%">
@@ -248,7 +248,7 @@ prompt, the model, or the tool author.
 
 ---
 
-## Consolidated MCP Tool Surface
+## MCP Tool Surface
 
 Castor registers **three stdio MCP tools** with any client:
 
@@ -276,7 +276,7 @@ Castor registers **three stdio MCP tools** with any client:
 
 ---
 
-## Ecosystem Compatibility Matrix
+## Ecosystem Matrix
 
 **Supported Cloud Clients**
 
@@ -305,7 +305,7 @@ without any user configuration.
 
 ---
 
-## CLI Command Reference
+## CLI Reference
 
 ```bash
 # Model Context Protocol stdio server (default entry point)
@@ -333,7 +333,7 @@ Additional subcommands available: `castor status` (zero-turn HTTP wait server on
 
 ---
 
-## Building from Source & Offline Test Gate
+## Building & Verification
 
 ```bash
 # Prerequisites: Rust ≥ 1.85 (2024 edition)

@@ -1,134 +1,337 @@
-<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1000 560" width="100%" role="img" aria-label="Castor architecture: cloud orchestrator, consolidated MCP tool surface, Castor microkernel runtime, and local serving engine." style="font-family:-apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif;">
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1100 640" width="100%" height="100%" role="img" aria-label="Castor System Architecture: The Bridge Between Cloud and Local Frontiers" style="font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif;">
   <defs>
-    <marker id="arrow" viewBox="0 0 10 10" refX="6" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
-      <path d="M 0 0 L 10 5 L 0 10 z" fill="#475569"/>
-    </marker>
-    <linearGradient id="punch" x1="0%" y1="0%" x2="100%" y2="0%">
-      <stop offset="0%" stop-color="#10b981"/>
-      <stop offset="100%" stop-color="#0ea5e9"/>
+    <!-- Background Gradients -->
+    <linearGradient id="bgGrad" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#0b0f19"/>
+      <stop offset="50%" stop-color="#0f172a"/>
+      <stop offset="100%" stop-color="#090d16"/>
     </linearGradient>
+
+    <!-- Zone Gradients -->
+    <linearGradient id="cloudGrad" x1="0%" y1="0%" x2="100%" y2="0%">
+      <stop offset="0%" stop-color="#7c3aed"/>
+      <stop offset="100%" stop-color="#6366f1"/>
+    </linearGradient>
+    <linearGradient id="castorGrad" x1="0%" y1="0%" x2="100%" y2="0%">
+      <stop offset="0%" stop-color="#0284c7"/>
+      <stop offset="100%" stop-color="#0d9488"/>
+    </linearGradient>
+    <linearGradient id="localGrad" x1="0%" y1="0%" x2="100%" y2="0%">
+      <stop offset="0%" stop-color="#d97706"/>
+      <stop offset="100%" stop-color="#ea580c"/>
+    </linearGradient>
+    <linearGradient id="footerGrad" x1="0%" y1="0%" x2="100%" y2="0%">
+      <stop offset="0%" stop-color="#10b981"/>
+      <stop offset="50%" stop-color="#0ea5e9"/>
+      <stop offset="100%" stop-color="#8b5cf6"/>
+    </linearGradient>
+
+    <!-- Arrow Markers -->
+    <marker id="arr-purple" viewBox="0 0 10 10" refX="6" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse">
+      <path d="M 0 1 L 9 5 L 0 9 z" fill="#a855f7"/>
+    </marker>
+    <marker id="arr-cyan" viewBox="0 0 10 10" refX="6" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse">
+      <path d="M 0 1 L 9 5 L 0 9 z" fill="#38bdf8"/>
+    </marker>
+    <marker id="arr-green" viewBox="0 0 10 10" refX="6" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse">
+      <path d="M 0 1 L 9 5 L 0 9 z" fill="#34d399"/>
+    </marker>
+    <marker id="arr-amber" viewBox="0 0 10 10" refX="6" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse">
+      <path d="M 0 1 L 9 5 L 0 9 z" fill="#fbbf24"/>
+    </marker>
+
+    <!-- Card Shadow Filter -->
+    <filter id="cardShadow" x="-10%" y="-10%" width="120%" height="120%">
+      <feDropShadow dx="0" dy="8" stdDeviation="12" flood-color="#000000" flood-opacity="0.45"/>
+    </filter>
   </defs>
 
-  <!-- Title -->
-  <text x="500" y="30" fill="#0f172a" font-size="18" font-weight="800" letter-spacing="0.4" text-anchor="middle">CASTOR — THE BRIDGE BETWEEN CLOUD AND LOCAL FRONTIERS</text>
-  <text x="500" y="48" fill="#334155" font-size="12.5" font-weight="600" text-anchor="middle">Cloud brain plans · Local engine executes in-tree · $0 Cloud Token Cost</text>
-  <line x1="0" y1="58" x2="1000" y2="58" stroke="#cbd5e1" stroke-width="1"/>
+  <!-- Canvas Background Container -->
+  <rect width="1100" height="640" rx="16" fill="url(#bgGrad)" stroke="#1e293b" stroke-width="1.5"/>
 
-  <!-- ==================== LAYER 1: CLOUD ORCHESTRATOR ==================== -->
-  <g transform="translate(30, 72)">
-    <rect width="940" height="98" rx="12" fill="#ffffff" stroke="#7c3aed" stroke-width="1.6"/>
-    <text x="24" y="28" fill="#4c1d95" font-size="15" font-weight="800" letter-spacing="0.3">Layer 1 · Cloud Orchestrator</text>
-    <text x="24" y="46" fill="#334155" font-size="12" font-weight="600">Claude Code · Google Antigravity · Cursor</text>
+  <!-- Subtle Blueprint Grid Pattern -->
+  <g opacity="0.04" stroke="#ffffff" stroke-width="1">
+    <line x1="100" y1="0" x2="100" y2="640"/><line x1="200" y1="0" x2="200" y2="640"/>
+    <line x1="300" y1="0" x2="300" y2="640"/><line x1="400" y1="0" x2="400" y2="640"/>
+    <line x1="500" y1="0" x2="500" y2="640"/><line x1="600" y1="0" x2="600" y2="640"/>
+    <line x1="700" y1="0" x2="700" y2="640"/><line x1="800" y1="0" x2="800" y2="640"/>
+    <line x1="900" y1="0" x2="900" y2="640"/><line x1="1000" y1="0" x2="1000" y2="640"/>
+    <line x1="0" y1="80" x2="1100" y2="80"/><line x1="0" y1="160" x2="1100" y2="160"/>
+    <line x1="0" y1="240" x2="1100" y2="240"/><line x1="0" y1="320" x2="1100" y2="320"/>
+    <line x1="0" y1="400" x2="1100" y2="400"/><line x1="0" y1="480" x2="1100" y2="480"/>
+    <line x1="0" y1="560" x2="1100" y2="560"/>
+  </g>
 
-    <g transform="translate(24, 58)">
-      <g>
-        <rect width="296" height="30" rx="15" fill="#f5f3ff" stroke="#a855f7" stroke-width="1"/>
-        <text x="148" y="19" fill="#4c1d95" font-size="11.5" font-weight="700" text-anchor="middle">Architectural Planning &amp; Supervision</text>
+  <!-- ==================== HEADER ==================== -->
+  <g transform="translate(40, 24)">
+    <text x="510" y="24" fill="#f8fafc" font-size="19" font-weight="800" letter-spacing="1.2" text-anchor="middle">CASTOR SYSTEM ARCHITECTURE</text>
+    <text x="510" y="44" fill="#94a3b8" font-size="13" font-weight="500" text-anchor="middle">The Dual-Frontier Bridge: Cloud Brain Plans · Castor Orchestrates · Local Engine Executes at $0 Cost</text>
+  </g>
+
+  <!-- ==================== COLUMN 1: CLOUD FRONTIER ==================== -->
+  <g transform="translate(40, 85)" filter="url(#cardShadow)">
+    <!-- Column Card Outer -->
+    <rect width="290" height="470" rx="14" fill="#131b2e" stroke="#2e3b55" stroke-width="1.2"/>
+    
+    <!-- Header Banner -->
+    <path d="M 0 14 Q 0 0 14 0 L 276 0 Q 290 0 290 14 L 290 42 L 0 42 Z" fill="url(#cloudGrad)"/>
+    <text x="145" y="26" fill="#ffffff" font-size="13" font-weight="800" letter-spacing="0.8" text-anchor="middle">CLOUD FRONTIER</text>
+    <text x="145" y="60" fill="#a78bfa" font-size="11.5" font-weight="700" text-anchor="middle">High-Reasoning Planning &amp; Synthesis</text>
+
+    <!-- Cloud Clients Block -->
+    <g transform="translate(16, 75)">
+      <rect width="258" height="92" rx="10" fill="#1a2238" stroke="#3b4261" stroke-width="1"/>
+      <text x="14" y="22" fill="#e2e8f0" font-size="12" font-weight="700">Supported Orchestrators</text>
+      <g transform="translate(14, 34)">
+        <!-- Pill 1 -->
+        <rect width="105" height="22" rx="6" fill="#2d2254" stroke="#7c3aed" stroke-width="1"/>
+        <text x="52" y="15" fill="#ddd6fe" font-size="10.5" font-weight="700" text-anchor="middle">Claude Code</text>
+        <!-- Pill 2 -->
+        <rect x="113" width="115" height="22" rx="6" fill="#2d2254" stroke="#7c3aed" stroke-width="1"/>
+        <text x="170" y="15" fill="#ddd6fe" font-size="10.5" font-weight="700" text-anchor="middle">Google Antigravity</text>
+        <!-- Pill 3 -->
+        <rect y="28" width="75" height="22" rx="6" fill="#2d2254" stroke="#7c3aed" stroke-width="1"/>
+        <text x="37" y="43" fill="#ddd6fe" font-size="10.5" font-weight="700" text-anchor="middle">Cursor</text>
+        <!-- Pill 4 -->
+        <rect x="83" y="28" width="145" height="22" rx="6" fill="#1e1b4b" stroke="#6366f1" stroke-width="0.8"/>
+        <text x="155" y="43" fill="#c7d2fe" font-size="10" font-weight="600" text-anchor="middle">Any MCP Client</text>
       </g>
-      <g transform="translate(308, 0)">
-        <rect width="296" height="30" rx="15" fill="#f5f3ff" stroke="#a855f7" stroke-width="1"/>
-        <text x="148" y="19" fill="#4c1d95" font-size="11.5" font-weight="700" text-anchor="middle">Reviews Grounded Diffs</text>
+    </g>
+
+    <!-- Protected Cloud Context Block -->
+    <g transform="translate(16, 180)">
+      <rect width="258" height="130" rx="10" fill="#161e31" stroke="#25324e" stroke-width="1"/>
+      <text x="14" y="22" fill="#38bdf8" font-size="12" font-weight="700">Protected Cloud Context</text>
+      
+      <g transform="translate(14, 34)">
+        <circle cx="5" cy="8" r="3" fill="#10b981"/>
+        <text x="16" y="12" fill="#cbd5e1" font-size="11">Architecture &amp; decomposition</text>
+        
+        <circle cx="5" cy="30" r="3" fill="#10b981"/>
+        <text x="16" y="34" fill="#cbd5e1" font-size="11">Supervisory steering &amp; review</text>
+        
+        <circle cx="5" cy="52" r="3" fill="#10b981"/>
+        <text x="16" y="56" fill="#cbd5e1" font-size="11">Receives concise deliverables</text>
+
+        <rect y="68" width="230" height="22" rx="5" fill="#064e3b" stroke="#059669" stroke-width="0.8"/>
+        <text x="115" y="83" fill="#6ee7b7" font-size="10.5" font-weight="700" text-anchor="middle">ZERO Tool Output Tokens in Cloud</text>
       </g>
-      <g transform="translate(616, 0)">
-        <rect width="298" height="30" rx="15" fill="#ecfdf5" stroke="#10b981" stroke-width="1"/>
-        <text x="149" y="19" fill="#065f46" font-size="11.5" font-weight="700" text-anchor="middle">Zero Bulk Code in Cloud Context</text>
+    </g>
+
+    <!-- Outgoing Dispatch Box -->
+    <g transform="translate(16, 325)">
+      <rect width="258" height="128" rx="10" fill="#1a1c33" stroke="#4c1d95" stroke-width="1"/>
+      <text x="14" y="22" fill="#c084fc" font-size="12" font-weight="700">MCP Tool Dispatch</text>
+      
+      <rect x="14" y="32" width="230" height="48" rx="6" fill="#0f1123" stroke="#5b21b6" stroke-width="0.8"/>
+      <text x="24" y="50" fill="#a78bfa" font-size="10.5" font-family="monospace">castor_coworker({</text>
+      <text x="36" y="68" fill="#e2e8f0" font-size="10" font-family="monospace">prompt: "Refactor auth..."</text>
+      <text x="24" y="86" fill="#a78bfa" font-size="10.5" font-family="monospace">})</text>
+      
+      <text x="14" y="112" fill="#94a3b8" font-size="10">Dispatches single-concern slice</text>
+    </g>
+  </g>
+
+  <!-- ==================== COLUMN 2: CASTOR MICROKERNEL ==================== -->
+  <g transform="translate(365, 85)" filter="url(#cardShadow)">
+    <!-- Column Card Outer -->
+    <rect width="370" height="470" rx="14" fill="#0e1726" stroke="#1b354f" stroke-width="1.4"/>
+    
+    <!-- Header Banner -->
+    <path d="M 0 14 Q 0 0 14 0 L 356 0 Q 370 0 370 14 L 370 42 L 0 42 Z" fill="url(#castorGrad)"/>
+    <text x="185" y="26" fill="#ffffff" font-size="13" font-weight="800" letter-spacing="0.8" text-anchor="middle">CASTOR MCP MICROKERNEL</text>
+    <text x="185" y="60" fill="#38bdf8" font-size="11.5" font-weight="700" text-anchor="middle">Deterministic In-Process Rust Execution Engine</text>
+
+    <!-- Consolidated MCP Interface Box -->
+    <g transform="translate(16, 75)">
+      <rect width="338" height="58" rx="8" fill="#122338" stroke="#1e4468" stroke-width="1"/>
+      <text x="14" y="20" fill="#7dd3fc" font-size="11" font-weight="700" letter-spacing="0.5">STDIO MCP SURFACE</text>
+      
+      <g transform="translate(12, 28)">
+        <rect width="100" height="22" rx="5" fill="#082f49" stroke="#0284c7" stroke-width="0.8"/>
+        <text x="50" y="15" fill="#bae6fd" font-size="10" font-weight="700" text-anchor="middle">castor_coworker</text>
+        
+        <rect x="106" width="96" height="22" rx="5" fill="#082f49" stroke="#0284c7" stroke-width="0.8"/>
+        <text x="154" y="15" fill="#bae6fd" font-size="10" font-weight="700" text-anchor="middle">castor_task</text>
+        
+        <rect x="208" width="98" height="22" rx="5" fill="#082f49" stroke="#0284c7" stroke-width="0.8"/>
+        <text x="257" y="15" fill="#bae6fd" font-size="10" font-weight="700" text-anchor="middle">castor_server</text>
+      </g>
+    </g>
+
+    <!-- Microkernel Core Subsystems Grid -->
+    <g transform="translate(16, 142)">
+      <!-- Subsystem 1: DGI Firewall -->
+      <g transform="translate(0, 0)">
+        <rect width="164" height="74" rx="8" fill="#132337" stroke="#0369a1" stroke-width="1"/>
+        <text x="12" y="18" fill="#38bdf8" font-size="11" font-weight="700">DGI Logit Firewall</text>
+        <text x="12" y="34" fill="#94a3b8" font-size="9.5">1-forward pass probe</text>
+        <text x="12" y="47" fill="#94a3b8" font-size="9.5">logP(OVER) − logP(ADMIT)</text>
+        <rect x="12" y="53" width="138" height="15" rx="3" fill="#0c4a6e"/>
+        <text x="81" y="64" fill="#7dd3fc" font-size="9" font-weight="700" text-anchor="middle">&lt;25ms pre-execution check</text>
+      </g>
+
+      <!-- Subsystem 2: Token-Budget Semaphore -->
+      <g transform="translate(174, 0)">
+        <rect width="164" height="74" rx="8" fill="#132337" stroke="#0369a1" stroke-width="1"/>
+        <text x="12" y="18" fill="#38bdf8" font-size="11" font-weight="700">Token Semaphore</text>
+        <text x="12" y="34" fill="#94a3b8" font-size="9.5">Two-phase O_EXCL lease</text>
+        <text x="12" y="47" fill="#94a3b8" font-size="9.5">pool_yield_gate cooperative</text>
+        <rect x="12" y="53" width="138" height="15" rx="3" fill="#0c4a6e"/>
+        <text x="81" y="64" fill="#7dd3fc" font-size="9" font-weight="700" text-anchor="middle">Prevents GPU KV thrashing</text>
+      </g>
+
+      <!-- Subsystem 3: Zero-Turn Wait :18021 -->
+      <g transform="translate(0, 82)">
+        <rect width="164" height="74" rx="8" fill="#132836" stroke="#0d9488" stroke-width="1"/>
+        <text x="12" y="18" fill="#2dd4bf" font-size="11" font-weight="700">Zero-Turn Wait :18021</text>
+        <text x="12" y="34" fill="#94a3b8" font-size="9.5">Long-poll HTTP wait</text>
+        <text x="12" y="47" fill="#94a3b8" font-size="9.5">curl /task/&lt;id&gt;/wait</text>
+        <rect x="12" y="53" width="138" height="15" rx="3" fill="#134e4a"/>
+        <text x="81" y="64" fill="#5eead4" font-size="9" font-weight="700" text-anchor="middle">Cloud sleeps at $0 tokens</text>
+      </g>
+
+      <!-- Subsystem 4: Stream Proxy :18022 -->
+      <g transform="translate(174, 82)">
+        <rect width="164" height="74" rx="8" fill="#132836" stroke="#0d9488" stroke-width="1"/>
+        <text x="12" y="18" fill="#2dd4bf" font-size="11" font-weight="700">Stream Proxy :18022</text>
+        <text x="12" y="34" fill="#94a3b8" font-size="9.5">SSE UTF-8 reassembly</text>
+        <text x="12" y="47" fill="#94a3b8" font-size="9.5">Repetition circuit breaker</text>
+        <rect x="12" y="53" width="138" height="15" rx="3" fill="#134e4a"/>
+        <text x="81" y="64" fill="#5eead4" font-size="9" font-weight="700" text-anchor="middle">Halts degenerate token loops</text>
+      </g>
+
+      <!-- Subsystem 5: Skills Engine & Evolutionary Optimizer -->
+      <g transform="translate(0, 164)">
+        <rect width="338" height="66" rx="8" fill="#142633" stroke="#059669" stroke-width="1"/>
+        <text x="12" y="18" fill="#34d399" font-size="11" font-weight="700">Lazy Skills Engine &amp; Evolutionary Optimizer (Evo)</text>
+        <text x="12" y="34" fill="#cbd5e1" font-size="10">agentskills.io catalog loaded on-demand · Preserves warm Turn-1 KV prefix</text>
+        <text x="12" y="49" fill="#94a3b8" font-size="9.5">Evo: Cycle-proof lineage DAG · Fitness-gated mutations · Stagnation watchdog</text>
+      </g>
+    </g>
+
+    <!-- Execution Base Indicator -->
+    <g transform="translate(16, 385)">
+      <rect width="338" height="68" rx="8" fill="#0f1e2f" stroke="#1d4ed8" stroke-width="1"/>
+      <text x="14" y="20" fill="#60a5fa" font-size="11" font-weight="700">In-Process Rust Dispatch (&lt;0.1 ms)</text>
+      <text x="14" y="38" fill="#cbd5e1" font-size="10">Multi-turn tool execution loop runs locally inside Rust runtime</text>
+      <text x="14" y="54" fill="#93c5fd" font-size="9.5">Zero subprocess spawn latency · In-memory state tracking</text>
+    </g>
+  </g>
+
+  <!-- ==================== COLUMN 3: LOCAL FRONTIER ==================== -->
+  <g transform="translate(770, 85)" filter="url(#cardShadow)">
+    <!-- Column Card Outer -->
+    <rect width="290" height="470" rx="14" fill="#1b171f" stroke="#483329" stroke-width="1.2"/>
+    
+    <!-- Header Banner -->
+    <path d="M 0 14 Q 0 0 14 0 L 276 0 Q 290 0 290 14 L 290 42 L 0 42 Z" fill="url(#localGrad)"/>
+    <text x="145" y="26" fill="#ffffff" font-size="13" font-weight="800" letter-spacing="0.8" text-anchor="middle">LOCAL FRONTIER</text>
+    <text x="145" y="60" fill="#fdba74" font-size="11.5" font-weight="700" text-anchor="middle">Sandboxed In-Tree Execution ($0 Tokens)</text>
+
+    <!-- Serving Engine Box -->
+    <g transform="translate(16, 75)">
+      <rect width="258" height="92" rx="10" fill="#261b1b" stroke="#7c2d12" stroke-width="1"/>
+      <text x="14" y="20" fill="#fb923c" font-size="12" font-weight="700">Serving Engine (:18020)</text>
+      <text x="14" y="36" fill="#cbd5e1" font-size="10">vLLM · llama.cpp · LM Studio · SGLang</text>
+      <g transform="translate(14, 46)">
+        <rect width="110" height="20" rx="4" fill="#431407" stroke="#ea580c" stroke-width="0.8"/>
+        <text x="55" y="14" fill="#fdba74" font-size="9.5" font-weight="700" text-anchor="middle">Auto /v1/models</text>
+        <rect x="116" width="112" height="20" rx="4" fill="#431407" stroke="#ea580c" stroke-width="0.8"/>
+        <text x="172" y="14" fill="#fdba74" font-size="9.5" font-weight="700" text-anchor="middle">Dynamic Context</text>
+      </g>
+      <text x="14" y="82" fill="#94a3b8" font-size="9.5">Adaptive discovery of profile, context &amp; model</text>
+    </g>
+
+    <!-- Autonomous Tool Loop Box -->
+    <g transform="translate(16, 175)">
+      <rect width="258" height="152" rx="10" fill="#241a16" stroke="#9a3412" stroke-width="1.2"/>
+      <text x="14" y="20" fill="#f97316" font-size="12" font-weight="700">Lean 8-Tool Core</text>
+      
+      <!-- Core Tools Chips -->
+      <g transform="translate(12, 30)">
+        <rect width="52" height="18" rx="4" fill="#38190d" stroke="#c2410c" stroke-width="0.6"/>
+        <text x="26" y="13" fill="#fed7aa" font-size="9" font-weight="600" text-anchor="middle">read_file</text>
+        <rect x="56" width="54" height="18" rx="4" fill="#38190d" stroke="#c2410c" stroke-width="0.6"/>
+        <text x="83" y="13" fill="#fed7aa" font-size="9" font-weight="600" text-anchor="middle">write_file</text>
+        <rect x="114" width="54" height="18" rx="4" fill="#38190d" stroke="#c2410c" stroke-width="0.6"/>
+        <text x="141" y="13" fill="#fed7aa" font-size="9" font-weight="600" text-anchor="middle">edit_file</text>
+        <rect x="172" width="58" height="18" rx="4" fill="#38190d" stroke="#c2410c" stroke-width="0.6"/>
+        <text x="201" y="13" fill="#fed7aa" font-size="9" font-weight="600" text-anchor="middle">search_code</text>
+        
+        <rect y="23" width="52" height="18" rx="4" fill="#38190d" stroke="#c2410c" stroke-width="0.6"/>
+        <text x="26" y="36" fill="#fed7aa" font-size="9" font-weight="600" text-anchor="middle">list_dir</text>
+        <rect x="56" y="23" width="46" height="18" rx="4" fill="#431407" stroke="#ea580c" stroke-width="0.8"/>
+        <text x="79" y="36" fill="#ffedd5" font-size="9" font-weight="700" text-anchor="middle">bash</text>
+        <rect x="106" y="23" width="62" height="18" rx="4" fill="#38190d" stroke="#c2410c" stroke-width="0.6"/>
+        <text x="137" y="36" fill="#fed7aa" font-size="9" font-weight="600" text-anchor="middle">web_search</text>
+        <rect x="172" y="23" width="58" height="18" rx="4" fill="#38190d" stroke="#c2410c" stroke-width="0.6"/>
+        <text x="201" y="36" fill="#fed7aa" font-size="9" font-weight="600" text-anchor="middle">web_fetch</text>
+      </g>
+      
+      <!-- Native bash explanation -->
+      <g transform="translate(12, 78)">
+        <rect width="232" height="22" rx="4" fill="#2e140d" stroke="#b45309" stroke-width="0.8"/>
+        <text x="116" y="15" fill="#fde68a" font-size="9.5" font-weight="700" text-anchor="middle">Git ops &amp; Python run natively via bash</text>
+      </g>
+
+      <!-- Optional feature gates -->
+      <g transform="translate(12, 106)">
+        <text x="2" y="12" fill="#fed7aa" font-size="9.5" font-weight="600">Feature Gates:</text>
+        <rect x="74" width="70" height="18" rx="4" fill="#1c1917" stroke="#78716c" stroke-width="0.6"/>
+        <text x="109" y="12" fill="#d6d3d1" font-size="9" text-anchor="middle">ast (ast-grep)</text>
+        <rect x="148" width="84" height="18" rx="4" fill="#1c1917" stroke="#78716c" stroke-width="0.6"/>
+        <text x="190" y="12" fill="#d6d3d1" font-size="9" text-anchor="middle">paper (OpenAlex)</text>
+        <text x="2" y="32" fill="#fb923c" font-size="9" font-weight="700">★ $0 Cloud Token Cost for all tool iterations</text>
+      </g>
+    </g>
+
+    <!-- Workspace Containment Safety Base -->
+    <g transform="translate(16, 335)">
+      <rect width="258" height="118" rx="10" fill="#1c181f" stroke="#701a75" stroke-width="1"/>
+      <text x="14" y="20" fill="#e879f9" font-size="11.5" font-weight="700">Workspace Containment</text>
+      <g transform="translate(14, 30)">
+        <text x="0" y="12" fill="#e2e8f0" font-size="9.5">1. Path Traversal &amp; Device Guard</text>
+        <text x="0" y="27" fill="#e2e8f0" font-size="9.5">2. Canonical Realpath Workspace Anchor</text>
+        <text x="0" y="42" fill="#e2e8f0" font-size="9.5">3. Dangerous Command AST Validator</text>
+        <rect y="50" width="230" height="22" rx="4" fill="#4a044e" stroke="#c026d3" stroke-width="0.8"/>
+        <text x="115" y="65" fill="#f5d0fe" font-size="9.5" font-weight="700" text-anchor="middle">4. In-Memory AST Syntax Rollback</text>
       </g>
     </g>
   </g>
 
-  <!-- Connector 1 → 2 -->
-  <line x1="500" y1="170" x2="500" y2="194" stroke="#475569" stroke-width="2" marker-end="url(#arrow)"/>
-  <rect x="310" y="171" width="380" height="18" rx="4" fill="#f1f5f9" stroke="#cbd5e1" stroke-width="0.8"/>
-  <text x="500" y="184" fill="#334155" font-size="10.5" font-weight="700" text-anchor="middle">Consolidated stdio MCP Tool Surface</text>
+  <!-- ==================== INTER-COLUMN CONNECTORS & DATA FLOWS ==================== -->
 
-  <!-- ==================== LAYER 2: MCP TOOL SURFACE ==================== -->
-  <g transform="translate(30, 196)">
-    <rect width="940" height="78" rx="12" fill="#ffffff" stroke="#0284c7" stroke-width="1.6"/>
-    <text x="24" y="22" fill="#075985" font-size="11" font-weight="800" letter-spacing="0.8">MCP TOOL SURFACE · stdio</text>
+  <!-- Flow 1: Cloud -> Castor Dispatch (Task Slice) -->
+  <path d="M 330 420 L 365 420" stroke="#a855f7" stroke-width="2.5" marker-end="url(#arr-purple)"/>
+  <rect x="333" y="405" width="26" height="14" rx="3" fill="#1e1b4b" stroke="#7c3aed" stroke-width="0.6"/>
+  <text x="346" y="415" fill="#ddd6fe" font-size="8" font-weight="700" text-anchor="middle">TASK</text>
 
-    <g transform="translate(24, 32)">
-      <g>
-        <rect width="296" height="36" rx="8" fill="#f0f9ff" stroke="#0ea5e9" stroke-width="1"/>
-        <text x="12" y="15" fill="#0f172a" font-size="12" font-weight="700">castor_coworker</text>
-        <text x="12" y="29" fill="#334155" font-size="10.5">Hands-on execution &amp; peer programming</text>
-      </g>
-      <g transform="translate(308, 0)">
-        <rect width="296" height="36" rx="8" fill="#f0f9ff" stroke="#0ea5e9" stroke-width="1"/>
-        <text x="12" y="15" fill="#0f172a" font-size="12" font-weight="700">castor_task</text>
-        <text x="12" y="29" fill="#334155" font-size="10.5">Background tasks, telemetry, OS-level wait</text>
-      </g>
-      <g transform="translate(616, 0)">
-        <rect width="298" height="36" rx="8" fill="#f0f9ff" stroke="#0ea5e9" stroke-width="1"/>
-        <text x="12" y="15" fill="#0f172a" font-size="12" font-weight="700">castor_server</text>
-        <text x="12" y="29" fill="#334155" font-size="10.5">Engine lifecycle &amp; health supervision</text>
-      </g>
-    </g>
-  </g>
+  <!-- Flow 2: Castor -> Cloud Return (Grounded Diffs) -->
+  <path d="M 365 200 L 330 200" stroke="#34d399" stroke-width="2.5" marker-end="url(#arr-green)"/>
+  <rect x="333" y="185" width="26" height="14" rx="3" fill="#064e3b" stroke="#059669" stroke-width="0.6"/>
+  <text x="346" y="195" fill="#a7f3d0" font-size="8" font-weight="700" text-anchor="middle">DIFF</text>
 
-  <!-- Connector 2 → 3 -->
-  <line x1="500" y1="274" x2="500" y2="298" stroke="#475569" stroke-width="2" marker-end="url(#arrow)"/>
-  <rect x="392" y="275" width="216" height="18" rx="4" fill="#f1f5f9" stroke="#cbd5e1" stroke-width="0.8"/>
-  <text x="500" y="288" fill="#334155" font-size="10.5" font-weight="600" text-anchor="middle">In-Process Rust Dispatch</text>
+  <!-- Flow 3: Castor <-> Local Serving Engine (Inference Wire) -->
+  <path d="M 735 180 L 770 180" stroke="#38bdf8" stroke-width="2" marker-end="url(#arr-cyan)"/>
+  <path d="M 770 195 L 735 195" stroke="#fbbf24" stroke-width="2" marker-end="url(#arr-amber)"/>
+  <rect x="737" y="166" width="30" height="13" rx="3" fill="#0c4a6e"/>
+  <text x="752" y="176" fill="#bae6fd" font-size="7.5" font-weight="700" text-anchor="middle">HTTP</text>
+  <rect x="737" y="200" width="30" height="13" rx="3" fill="#451a03"/>
+  <text x="752" y="210" fill="#fde68a" font-size="7.5" font-weight="700" text-anchor="middle">TOKENS</text>
 
-  <!-- ==================== LAYER 3: CASTOR MICROKERNEL RUNTIME ==================== -->
-  <g transform="translate(30, 300)">
-    <rect width="940" height="96" rx="12" fill="#ffffff" stroke="#059669" stroke-width="1.6"/>
-    <text x="24" y="28" fill="#065f46" font-size="15" font-weight="800" letter-spacing="0.3">Layer 3 · Castor Microkernel Runtime</text>
-    <text x="24" y="46" fill="#334155" font-size="12">Deterministic orchestration between the cloud plan and the local engine</text>
+  <!-- Flow 4: Castor <-> Local Workspace (Tool Execution) -->
+  <path d="M 735 300 L 770 300" stroke="#f97316" stroke-width="2.2" marker-end="url(#arr-amber)"/>
+  <path d="M 770 320 L 735 320" stroke="#38bdf8" stroke-width="2.2" marker-end="url(#arr-cyan)"/>
+  <rect x="737" y="303" width="32" height="14" rx="3" fill="#291206"/>
+  <text x="753" y="313" fill="#fdba74" font-size="8" font-weight="700" text-anchor="middle">TOOLS</text>
 
-    <g transform="translate(24, 54)">
-      <g>
-        <rect width="220" height="32" rx="7" fill="#ecfdf5" stroke="#10b981" stroke-width="1"/>
-        <text x="110" y="20" fill="#065f46" font-size="11" font-weight="700" text-anchor="middle">DGI Pre-Flight Probe</text>
-      </g>
-      <g transform="translate(230, 0)">
-        <rect width="220" height="32" rx="7" fill="#ecfdf5" stroke="#10b981" stroke-width="1"/>
-        <text x="110" y="20" fill="#065f46" font-size="11" font-weight="700" text-anchor="middle">Token-Budget Semaphore</text>
-      </g>
-      <g transform="translate(460, 0)">
-        <rect width="220" height="32" rx="7" fill="#ecfdf5" stroke="#10b981" stroke-width="1"/>
-        <text x="110" y="14" fill="#065f46" font-size="10.5" font-weight="700" text-anchor="middle">Zero-Turn Reactive Wait · :18021</text>
-        <text x="110" y="26" fill="#334155" font-size="10" font-weight="600" text-anchor="middle">Stream Proxy · :18022</text>
-      </g>
-      <g transform="translate(690, 0)">
-        <rect width="220" height="32" rx="7" fill="#ecfdf5" stroke="#10b981" stroke-width="1"/>
-        <text x="110" y="20" fill="#065f46" font-size="11" font-weight="700" text-anchor="middle">Lean 8-Tool Core + AST/Paper Gates</text>
-      </g>
-    </g>
-  </g>
-
-  <!-- Connector 3 → 4 -->
-  <line x1="500" y1="396" x2="500" y2="420" stroke="#475569" stroke-width="2" marker-end="url(#arrow)"/>
-  <rect x="376" y="397" width="248" height="18" rx="4" fill="#f1f5f9" stroke="#cbd5e1" stroke-width="0.8"/>
-  <text x="500" y="410" fill="#334155" font-size="10.5" font-weight="600" text-anchor="middle">Inference · OpenAI wire · local-only</text>
-
-  <!-- ==================== LAYER 4: LOCAL SERVING ENGINE ==================== -->
-  <g transform="translate(30, 422)">
-    <rect width="940" height="96" rx="12" fill="#ffffff" stroke="#d97706" stroke-width="1.6"/>
-    <text x="24" y="28" fill="#9a3412" font-size="15" font-weight="800" letter-spacing="0.3">Layer 4 · Local Serving Engine</text>
-    <text x="24" y="46" fill="#334155" font-size="12" font-weight="600">vLLM · llama.cpp · LM Studio · SGLang · Any OpenAI-Compatible</text>
-
-    <g transform="translate(24, 54)">
-      <g>
-        <rect width="296" height="30" rx="7" fill="#fff7ed" stroke="#f59e0b" stroke-width="1"/>
-        <text x="148" y="19" fill="#9a3412" font-size="11" font-weight="700" text-anchor="middle">Zero-Config Discovery · /v1/models</text>
-      </g>
-      <g transform="translate(308, 0)">
-        <rect width="296" height="30" rx="7" fill="#fff7ed" stroke="#f59e0b" stroke-width="1"/>
-        <text x="148" y="19" fill="#9a3412" font-size="11" font-weight="700" text-anchor="middle">Adaptive Context &amp; KV Pool Budgeting</text>
-      </g>
-      <g transform="translate(616, 0)">
-        <rect width="298" height="30" rx="7" fill="#fff7ed" stroke="#f59e0b" stroke-width="1"/>
-        <text x="149" y="19" fill="#9a3412" font-size="11" font-weight="700" text-anchor="middle">In-Tree Execution at $0 Cloud Tokens</text>
-      </g>
-    </g>
-  </g>
-
-  <!-- Bottom punchline banner -->
-  <g transform="translate(30, 530)">
-    <rect width="940" height="24" rx="6" fill="url(#punch)"/>
-    <text x="470" y="16" fill="#0f172a" font-size="11.5" font-weight="800" text-anchor="middle" letter-spacing="0.5">
-      ★ The cloud brain plans · the local engine executes · zero cloud tokens spent on the grind ★
+  <!-- ==================== FOOTER VALUE PROPOSITION BANNER ==================== -->
+  <g transform="translate(40, 575)">
+    <rect width="1020" height="42" rx="10" fill="#131b2e" stroke="#253552" stroke-width="1.2"/>
+    <path d="M 0 10 Q 0 0 10 0 L 1010 0 Q 1020 0 1020 10 L 1020 12 L 0 12 Z" fill="url(#footerGrad)"/>
+    <text x="510" y="29" fill="#f8fafc" font-size="12.5" font-weight="700" text-anchor="middle" letter-spacing="0.4">
+      ⚡ <tspan fill="#c084fc">Cloud Frontier plans</tspan> · <tspan fill="#38bdf8">Castor orchestrates</tspan> · <tspan fill="#fb923c">Local Frontier executes</tspan> · <tspan fill="#34d399">Zero tool output tokens billed to cloud</tspan> ⚡
     </text>
   </g>
 </svg>
