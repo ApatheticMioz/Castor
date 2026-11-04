@@ -18,6 +18,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 use crate::state::StateDir;
+use crate::task::semaphore::pid_alive;
 
 /// Embedded single-file workbench frontend (compiled directly into the binary).
 pub const TRACE_HTML: &str = include_str!("trace.html");
@@ -99,6 +100,12 @@ pub struct TaskTraceResponse {
     pub turns: Vec<TurnGroup>,
 }
 
+#[derive(Debug, Serialize)]
+pub struct ContextConfigResponse {
+    #[serde(rename = "maxContext")]
+    pub max_context: Option<u32>,
+}
+
 // ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
@@ -114,6 +121,26 @@ fn default_headers() -> HeaderMap {
         HeaderValue::from_static("no-cache, no-store, must-revalidate"),
     );
     headers
+}
+
+/// Display-layer orphan reconciliation for the read-only visualizer.
+///
+/// Returns true when a task record is a *ghost*: it is marked `executing`
+/// but its worker pid is dead (crashed session, killed worker). The UI must
+/// never show such a record as "LIVE", so both `read_recent_tasks` and
+/// `poll_handler` downgrade its displayed status to `orphaned`. This is
+/// purely a display projection of the on-disk record; the durable fix (rewriting
+/// the record to a terminal `failed` state) is the boot-time reaper in
+/// [`crate::task::registry`], which converges the display within one poll.
+///
+/// `executing` *without* a pid is the in-flight race between the registry
+/// write and the worker spawn, so it is treated as alive to avoid flapping a
+/// healthy task to `orphaned` for a poll cycle.
+fn is_orphaned(status: &str, pid: Option<u32>) -> bool {
+    if status != "executing" {
+        return false;
+    }
+    matches!(pid, Some(p) if !pid_alive(p))
 }
 
 /// Scan `<state>/tasks` for task JSON records, sorted newest first by mtime.
@@ -179,11 +206,23 @@ pub fn read_recent_tasks(state: &StateDir, limit: usize) -> (Vec<TaskSummary>, u
             .map(String::from)
             .unwrap_or(file_stem);
 
-        let status = val
-            .get("status")
-            .and_then(|v| v.as_str())
-            .unwrap_or("unknown")
-            .to_string();
+        let pid = val.get("pid").and_then(|v| v.as_u64()).map(|p| p as u32);
+
+        // Honest display: an `executing` task whose worker pid is dead is an
+        // orphan (reboot / crash). Show it as `orphaned` rather than a ghost
+        // "LIVE"; the boot-time reaper converges it to a terminal `failed`.
+        let status = {
+            let raw = val
+                .get("status")
+                .and_then(|v| v.as_str())
+                .unwrap_or("unknown")
+                .to_string();
+            if is_orphaned(&raw, pid) {
+                "orphaned".to_string()
+            } else {
+                raw
+            }
+        };
 
         let session_id = val
             .get("session_id")
@@ -209,7 +248,6 @@ pub fn read_recent_tasks(state: &StateDir, limit: usize) -> (Vec<TaskSummary>, u
             .get("turns_budget")
             .and_then(|v| v.as_u64())
             .unwrap_or(0) as u32;
-        let pid = val.get("pid").and_then(|v| v.as_u64()).map(|p| p as u32);
 
         summaries.push(TaskSummary {
             id,
@@ -397,6 +435,39 @@ pub fn parse_task_trace(state: &StateDir, task_id: &str) -> Option<TaskTraceResp
     })
 }
 
+/// Read the engine's max context window from `<state>/config.json` for the
+/// Context Window Saturation gauge. Prefers the active profile's
+/// `max_context`, falling back to the top-level key. Returns `None` when the
+/// config is absent, unparseable, or does not set the key (the UI then
+/// disables the gauge rather than showing a fake value).
+pub fn read_context_config(state: &StateDir) -> Option<u32> {
+    let path = state.root().join("config.json");
+    let Ok(raw) = fs::read_to_string(&path) else {
+        return None;
+    };
+    let Ok(val) = serde_json::from_str::<Value>(&raw) else {
+        return None;
+    };
+    let as_u32 = |v: &Value| v.as_u64().and_then(|n| u32::try_from(n).ok());
+
+    let profile_name = val.get("profile").and_then(|p| p.as_str());
+    let profiles = val.get("profiles");
+    if let (Some(name), Some(map)) = (profile_name, profiles)
+        && let Some(entry) = map.get(name)
+        && let Some(mc) = as_u32(entry.get("max_context").unwrap_or(&Value::Null))
+    {
+        return Some(mc);
+    }
+    as_u32(val.get("max_context").unwrap_or(&Value::Null))
+}
+
+async fn context_handler(State(state): State<StateDir>) -> impl IntoResponse {
+    let resp = ContextConfigResponse {
+        max_context: read_context_config(&state),
+    };
+    (default_headers(), Json(resp))
+}
+
 // ---------------------------------------------------------------------------
 // Handlers
 // ---------------------------------------------------------------------------
@@ -428,17 +499,25 @@ async fn poll_handler(
                         .as_millis() as u64;
                     let raw = fs::read_to_string(&p).ok()?;
                     let val: Value = serde_json::from_str(&raw).ok()?;
+                    let pid = val.get("pid").and_then(|v| v.as_u64()).map(|p| p as u32);
+                    let raw_status = val
+                        .get("status")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("unknown")
+                        .to_string();
                     Some(TaskSummary {
                         id: val
                             .get("id")
                             .and_then(|v| v.as_str())
                             .unwrap_or(req_id)
                             .to_string(),
-                        status: val
-                            .get("status")
-                            .and_then(|v| v.as_str())
-                            .unwrap_or("unknown")
-                            .to_string(),
+                        // Same orphan reconciliation as `read_recent_tasks`: a
+                        // dead worker pid must never display as a ghost LIVE.
+                        status: if is_orphaned(&raw_status, pid) {
+                            "orphaned".to_string()
+                        } else {
+                            raw_status
+                        },
                         session_id: val
                             .get("session_id")
                             .or_else(|| val.get("sessionId"))
@@ -458,7 +537,7 @@ async fn poll_handler(
                         ended_at: val.get("ended_at").and_then(|v| v.as_u64()),
                         mtime,
                         turns_budget: 0,
-                        pid: None,
+                        pid,
                     })
                 })
             })
@@ -551,6 +630,7 @@ pub fn trace_router(state: StateDir) -> Router {
         .route("/api/poll", get(poll_handler))
         .route("/api/tasks", get(tasks_handler))
         .route("/api/latest", get(latest_task_handler))
+        .route("/api/context", get(context_handler))
         .route("/api/task/{id}", get(task_trace_handler))
         .route("/api/task/{id}/turns", get(task_trace_handler))
         .with_state(state)
@@ -577,5 +657,139 @@ mod tests {
             TRACE_HTML.contains(&expected_version),
             "trace.html must contain current package version {expected_version}"
         );
+    }
+
+    /// Acceptance gate for the frontend upgrades: the embedded workbench must
+    /// ship the Follow Live toggle (with its localStorage persistence key) and
+    /// the three-tier TPS labeling scheme (aggregate top bar / pure-decode turn
+    /// strip / effective raw-log rate).
+    #[test]
+    fn test_trace_frontend_contract() {
+        // Follow Live toggle + persistence key (default on unless 'false').
+        assert!(
+            TRACE_HTML.contains("btnFollowLive"),
+            "header must include the sticky Follow Live toggle"
+        );
+        assert!(
+            TRACE_HTML.contains("castor_trace_follow_live"),
+            "follow-live state must persist via localStorage"
+        );
+        // Dispatch aggregates vs. turn metrics labeling tiers.
+        assert!(
+            TRACE_HTML.contains("AGG DECODE"),
+            "top bar must label the aggregate decode rate"
+        );
+        assert!(
+            TRACE_HTML.contains("PURE DECODE"),
+            "turn strip must label the per-turn pure decode rate"
+        );
+        assert!(
+            TRACE_HTML.contains("TURN EFFECTIVE TPS"),
+            "raw log / telemetry must label the engine-reported effective rate"
+        );
+        // High-density visualizations: context gauge, token waterfall, sparklines.
+        assert!(TRACE_HTML.contains("ctxGauge"), "context saturation gauge missing");
+        assert!(TRACE_HTML.contains("tokenWaterfall"), "token distribution waterfall missing");
+        assert!(TRACE_HTML.contains("sparkLatency"), "latency sparkline missing");
+        assert!(TRACE_HTML.contains("sparkTps"), "decode throughput sparkline missing");
+    }
+
+    /// Write a minimal task record file into a state dir for tests.
+    fn write_task(state: &StateDir, id: &str, status: &str, pid: Option<u32>) {
+        let val = serde_json::json!({
+            "id": id,
+            "status": status,
+            "prompt": format!("task {id}"),
+            "cwd": "/tmp",
+            "session_id": format!("sess_{id}"),
+            "created_at": 0,
+            "turns_budget": 10,
+            "pid": pid,
+        });
+        let path = state.tasks().join(format!("{id}.json"));
+        std::fs::create_dir_all(state.tasks()).unwrap();
+        std::fs::write(&path, val.to_string()).unwrap();
+    }
+
+    fn dead_pid() -> u32 {
+        // Spawn and reap an immediately-exiting child, then poll for a pid the
+        // kernel is not going to reuse within the test's lifetime.
+        let mut child = std::process::Command::new("true")
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .spawn()
+            .expect("spawn `true`");
+        child.wait().ok();
+        child.id()
+    }
+
+    /// An `executing` task whose worker pid is dead must be downgraded to
+    /// `orphaned` (never a ghost "LIVE"); terminal tasks and pid-less tasks are
+    /// left alone.
+    #[test]
+    fn test_read_recent_tasks_downgrades_orphaned() {
+        let root = std::env::temp_dir().join(format!("castor_trace_orphan_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        let state = StateDir::new(&root);
+
+        let pid = dead_pid();
+        assert!(!pid_alive(pid), "test precondition: reaped pid must be dead");
+
+        write_task(&state, "orphan", "executing", Some(pid));
+        write_task(&state, "done", "completed", None);
+
+        let (tasks, total) = read_recent_tasks(&state, 10);
+        assert_eq!(total, 2);
+
+        let orphan = tasks.iter().find(|t| t.id == "orphan").expect("orphan present");
+        assert_eq!(
+            orphan.status, "orphaned",
+            "dead-pid executing task must display as orphaned, not LIVE"
+        );
+
+        let done = tasks.iter().find(|t| t.id == "done").expect("done present");
+        assert_eq!(done.status, "completed", "terminal tasks must be untouched");
+
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// An `executing` task with a *live* pid (this process) must NOT be flagged
+    /// as orphaned — the liveness probe is conservative about false positives.
+    #[test]
+    fn test_is_orphaned_respects_live_pid() {
+        let self_pid = std::process::id();
+        assert!(pid_alive(self_pid), "our own pid must be alive");
+        assert!(!is_orphaned("executing", Some(self_pid)));
+        // No pid yet (spawn race): never a false positive.
+        assert!(!is_orphaned("executing", None));
+        // Terminal statuses are never orphans.
+        assert!(!is_orphaned("completed", Some(999_999)));
+    }
+
+    /// `/api/context` returns the profile's `max_context` when present and
+    /// `None` when the config is absent (gauge disables gracefully).
+    #[test]
+    fn test_read_context_config() {
+        let root = std::env::temp_dir().join(format!("castor_trace_ctx_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        let state = StateDir::new(&root);
+        std::fs::create_dir_all(state.root()).unwrap();
+
+        // Absent config → None.
+        assert_eq!(read_context_config(&state), None);
+
+        // Top-level max_context.
+        std::fs::write(state.root().join("config.json"), r#"{"max_context": 32768}"#).unwrap();
+        assert_eq!(read_context_config(&state), Some(32768));
+
+        // Active profile overrides top-level.
+        std::fs::write(
+            state.root().join("config.json"),
+            r#"{"profile":"turbo","max_context":1111,"profiles":{"turbo":{"max_context":245760}}}"#,
+        )
+        .unwrap();
+        assert_eq!(read_context_config(&state), Some(245760));
+
+        let _ = std::fs::remove_dir_all(&root);
     }
 }

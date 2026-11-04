@@ -94,10 +94,18 @@
       </div>
       <div class="flex items-center gap-1.5">
         <span class="text-zinc-500">TURNS</span>
-        <span class="text-white font-semibold" id="headerTurnsCount">0</span>
+        <span class="text-white font-semibold" id="headerTurnsCount">0 turns</span>
       </div>
-      <div class="flex items-center gap-1.5">
-        <span class="text-zinc-500">DECODE</span>
+      <div class="flex items-center gap-1.5" title="Aggregate duration across all turns">
+        <span class="text-zinc-500">DURATION</span>
+        <span class="text-white font-semibold" id="headerDuration">--</span>
+      </div>
+      <div class="flex items-center gap-1.5" title="Total tokens (prompt + completion + reasoning)">
+        <span class="text-zinc-500">TOKENS</span>
+        <span class="text-white font-semibold" id="headerTokens">0</span>
+      </div>
+      <div class="flex items-center gap-1.5" title="Aggregate decode throughput: Σ completion tokens / Σ decode time (all turns)">
+        <span class="text-zinc-500">AGG DECODE</span>
         <span class="text-emerald-400 font-semibold" id="headerDecodeSpeed">-- tok/s</span>
       </div>
       <div class="flex items-center gap-1.5">
@@ -122,6 +130,20 @@
       </button>
 
       <div class="h-4 w-px bg-border mx-1"></div>
+
+      <!-- Context Window Saturation Bullet Gauge (populated from /api/context) -->
+      <div class="flex items-center gap-2" title="Context Window Saturation: max prompt tokens observed in the active task vs. the engine's max context window">
+        <span class="text-zinc-500">CTX</span>
+        <svg id="ctxGauge" width="96" height="14" viewBox="0 0 96 14" class="shrink-0"></svg>
+        <span class="text-[11px] font-mono text-zinc-400" id="ctxGaugeLabel">-- / --</span>
+      </div>
+
+      <div class="h-4 w-px bg-border mx-1"></div>
+
+      <button id="btnFollowLive" class="flex items-center gap-1.5 px-2.5 py-1 rounded text-xs font-mono font-medium bg-zinc-900 text-zinc-300 border border-zinc-800 hover:border-zinc-700 transition" title="Follow the latest live task automatically">
+        <span class="w-2 h-2 rounded-full bg-emerald-500" id="followDot"></span>
+        <span id="followText">Follow Live</span>
+      </button>
 
       <button id="btnLiveSync" class="flex items-center gap-1.5 px-2.5 py-1 rounded text-xs font-mono font-medium bg-zinc-900 text-zinc-300 border border-zinc-800 hover:border-zinc-700 transition" title="Toggle Auto-Sync">
         <span class="w-2 h-2 rounded-full bg-emerald-500" id="syncDot"></span>
@@ -235,7 +257,31 @@
 
         <!-- TAB 1: UNIFIED EXECUTION (Rationale -> Action -> Output) -->
         <div id="panel-execution" class="tab-panel flex flex-col gap-4">
-          
+
+          <!-- High-density turn metrics strip -->
+          <div id="turnMetricsStrip" class="grid grid-cols-5 gap-px rounded bg-border overflow-hidden border border-border text-center">
+            <div class="bg-panel px-1 py-1.5 flex flex-col gap-0.5">
+              <span class="text-[9px] text-zinc-500 uppercase font-bold tracking-wider">Turn</span>
+              <span class="text-[13px] font-bold text-white tabular-nums" id="stripTurn">--</span>
+            </div>
+            <div class="bg-panel px-1 py-1.5 flex flex-col gap-0.5" title="Full turn latency">
+              <span class="text-[9px] text-zinc-500 uppercase font-bold tracking-wider">Latency</span>
+              <span class="text-[13px] font-bold text-zinc-100 tabular-nums" id="stripLatency">--</span>
+            </div>
+            <div class="bg-panel px-1 py-1.5 flex flex-col gap-0.5" title="Time to first token (prefill)">
+              <span class="text-[9px] text-zinc-500 uppercase font-bold tracking-wider">TTFT</span>
+              <span class="text-[13px] font-bold text-cyan-400 tabular-nums" id="stripTtft">--</span>
+            </div>
+            <div class="bg-panel px-1 py-1.5 flex flex-col gap-0.5" title="Pure decode throughput: completion tokens / (total − TTFT)">
+              <span class="text-[9px] text-zinc-500 uppercase font-bold tracking-wider">PURE DECODE</span>
+              <span class="text-[13px] font-bold text-emerald-400 tabular-nums" id="stripDecode">--</span>
+            </div>
+            <div class="bg-panel px-1 py-1.5 flex flex-col gap-0.5" title="Turn tokens: prompt / completion">
+              <span class="text-[9px] text-zinc-500 uppercase font-bold tracking-wider">Tokens</span>
+              <span class="text-[13px] font-bold text-blue-400 tabular-nums" id="stripTokens">--</span>
+            </div>
+          </div>
+
           <!-- Section A: Model Rationale / Deliberation Trace -->
           <div class="p-3.5 rounded bg-panel border border-border flex flex-col gap-2">
             <div class="flex items-center justify-between pb-2 border-b border-border/70 text-xs">
@@ -289,17 +335,32 @@
         <div id="panel-diff" class="tab-panel hidden flex flex-col gap-3">
           <div class="p-2.5 rounded bg-panel border border-border flex items-center justify-between">
             <span class="text-zinc-300 font-medium truncate" id="diffFileLabel">Target: --</span>
-            <span class="text-[11px] text-zinc-500" id="diffModeLabel">In-Memory AST Surgery</span>
+            <span class="text-[11px] text-zinc-500" id="diffModeLabel">Unified Diff</span>
           </div>
-          <pre><code class="language-diff" id="diffCodeBlock">No file edits in this turn.</code></pre>
+          <div id="diffView" class="overflow-hidden rounded border border-border">
+            <pre class="m-0 p-0 bg-black font-mono text-xs overflow-x-auto max-h-[65vh] overflow-y-auto"><code class="language-diff p-3" id="diffCodeBlock">No file edits in this turn.</code></pre>
+          </div>
+          <div id="diffOpsSummary" class="hidden">
+            <div class="p-3 rounded bg-panel border border-border flex flex-col gap-2">
+              <span class="text-zinc-400 text-xs font-bold uppercase flex items-center gap-1.5">
+                <i data-lucide="list-checks" class="w-3.5 h-3.5 text-zinc-500"></i>
+                Operations &amp; Artifacts Summary
+              </span>
+              <div id="diffOpsContent" class="flex flex-col gap-1 text-xs"></div>
+            </div>
+          </div>
         </div>
 
         <!-- TAB 3: TELEMETRY (Rust Telemetry Matching src/telemetry.rs) -->
         <div id="panel-telemetry" class="tab-panel hidden flex flex-col gap-3">
-          <div class="grid grid-cols-2 md:grid-cols-4 gap-2">
-            <div class="p-2.5 rounded bg-panel border border-border flex flex-col gap-0.5">
-              <span class="text-[10px] text-zinc-500 uppercase font-bold">Decode Rate (vLLM)</span>
+          <div class="grid grid-cols-2 md:grid-cols-5 gap-2">
+            <div class="p-2.5 rounded bg-panel border border-border flex flex-col gap-0.5" title="Pure decode throughput: completion tokens / (total − TTFT), computed exactly like src/telemetry.rs">
+              <span class="text-[10px] text-zinc-500 uppercase font-bold">PURE DECODE</span>
               <span class="text-base font-bold text-emerald-400" id="telDecodeSpeed">-- tok/s</span>
+            </div>
+            <div class="p-2.5 rounded bg-panel border border-border flex flex-col gap-0.5" title="Raw engine-reported turn effective TPS (usage-based, includes TTFT in the denominator)">
+              <span class="text-[10px] text-zinc-500 uppercase font-bold">TURN EFFECTIVE TPS</span>
+              <span class="text-base font-bold text-emerald-400" id="telEffectiveTps">-- tok/s</span>
             </div>
             <div class="p-2.5 rounded bg-panel border border-border flex flex-col gap-0.5">
               <span class="text-[10px] text-zinc-500 uppercase font-bold">Prefill Rate</span>
@@ -342,6 +403,36 @@
             </div>
           </div>
 
+          <!-- 4-Phase Token Distribution Waterfall (pure inline SVG) -->
+          <div class="p-3 rounded bg-panel border border-border flex flex-col gap-2">
+            <div class="flex items-center justify-between">
+              <span class="text-zinc-400 text-xs font-bold uppercase">Token Distribution (this turn)</span>
+              <span class="text-[10px] text-zinc-500 font-mono" id="tokenWaterfallTotal">0 tokens</span>
+            </div>
+            <svg id="tokenWaterfall" width="100%" height="44" viewBox="0 0 400 44" preserveAspectRatio="none"></svg>
+            <div class="flex items-center gap-3 text-[10px] font-mono flex-wrap" id="tokenWaterfallLegend">
+              <span class="flex items-center gap-1"><span class="w-2 h-2 rounded-sm bg-emerald-500"></span>Cached <span class="text-emerald-400" id="legCached">0</span></span>
+              <span class="flex items-center gap-1"><span class="w-2 h-2 rounded-sm bg-cyan-500"></span>Prefill <span class="text-cyan-400" id="legPrefill">0</span></span>
+              <span class="flex items-center gap-1"><span class="w-2 h-2 rounded-sm bg-amber-500"></span>Reasoning <span class="text-amber-400" id="legReasoning">0</span></span>
+              <span class="flex items-center gap-1"><span class="w-2 h-2 rounded-sm bg-blue-500"></span>Completion <span class="text-blue-400" id="legCompletion">0</span></span>
+            </div>
+          </div>
+
+          <!-- Cross-turn Trend Sparklines (pure inline SVG) -->
+          <div class="p-3 rounded bg-panel border border-border flex flex-col gap-2">
+            <span class="text-zinc-400 text-xs font-bold uppercase">Turn Trends (all turns)</span>
+            <div class="grid grid-cols-1 md:grid-cols-2 gap-3">
+              <div class="flex flex-col gap-1">
+                <span class="text-[10px] text-zinc-500 font-mono">Turn Latency (ms) <span class="text-zinc-600" id="sparkLatencyRange">--</span></span>
+                <svg id="sparkLatency" width="100%" height="48" viewBox="0 0 320 48" preserveAspectRatio="none" class="bg-black/40 rounded"></svg>
+              </div>
+              <div class="flex flex-col gap-1">
+                <span class="text-[10px] text-zinc-500 font-mono">Decode Throughput (tok/s) <span class="text-zinc-600" id="sparkTpsRange">--</span></span>
+                <svg id="sparkTps" width="100%" height="48" viewBox="0 0 320 48" preserveAspectRatio="none" class="bg-black/40 rounded"></svg>
+              </div>
+            </div>
+          </div>
+
           <!-- Original Prompt Objective -->
           <div class="p-3 rounded bg-panel border border-border flex flex-col gap-1.5">
             <span class="text-zinc-500 text-[11px] uppercase font-bold">Task Objective Prompt</span>
@@ -371,8 +462,9 @@
       activeFilter: 'all',
       activeTab: 'execution',
       lastMtime: 0,
+      lastActiveStatus: null,
       autoSync: true,
-      followLive: false,
+      followLive: localStorage.getItem('castor_trace_follow_live') !== 'false',
     };
 
     // DOM Elements
@@ -380,6 +472,8 @@
     const headerTaskId = document.getElementById('headerTaskId');
     const headerStatusBadge = document.getElementById('headerStatusBadge');
     const headerTurnsCount = document.getElementById('headerTurnsCount');
+    const headerDuration = document.getElementById('headerDuration');
+    const headerTokens = document.getElementById('headerTokens');
     const headerDecodeSpeed = document.getElementById('headerDecodeSpeed');
     const headerPrefillSpeed = document.getElementById('headerPrefillSpeed');
     const tasksListContainer = document.getElementById('tasksListContainer');
@@ -392,15 +486,90 @@
     const btnLiveSync = document.getElementById('btnLiveSync');
     const syncDot = document.getElementById('syncDot');
     const syncText = document.getElementById('syncText');
+    const btnFollowLive = document.getElementById('btnFollowLive');
+    const followDot = document.getElementById('followDot');
+    const followText = document.getElementById('followText');
     const btnPrevTurn = document.getElementById('btnPrevTurn');
     const btnNextTurn = document.getElementById('btnNextTurn');
     const inspectorTurnIndicator = document.getElementById('inspectorTurnIndicator');
     const btnCopyInspector = document.getElementById('btnCopyInspector');
     const copyBtnLabel = document.getElementById('copyBtnLabel');
+    const ctxGauge = document.getElementById('ctxGauge');
+    const ctxGaugeLabel = document.getElementById('ctxGaugeLabel');
 
-    // Telemetry algorithm matching src/telemetry.rs exactly
+    // -----------------------------------------------------------------------
+    // Terminal status tracking (follow-live auto-refresh)
+    // -----------------------------------------------------------------------
+    const TERMINAL_STATUSES = new Set(['completed', 'failed', 'cancelled', 'orphaned']);
+    function isTerminalStatus(s) { return TERMINAL_STATUSES.has(s); }
+
+    function applyFollowLiveUI() {
+      if (state.followLive) {
+        followDot.className = 'w-2 h-2 rounded-full bg-emerald-500';
+        followText.textContent = 'Follow Live';
+      } else {
+        followDot.className = 'w-2 h-2 rounded-full bg-zinc-600';
+        followText.textContent = 'Follow Off';
+      }
+    }
+
+    btnFollowLive.addEventListener('click', () => {
+      state.followLive = !state.followLive;
+      localStorage.setItem('castor_trace_follow_live', String(state.followLive));
+      applyFollowLiveUI();
+    });
+
+    // -----------------------------------------------------------------------
+    // Context Window Saturation Bullet Gauge (/api/context vs. the active
+    // task's max prompt-token turn). Renders a neutral (unfilled) gauge when
+    // maxContext is unknown or no prompt tokens have been observed yet.
+    // -----------------------------------------------------------------------
+    function renderCtxGauge(maxContext) {
+      const turns = state.activeTaskData?.turns || [];
+      let maxPrompt = 0;
+      for (const t of turns) {
+        maxPrompt = Math.max(maxPrompt, Number(t.dispatch?.metrics?.prompt_tokens || 0));
+      }
+
+      const hasData = maxContext > 0 && maxPrompt > 0;
+      const ratio = hasData ? maxPrompt / maxContext : 0;
+      const pct = Math.min(1, ratio);
+
+      ctxGaugeLabel.textContent = hasData
+        ? `${maxPrompt.toLocaleString()} / ${maxContext.toLocaleString()} (${Math.round(ratio * 100)}%)`
+        : `${maxPrompt.toLocaleString()} / -- tokens`;
+
+      // Fill color by saturation: emerald → amber (≥75%) → rose (≥90%).
+      let color = '#10b981';
+      if (ratio >= 0.9) color = '#f43f5e';
+      else if (ratio >= 0.75) color = '#f59e0b';
+
+      const bullets = 10, W = 96, r = 5, gap = (W - bullets * 2 * r) / (bullets - 1);
+      const filled = hasData ? Math.round(pct * bullets) : 0;
+      let svg = `<rect x="0" y="4" width="${W}" height="6" rx="3" fill="#18181b"/>`;
+      svg += `<line x1="${0.75 * W}" y1="0" x2="${0.75 * W}" y2="14" stroke="#f59e0b" stroke-width="1" stroke-dasharray="2,2" opacity="0.8"/>`;
+      svg += `<text x="${0.75 * W + 2}" y="12" fill="#f59e0b" font-size="5" font-family="monospace">75%</text>`;
+      for (let i = 0; i < bullets; i++) {
+        const cx = r + i * (2 * r + gap);
+        svg += `<circle cx="${cx.toFixed(1)}" cy="7" r="${r}" fill="${i < filled ? color : '#27272a'}"/>`;
+      }
+      ctxGauge.innerHTML = svg;
+    }
+
+    async function loadContextConfig() {
+      renderCtxGauge(null); // neutral fallback until the fetch resolves
+      try {
+        const res = await fetch('/api/context');
+        const data = await res.json();
+        if (data.maxContext) renderCtxGauge(data.maxContext);
+      } catch {}
+    }
+
+    // Telemetry algorithm matching src/telemetry.rs exactly.
+    // Returns human-formatted strings plus raw numeric rates (tok/s) for
+    // aggregate math and trend sparklines.
     function computeRustTps(metrics) {
-      if (!metrics) return { decodeTps: '--', prefillTps: '--', decodeMs: 0 };
+      if (!metrics) return { decodeTps: '--', prefillTps: '--', decodeMs: 0, decodeTpsNum: null, prefillTpsNum: null };
       const totalMs = metrics.total_ms || 0;
       const ttftMs = metrics.ttft_ms || 0;
       const compTokens = metrics.completion_tokens || 0;
@@ -408,22 +577,25 @@
 
       // Pure decode duration = total_ms - ttft_ms
       const decodeMs = Math.max(0, totalMs - ttftMs);
-      
+
       let decodeTps = '--';
+      let decodeTpsNum = null;
       if (decodeMs >= 50 && compTokens > 0) {
-        const tps = compTokens / (decodeMs / 1000.0);
-        decodeTps = `${tps.toFixed(1)} tok/s`;
+        decodeTpsNum = compTokens / (decodeMs / 1000.0);
+        decodeTps = `${decodeTpsNum.toFixed(1)} tok/s`;
       } else if (metrics.tokens_per_sec) {
-        decodeTps = `${metrics.tokens_per_sec.toFixed(1)} tok/s`;
+        decodeTpsNum = metrics.tokens_per_sec;
+        decodeTps = `${decodeTpsNum.toFixed(1)} tok/s`;
       }
 
       let prefillTps = '--';
+      let prefillTpsNum = null;
       if (ttftMs > 0 && promptTokens > 0) {
-        const ptps = promptTokens / (ttftMs / 1000.0);
-        prefillTps = `${ptps.toFixed(0)} tok/s`;
+        prefillTpsNum = promptTokens / (ttftMs / 1000.0);
+        prefillTps = `${prefillTpsNum.toFixed(0)} tok/s`;
       }
 
-      return { decodeTps, prefillTps, decodeMs };
+      return { decodeTps, prefillTps, decodeMs, decodeTpsNum, prefillTpsNum };
     }
 
     function matchesFilter(turn, filter) {
@@ -469,15 +641,37 @@
       try {
         const res = await fetch(`/api/poll?taskId=${state.activeTaskId || ''}`);
         const data = await res.json();
-        
-        // Auto-switch only if user enabled followLive and a new executing task arrived
-        if (state.followLive && data.latestTaskId && data.latestTaskId !== state.activeTaskId && data.latestStatus === 'executing') {
+
+        // 1. New task arrived or latest status changed → resync the list.
+        const listChanged = data.totalTasks !== state.tasks.length
+          || (data.latestTaskId && data.latestTaskId !== state.tasks[0]?.id)
+          || (data.latestStatus !== state.tasks[0]?.status);
+        if (listChanged) {
           await loadTasksInitial();
+        }
+
+        // 2. Follow Live: jump to a newly-dispatched live task.
+        if (state.followLive && data.latestTaskId
+          && data.latestTaskId !== state.activeTaskId
+          && (data.latestStatus === 'executing' || data.latestStatus === 'queued')) {
           await selectTask(data.latestTaskId);
           return;
         }
 
-        // Otherwise, refresh current task data if mtime changed
+        // 3. Track the active task's status transitions.
+        const prevStatus = state.lastActiveStatus;
+        if (data.activeTaskId && data.activeTaskId === state.activeTaskId) {
+          state.lastActiveStatus = data.status;
+        }
+        // Executing → terminal: refresh so the terminal state renders without a
+        // manual refresh.
+        if (prevStatus === 'executing' && data.status && isTerminalStatus(data.status)
+          && (data.activeTaskId === state.activeTaskId || data.activeTaskId === data.latestTaskId)) {
+          if (state.activeTaskId) await reloadActiveTaskData();
+          return;
+        }
+
+        // 4. Otherwise, refresh current task data if mtime changed
         if (data.mtime && data.mtime !== state.lastMtime) {
           state.lastMtime = data.mtime;
           if (state.activeTaskId) {
@@ -491,6 +685,7 @@
       state.activeTaskId = taskId;
       state.activeTurnIndex = 0;
       state.activeToolIndex = 0;
+      state.lastActiveStatus = state.tasks.find(t => t.id === taskId)?.status ?? null;
       renderTasksList();
       await reloadActiveTaskData();
     }
@@ -501,7 +696,9 @@
         const res = await fetch(`/api/task/${state.activeTaskId}`);
         const data = await res.json();
         state.activeTaskData = data;
+        if (data.task?.status) state.lastActiveStatus = data.task.status;
         updateHeader(data.task);
+        loadContextConfig();
 
         const turns = data.turns || [];
         updateFilterCounts(turns);
@@ -522,11 +719,83 @@
       }
     }
 
+    // -------------------------------------------------------------------
+    // Dispatch Aggregates: stable totals across ALL turns of the active task
+    // (never overwritten by a single-turn inspector selection).
+    // -------------------------------------------------------------------
+    function computeDispatchAggregates(turns) {
+      let sumTotalMs = 0, sumDecodeMs = 0, sumComp = 0;
+      let sumPrompt = 0, sumReason = 0, sumPrefillMs = 0, sumPrefillPrompt = 0;
+      let hasMetrics = false;
+
+      for (const t of turns) {
+        const m = t.dispatch?.metrics;
+        if (!m) continue;
+        hasMetrics = true;
+        const totalMs = m.total_ms || 0;
+        const ttftMs = m.ttft_ms || 0;
+        sumTotalMs += totalMs;
+        sumDecodeMs += Math.max(0, totalMs - ttftMs);
+        sumComp += m.completion_tokens || 0;
+        sumPrompt += m.prompt_tokens || 0;
+        sumReason += m.reasoning_tokens || 0;
+        sumPrefillMs += ttftMs;
+        sumPrefillPrompt += m.prompt_tokens || 0;
+      }
+
+      // Mean decode: Σ completion tokens / Σ pure-decode time (honest aggregate).
+      let aggDecode = null;
+      if (sumDecodeMs >= 50 && sumComp > 0) {
+        aggDecode = sumComp / (sumDecodeMs / 1000.0);
+      }
+      // Mean prefill: Σ prompt tokens / Σ TTFT.
+      let aggPrefill = null;
+      if (sumPrefillMs > 0 && sumPrefillPrompt > 0) {
+        aggPrefill = sumPrefillPrompt / (sumPrefillMs / 1000.0);
+      }
+
+      // Aggregate duration: prefer the task's wall-clock span when known
+      // (started_at → ended_at); otherwise the sum of turn durations.
+      const task = state.activeTaskData?.task;
+      let aggMs = sumTotalMs;
+      if (task?.startedAt) {
+        const end = task.endedAt || Math.max(Date.now(), task.startedAt);
+        aggMs = Math.max(0, end - task.startedAt);
+      }
+
+      return {
+        turnCount: turns.length,
+        aggMs,
+        sumTotalMs,
+        totalTokens: sumPrompt + sumComp + sumReason,
+        aggDecode,
+        aggPrefill,
+        hasMetrics,
+      };
+    }
+
+    function fmtDuration(ms) {
+      if (ms == null || !isFinite(ms) || ms <= 0) return '--';
+      const s = ms / 1000;
+      if (s < 60) return `${s.toFixed(1)}s`;
+      const m = Math.floor(s / 60);
+      const rs = Math.round(s % 60);
+      if (m < 60) return `${m}m ${rs}s`;
+      const h = Math.floor(m / 60);
+      return `${h}h ${m % 60}m`;
+    }
+
+    function fmtTokens(n) {
+      if (n >= 1_000_000) return `${(n / 1_000_000).toFixed(2)}M`;
+      if (n >= 1000) return `${(n / 1000).toFixed(1)}k`;
+      return String(n);
+    }
+
     function updateHeader(task) {
       if (!task) return;
       headerCwd.textContent = `cwd: ${task.cwd || 'N/A'}`;
       headerTaskId.textContent = task.id;
-      
+
       const status = task.status || 'unknown';
       headerStatusBadge.textContent = status.toUpperCase();
 
@@ -534,29 +803,21 @@
         headerStatusBadge.className = 'px-1.5 py-0.5 rounded text-[10px] font-semibold uppercase bg-emerald-950 text-emerald-400 border border-emerald-800 animate-pulse';
       } else if (status === 'completed' || status === 'succeeded') {
         headerStatusBadge.className = 'px-1.5 py-0.5 rounded text-[10px] font-semibold uppercase bg-zinc-900 text-zinc-300 border border-zinc-700';
+      } else if (status === 'queued') {
+        headerStatusBadge.className = 'px-1.5 py-0.5 rounded text-[10px] font-semibold uppercase bg-amber-950 text-amber-400 border border-amber-800';
       } else {
         headerStatusBadge.className = 'px-1.5 py-0.5 rounded text-[10px] font-semibold uppercase bg-rose-950 text-rose-400 border border-rose-800';
       }
 
+      // Stable dispatch aggregates across all turns (not per-selection).
       const turns = state.activeTaskData?.turns || [];
-      headerTurnsCount.textContent = turns.length;
-      turnsSummaryCount.textContent = `${turns.length} turns`;
-
-      let lastDecode = '--';
-      let lastPrefill = '--';
-      for (let i = turns.length - 1; i >= 0; i--) {
-        const m = turns[i].dispatch?.metrics;
-        if (m) {
-          const tps = computeRustTps(m);
-          if (tps.decodeTps !== '--') {
-            lastDecode = tps.decodeTps;
-            lastPrefill = tps.prefillTps;
-            break;
-          }
-        }
-      }
-      headerDecodeSpeed.textContent = lastDecode;
-      headerPrefillSpeed.textContent = lastPrefill;
+      const agg = computeDispatchAggregates(turns);
+      headerTurnsCount.textContent = `${agg.turnCount} turns`;
+      turnsSummaryCount.textContent = `${agg.turnCount} turns`;
+      headerDuration.textContent = fmtDuration(agg.aggMs);
+      headerTokens.textContent = fmtTokens(agg.totalTokens);
+      headerDecodeSpeed.textContent = agg.aggDecode != null ? `${agg.aggDecode.toFixed(1)} tok/s` : '-- tok/s';
+      headerPrefillSpeed.textContent = agg.aggPrefill != null ? `${agg.aggPrefill.toFixed(0)} tok/s` : '-- tok/s';
     }
 
     function updateFilterCounts(turns) {
@@ -669,16 +930,43 @@
         }).join('');
 
         const promptSummary = (dispatch?.content || '').trim().replace(/\n/g, ' ').slice(0, 50);
-        const totalSec = metrics.total_ms ? (metrics.total_ms / 1000).toFixed(1) : '0.5';
+        const totalMs = metrics.total_ms || 0;
+        const totalSec = totalMs ? (totalMs / 1000).toFixed(1) : '0.5';
+
+        // 3-phase micro-waterfall: TTFT (cyan) → decode (blue) → tool (emerald)
+        const ttftMs = metrics.ttft_ms || 0;
+        const decodeMs = Math.max(0, totalMs - ttftMs);
+        let toolMs = 0;
+        for (const r of (turn.results || [])) {
+          if (typeof r.elapsed_ms === 'number') toolMs += r.elapsed_ms;
+          else if (typeof r.duration_ms === 'number') toolMs += r.duration_ms;
+        }
+        const phases = [
+          { ms: ttftMs, color: '#06b6d4' },  // cyan: TTFT / prefill
+          { ms: decodeMs, color: '#3b82f6' }, // blue: decode generation
+          { ms: toolMs, color: '#10b981' },   // emerald: tool execution
+        ];
+        const sumMs = phases.reduce((a, p) => a + p.ms, 0) || 1;
+        const segs = phases
+          .filter(p => p.ms > 0)
+          .map(p => `<div style="width:${(p.ms / sumMs * 100).toFixed(2)}%;background:${p.color}" title="${p.ms ? (p.ms / 1000).toFixed(2) + 's' : ''}"></div>`)
+          .join('');
+        const waterfall = `
+          <div class="flex items-center gap-1.5">
+            <div class="flex-1 h-1.5 rounded-full bg-zinc-900 overflow-hidden flex">${segs || '<div class="w-full bg-zinc-900"></div>'}</div>
+            <span class="text-[10px] text-zinc-500 tabular-nums shrink-0 w-10 text-right" title="Total turn duration">${totalSec}s</span>
+          </div>
+        `;
 
         row.innerHTML = `
-          <div class="flex items-center justify-between">
-            <div class="flex items-center gap-1.5">
+          <div class="flex items-center justify-between gap-1.5">
+            <div class="flex items-center gap-1.5 min-w-0">
               <span class="font-bold ${isSelected ? 'text-white' : 'text-zinc-300'}">#${String(turn.turn).padStart(2, '0')}</span>
               <div class="flex items-center gap-1 flex-wrap">${toolBadges || '<span class="text-[10px] text-zinc-500">THINK</span>'}</div>
             </div>
-            <span class="text-[11px] text-zinc-500 shrink-0">${totalSec}s</span>
           </div>
+
+          ${waterfall}
 
           ${promptSummary ? `<p class="text-[11px] text-zinc-400 font-sans truncate">${escapeHtml(promptSummary)}</p>` : ''}
         `;
@@ -719,6 +1007,269 @@
       btnNextTurn.classList.toggle('cursor-not-allowed', btnNextTurn.disabled);
     }
 
+    // -------------------------------------------------------------------
+    // 4-Phase Token Distribution Waterfall (pure inline SVG):
+    // Cached (emerald) | Prefill (cyan) | Reasoning (amber) | Completion (blue)
+    // -------------------------------------------------------------------
+    function renderTokenWaterfall(turn) {
+      const svg = document.getElementById('tokenWaterfall');
+      if (!svg) return;
+      const m = turn.dispatch?.metrics || {};
+      const prompt = m.prompt_tokens || 0;
+      const cached = m.cached_tokens || 0;
+      const prefill = Math.max(0, prompt - cached);
+      const reasoning = m.reasoning_tokens || 0;
+      const completion = m.completion_tokens || 0;
+      const total = prefill + reasoning + completion;
+
+      const W = 400, H = 44, barY = 10, barH = 16;
+      const parts = [
+        { v: cached, color: '#10b981' },     // emerald
+        { v: prefill, color: '#06b6d4' },    // cyan
+        { v: reasoning, color: '#f59e0b' },  // amber
+        { v: completion, color: '#3b82f6' }, // blue
+      ];
+
+      let x = 0;
+      let segs = '';
+      for (const p of parts) {
+        if (p.v <= 0 || total <= 0) continue;
+        const w = (p.v / total) * W;
+        segs += `<rect x="${x.toFixed(2)}" y="${barY}" width="${Math.max(0.5, w).toFixed(2)}" height="${barH}" fill="${p.color}"/>`;
+        if (w > 34) {
+          segs += `<text x="${(x + w / 2).toFixed(2)}" y="${barY - 2}" fill="${p.color}" font-size="8" text-anchor="middle" font-family="monospace">${p.v.toLocaleString()}</text>`;
+        }
+        x += w;
+      }
+      let labels = `<rect x="0" y="${barY}" width="${W}" height="${barH}" fill="#18181b"/>`;
+      svg.innerHTML = labels + segs +
+        `<text x="2" y="${barY + barH + 10}" fill="#71717a" font-size="8" font-family="monospace">${total.toLocaleString()} generated-side tokens</text>`;
+
+      document.getElementById('tokenWaterfallTotal').textContent = `${total.toLocaleString()} tokens`;
+      document.getElementById('legCached').textContent = cached.toLocaleString();
+      document.getElementById('legPrefill').textContent = prefill.toLocaleString();
+      document.getElementById('legReasoning').textContent = reasoning.toLocaleString();
+      document.getElementById('legCompletion').textContent = completion.toLocaleString();
+    }
+
+    // -------------------------------------------------------------------
+    // Pure inline SVG sparklines: latency + decode throughput across turns.
+    // -------------------------------------------------------------------
+    function renderSparklines() {
+      const turns = state.activeTaskData?.turns || [];
+      const latVals = [];
+      const tpsVals = [];
+      for (const t of turns) {
+        const m = t.dispatch?.metrics;
+        if (!m) continue;
+        latVals.push({ turn: t.turn, v: m.total_ms || 0 });
+        const tt = computeRustTps(m);
+        if (tt.decodeTpsNum != null) tpsVals.push({ turn: t.turn, v: tt.decodeTpsNum });
+      }
+      drawSparkline(document.getElementById('sparkLatency'), latVals, '#f59e0b', 'sparkLatencyRange');
+      drawSparkline(document.getElementById('sparkTps'), tpsVals, '#10b981', 'sparkTpsRange');
+    }
+
+    function drawSparkline(svg, vals, color, rangeId) {
+      if (!svg) return;
+      const rangeEl = document.getElementById(rangeId);
+      const W = 320, H = 48, pad = 4;
+      if (!vals || vals.length === 0) {
+        svg.innerHTML = `<text x="${W / 2}" y="${H / 2}" fill="#3f3f46" font-size="9" text-anchor="middle" font-family="monospace">no data</text>`;
+        if (rangeEl) rangeEl.textContent = '';
+        return;
+      }
+      const max = Math.max(...vals.map(v => v.v), 1);
+      const min = Math.min(...vals.map(v => v.v), 0);
+      const span = max - min || 1;
+      const xFor = i => vals.length === 1 ? W / 2 : pad + (i / (vals.length - 1)) * (W - 2 * pad);
+      const yFor = v => H - pad - ((v - min) / span) * (H - 2 * pad);
+
+      let area = `M ${xFor(0).toFixed(1)} ${(H - pad).toFixed(1)}`;
+      let line = '';
+      vals.forEach((d, i) => {
+        const x = xFor(i), y = yFor(d.v);
+        area += ` L ${x.toFixed(1)} ${y.toFixed(1)}`;
+        line += `${i === 0 ? 'M' : ' L'} ${x.toFixed(1)} ${y.toFixed(1)} `;
+      });
+      area += ` L ${xFor(vals.length - 1).toFixed(1)} ${(H - pad).toFixed(1)} Z`;
+
+      const active = state.activeTurnIndex;
+      const activeVal = vals.find(v => v.turn === (state.activeTaskData?.turns[active]?.turn));
+      let activeDot = '';
+      if (activeVal) {
+        const i = vals.indexOf(activeVal);
+        activeDot = `<circle cx="${xFor(i).toFixed(1)}" cy="${yFor(activeVal.v).toFixed(1)}" r="3" fill="${color}" stroke="#000" stroke-width="1"/>`;
+      }
+
+      svg.innerHTML = `
+        <path d="${area}" fill="${color}" opacity="0.15"/>
+        <path d="${line}" fill="none" stroke="${color}" stroke-width="1.5"/>
+        ${activeDot}
+      `;
+      if (rangeEl) rangeEl.textContent = `min ${min.toFixed(0)} / max ${max.toFixed(0)}`;
+    }
+
+    // -------------------------------------------------------------------
+    // DIFF TAB helpers: clean unified diff (edit_file), clean added lines
+    // (write_file), Operations & Artifacts Summary (non-modifying turns).
+    // -------------------------------------------------------------------
+    function buildUnifiedDiff(path, target, replacement, maxLines) {
+      const a = String(target).split('\n');
+      const b = String(replacement).split('\n');
+      const ctx = 3;
+
+      let first = 0;
+      const minLen = Math.min(a.length, b.length);
+      while (first < minLen && a[first] === b[first]) first++;
+
+      // Common trailing lines (identical on both sides).
+      let k = 0;
+      while (k < Math.min(a.length - 1 - first, b.length - 1 - first)
+        && a[a.length - 1 - k] === b[b.length - 1 - k]) k++;
+
+      const aPre = a.slice(Math.max(0, first - ctx), first);
+      const aRem = a.slice(first, a.length - k);
+      const aPost = a.slice(a.length - k, a.length).slice(-ctx);
+      const bAdd = b.slice(first, b.length - k);
+
+      const oldStart = Math.max(1, first - ctx);
+      const oldCount = aPre.length + aRem.length + aPost.length;
+      const newCount = aPre.length + bAdd.length + aPost.length;
+
+      const out = [`--- a/${path}`, `+++ b/${path}`, `@@ -${oldStart},${oldCount} +${oldStart},${newCount} @@`];
+      for (const l of aPre) out.push(` ${l}`);
+      for (const l of aRem) out.push(`-${l}`);
+      for (const l of bAdd) out.push(`+${l}`);
+      for (const l of aPost) out.push(` ${l}`);
+
+      if (maxLines && out.length > maxLines) {
+        out.length = maxLines;
+        out.push(`# ... truncated (${aRem.length} removed / ${bAdd.length} added lines total)`);
+      }
+      return out.join('\n');
+    }
+
+    function buildWriteDiff(path, content, maxLines) {
+      const lines = String(content).split('\n');
+      const out = [`--- /dev/null`, `+++ b/${path}`];
+      for (const l of lines) out.push(`+${l}`);
+      if (maxLines && out.length > maxLines) {
+        out.length = maxLines;
+        out.push(`# ... truncated (${lines.length} lines total)`);
+      }
+      return out.join('\n');
+    }
+
+    function bashExitStatus(result) {
+      if (!result) return null;
+      const out = String(result.output || '');
+      const m = out.match(/exit status (\d+)/i) || out.match(/exit code[=:\s]+(\d+)/i);
+      return m ? parseInt(m[1], 10) : (result.is_error ? 1 : null);
+    }
+
+    function renderOpsSummary(toolCalls, results) {
+      const diffOpsSummary = document.getElementById('diffOpsSummary');
+      const diffOpsContent = document.getElementById('diffOpsContent');
+      diffOpsSummary.classList.remove('hidden');
+      if (!toolCalls || toolCalls.length === 0) {
+        diffOpsContent.innerHTML = `<div class="text-zinc-500">No tool invocations — this turn is deliberation only (model reasoning, no external effects).</div>`;
+        return;
+      }
+      let files = 0, searches = 0, bashCount = 0;
+      const rows = [];
+      const seen = new Set();
+      for (const tc of toolCalls) {
+        let detail = tc.name;
+        try {
+          const a = JSON.parse(tc.arguments);
+          if (tc.name === 'read_file') { files++; detail = a.path || 'file'; }
+          else if (tc.name === 'list_dir') { files++; detail = a.path || '.'; }
+          else if (tc.name === 'search_code') { searches++; detail = `"${a.query || ''}"${a.path ? ' in ' + a.path : ''}`; }
+          else if (tc.name === 'ast_search') { searches++; detail = `"${a.pattern || a.query || ''}"${a.path ? ' in ' + a.path : ''}`; }
+          else if (tc.name === 'bash') { bashCount++; detail = `$ ${String(a.command || '').slice(0, 140)}`; }
+          else if (tc.name === 'web_search') { searches++; detail = `web: "${a.query || ''}"`; }
+          else if (tc.name === 'web_fetch') { detail = `fetch: ${a.url || ''}`; }
+          else detail = `${tc.name} ${(a.path || a.query || a.command || '').toString().slice(0, 80)}`.trim();
+        } catch {}
+        const key = tc.name + '|' + detail;
+        if (seen.has(key)) continue;
+        seen.add(key);
+
+        const res = results.find(r => r.tool_call_id === tc.id);
+        let statusHtml = '';
+        if (tc.name === 'bash') {
+          const code = bashExitStatus(res);
+          if (code !== null && code !== undefined) {
+            statusHtml = `<span class="text-[10px] font-mono shrink-0 ${code === 0 ? 'text-emerald-400' : 'text-rose-400'}">exit ${code}</span>`;
+          } else if (res?.is_error) {
+            statusHtml = `<span class="text-[10px] font-mono shrink-0 text-rose-400">ERR</span>`;
+          }
+        } else if (res?.is_error) {
+          statusHtml = `<span class="text-[10px] font-mono shrink-0 text-rose-400">ERR</span>`;
+        }
+        rows.push(`<div class="flex items-start gap-2"><span class="text-zinc-300 flex-1 whitespace-pre-wrap break-all min-h-[14px]">${escapeHtml(detail)}</span>${statusHtml}</div>`);
+      }
+      diffOpsContent.innerHTML = `
+        <div class="flex items-center gap-3 text-[10px] text-zinc-500 font-mono flex-wrap pb-1 border-b border-border/40">
+          <span>${files} file(s) inspected</span>
+          <span>${searches} search query(s)</span>
+          <span>${bashCount} shell command(s)</span>
+        </div>
+        ${rows.join('')}
+      `;
+    }
+
+    function renderDiffTab(turn) {
+      const diffView = document.getElementById('diffView');
+      const diffOpsSummary = document.getElementById('diffOpsSummary');
+      const diffCodeBlock = document.getElementById('diffCodeBlock');
+      const diffFileLabel = document.getElementById('diffFileLabel');
+      const diffModeLabel = document.getElementById('diffModeLabel');
+      const toolCalls = turn.dispatch?.tool_calls || [];
+      const results = turn.results || [];
+      const activeToolCall = toolCalls[state.activeToolIndex] || toolCalls[0];
+
+      const editCall = (activeToolCall?.name === 'edit_file' ? activeToolCall : null) || toolCalls.find(tc => tc.name === 'edit_file');
+      const writeCall = (activeToolCall?.name === 'write_file' ? activeToolCall : null) || toolCalls.find(tc => tc.name === 'write_file');
+
+      let showDiffBlock = false;
+      if (editCall) {
+        showDiffBlock = true;
+        diffOpsSummary.classList.add('hidden');
+        try {
+          const args = JSON.parse(editCall.arguments);
+          diffFileLabel.textContent = `Target: ${args.path || 'file'}`;
+          diffModeLabel.textContent = 'Unified Diff (AST surgery)';
+          diffCodeBlock.textContent = buildUnifiedDiff(args.path || 'file', args.target_content || '', args.replacement_content || '', 400);
+        } catch {
+          diffFileLabel.textContent = 'Target: --';
+          diffModeLabel.textContent = 'Parse Error';
+          diffCodeBlock.textContent = 'Failed to parse edit_file arguments';
+        }
+      } else if (writeCall) {
+        showDiffBlock = true;
+        diffOpsSummary.classList.add('hidden');
+        try {
+          const args = JSON.parse(writeCall.arguments);
+          diffFileLabel.textContent = `Target: ${args.path || 'file'}`;
+          diffModeLabel.textContent = `New File (${(args.content?.length || 0).toLocaleString()} bytes)`;
+          diffCodeBlock.textContent = buildWriteDiff(args.path || 'file', args.content || '', 400);
+        } catch {
+          diffFileLabel.textContent = 'Target: --';
+          diffModeLabel.textContent = 'Parse Error';
+          diffCodeBlock.textContent = 'Failed to parse write_file arguments';
+        }
+      } else {
+        diffFileLabel.textContent = 'No file modifications in this turn';
+        diffModeLabel.textContent = 'Read-Only Operations';
+        renderOpsSummary(toolCalls, results);
+      }
+
+      diffView.classList.toggle('hidden', !showDiffBlock);
+      Prism.highlightElement(diffCodeBlock);
+    }
+
     function renderInspector() {
       const turns = state.activeTaskData?.turns || [];
       const turn = turns[state.activeTurnIndex];
@@ -735,6 +1286,10 @@
         document.getElementById('actionArgsCode').textContent = '--';
         document.getElementById('actionOutputCode').textContent = '--';
         document.getElementById('diffCodeBlock').textContent = 'No active turn.';
+        document.getElementById('diffFileLabel').textContent = 'Target: --';
+        document.getElementById('diffModeLabel').textContent = 'No Active Turn';
+        document.getElementById('diffView').classList.remove('hidden');
+        document.getElementById('diffOpsSummary').classList.add('hidden');
         document.getElementById('rawEventJson').textContent = '{}';
         return;
       }
@@ -745,17 +1300,20 @@
       const results = turn.results || [];
       const toolCalls = dispatch?.tool_calls || [];
       const metrics = dispatch?.metrics || {};
-
-      // Sync top header bar with active turn metrics
-      headerTurnsCount.textContent = `Turn ${turn.turn} / ${turns.length}`;
       const activeTps = computeRustTps(metrics);
-      if (activeTps.decodeTps !== '--') {
-        headerDecodeSpeed.textContent = activeTps.decodeTps;
-        headerPrefillSpeed.textContent = activeTps.prefillTps;
-      } else {
-        headerDecodeSpeed.textContent = '-- tok/s';
-        headerPrefillSpeed.textContent = '-- tok/s';
-      }
+
+      // NOTE: the top-bar header (headerTurnsCount / headerDecodeSpeed /
+      // headerPrefillSpeed) holds *stable dispatch aggregates* and must NOT be
+      // overwritten by a single-turn selection. Per-turn numbers live in the
+      // dedicated high-density strip below.
+      const turnTotalMs = metrics.total_ms || 0;
+      document.getElementById('stripTurn').textContent = `#${String(turn.turn).padStart(2, '0')}`;
+      document.getElementById('stripLatency').textContent = turnTotalMs ? (turnTotalMs / 1000).toFixed(2) + 's' : '--';
+      document.getElementById('stripTtft').textContent = metrics.ttft_ms ? (metrics.ttft_ms / 1000).toFixed(2) + 's' : '--';
+      document.getElementById('stripDecode').textContent = activeTps.decodeTps === '--' ? '--' : activeTps.decodeTps;
+      const pTok = metrics.prompt_tokens || 0;
+      const cTok = metrics.completion_tokens || 0;
+      document.getElementById('stripTokens').textContent = `${fmtTokens(pTok)} / ${fmtTokens(cTok)}`;
 
       // 1. UNIFIED EXECUTION TAB (Rationale + Action + Output)
       const reasoningText = (dispatch?.content || '').trim();
@@ -850,40 +1408,15 @@
         document.getElementById('actionOutputCode').textContent = '(none)';
       }
 
-      // 2. DIFF TAB (Active tool priority, or first modifying tool in turn)
-      const editCall = (activeToolCall?.name === 'edit_file' ? activeToolCall : null) || toolCalls.find(tc => tc.name === 'edit_file');
-      const writeCall = (activeToolCall?.name === 'write_file' ? activeToolCall : null) || toolCalls.find(tc => tc.name === 'write_file');
-      const diffCodeBlock = document.getElementById('diffCodeBlock');
-
-      if (editCall) {
-        try {
-          const args = JSON.parse(editCall.arguments);
-          document.getElementById('diffFileLabel').textContent = `Target: ${args.path || 'file'}`;
-          document.getElementById('diffModeLabel').textContent = 'In-Memory AST Replacement';
-          const diffText = `--- a/${args.path}\n+++ b/${args.path}\n@@ Exact Substring Replacement @@\n- ${args.target_content.replace(/\n/g, '\n- ')}\n+ ${args.replacement_content.replace(/\n/g, '\n+ ')}`;
-          diffCodeBlock.textContent = diffText;
-        } catch {
-          diffCodeBlock.textContent = 'Failed to parse edit_file arguments';
-        }
-      } else if (writeCall) {
-        try {
-          const args = JSON.parse(writeCall.arguments);
-          document.getElementById('diffFileLabel').textContent = `Target: ${args.path || 'file'}`;
-          document.getElementById('diffModeLabel').textContent = `Created File (${args.content?.length || 0} bytes)`;
-          diffCodeBlock.textContent = `+++ b/${args.path}\n${args.content?.slice(0, 4000) || ''}`;
-        } catch {
-          diffCodeBlock.textContent = 'Failed to parse write_file arguments';
-        }
-      } else {
-        document.getElementById('diffFileLabel').textContent = 'Target: --';
-        document.getElementById('diffModeLabel').textContent = 'Non-Modifying Operation';
-        diffCodeBlock.textContent = `This turn contains non-modifying operations (${toolCalls.map(t => t.name).join(', ') || 'deliberation only'}).`;
-      }
-      Prism.highlightElement(diffCodeBlock);
+      // 2. DIFF TAB (unified diff / clean adds / operations summary)
+      renderDiffTab(turn);
 
       // 3. TELEMETRY TAB (matching src/telemetry.rs)
       const tps = computeRustTps(metrics);
       document.getElementById('telDecodeSpeed').textContent = tps.decodeTps;
+      // Raw engine-reported turn effective TPS (the raw-log rate, distinct from
+      // the computed pure-decode rate above).
+      document.getElementById('telEffectiveTps').textContent = metrics.tokens_per_sec ? `${metrics.tokens_per_sec.toFixed(1)} tok/s` : '--';
       document.getElementById('telPrefillSpeed').textContent = tps.prefillTps;
       document.getElementById('telTtft').textContent = metrics.ttft_ms ? `${(metrics.ttft_ms / 1000).toFixed(2)}s` : '--';
       document.getElementById('telDecodeTime').textContent = `${(tps.decodeMs / 1000).toFixed(2)}s`;
@@ -894,6 +1427,10 @@
       document.getElementById('telCompTok').textContent = (metrics.completion_tokens || 0).toLocaleString();
       document.getElementById('telTotalMs').textContent = `${(metrics.total_ms || 0).toFixed(0)} ms`;
       document.getElementById('taskPromptText').textContent = task?.prompt || 'No prompt available';
+
+      // 4-phase token distribution waterfall + cross-turn trend sparklines.
+      renderTokenWaterfall(turn);
+      renderSparklines();
 
       // 4. RAW JSON TAB
       const rawEl = document.getElementById('rawEventJson');
@@ -1083,7 +1620,8 @@
       } else if (state.activeTab === 'telemetry') {
         const tps = computeRustTps(metrics);
         copyText = `Turn #${turn?.turn || 0} Telemetry:
-- Decode Rate: ${tps.decodeTps}
+- PURE DECODE: ${tps.decodeTps}
+- TURN EFFECTIVE TPS (engine-reported): ${metrics.tokens_per_sec ? metrics.tokens_per_sec.toFixed(1) + ' tok/s' : '--'}
 - Prefill Rate: ${tps.prefillTps}
 - TTFT Latency: ${metrics.ttft_ms ? (metrics.ttft_ms / 1000).toFixed(2) + 's' : '--'}
 - Pure Decode Time: ${(tps.decodeMs / 1000).toFixed(2)}s
@@ -1115,6 +1653,8 @@
         .replace(/'/g, '&#039;');
     }
 
+    loadContextConfig();
+    applyFollowLiveUI();
     loadTasksInitial();
     setInterval(pollCheck, 1500);
     lucide.createIcons();

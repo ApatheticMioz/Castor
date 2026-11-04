@@ -566,10 +566,13 @@ pub async fn run_with(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
     match cli.command.unwrap_or(Command::Mcp) {
         Command::Mcp => {
             let loaded = config::load().map_err(|e| format!("config: {e}"))?;
-            // Best-effort, non-blocking bring-up of the status server
-            // (lock → probe → spawn if down → release). Never blocks serve.
             let state = state::StateDir::from_config(&loaded.config);
             let _ = state.ensure();
+            // Boot reaper (lock-guarded, runs once): reconcile orphans left by a
+            // reboot/crash and reclaim stale slots before anything else serves.
+            task::wait::boot_reap(&state).await;
+            // Best-effort, non-blocking bring-up of the status server
+            // (lock → probe → spawn if down → release). Never blocks serve.
             task::wait::ensure_status_server(&state, loaded.config.ports.status).await;
             // Best-effort, non-blocking bring-up of the stream proxy.
             proxy::ensure_proxy_server(

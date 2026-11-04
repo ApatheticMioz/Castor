@@ -30,6 +30,7 @@ use serde_json::json;
 
 use crate::state::{AcquireResult, Locks, StateDir};
 use crate::task::registry::{DiskRead, TaskRecord, TaskRegistry, TaskStatus};
+use crate::task::semaphore::TaskSemaphore;
 
 /// Disk-mirror poll interval for cross-instance waiters (500 ms).
 const DISK_POLL_MS: u64 = 500;
@@ -87,6 +88,9 @@ impl StatusServer {
     /// Listen on the given port. Blocks until the server is dropped or the
     /// process is signalled.
     pub async fn serve(self, port: u16) -> std::io::Result<()> {
+        // Boot reaper: reconcile orphans left behind by a reboot/crash before
+        // serving, guarded by the `task_reap` lock so only one instance does it.
+        boot_reap(self.inner.registry.state_dir()).await;
         let addr = SocketAddr::from(([127, 0, 0, 1], port));
         let listener = tokio::net::TcpListener::bind(addr).await?;
         eprintln!("[castor-status] listening on {addr}");
@@ -351,6 +355,9 @@ fn now_ms() -> u64 {
 /// 4. **release** — release the lock we acquired so the spawned child can
 ///    acquire it itself.
 ///
+/// Before any of that, the lock-guarded **boot reaper** runs once (reconcile
+/// orphans + reclaim stale slots) so a reboot immediately heals stuck tasks.
+///
 /// Every step is best-effort: a failure is logged to stderr and swallowed.
 /// This never blocks the MCP server from starting.
 pub async fn ensure_status_server(state: &StateDir, port: u16) {
@@ -375,6 +382,49 @@ pub async fn ensure_status_server(state: &StateDir, port: u16) {
             server.release_lock();
         }
         eprintln!("[castor] status server already up (port {port}); not spawning");
+    }
+}
+
+/// Lock-guarded boot-time orphan reconciliation.
+///
+/// Acquires the `task_reap` lockfile (60 s TTL) so that at most one process
+/// (across all `mcp` / `status` instances sharing a state dir) performs the
+/// reconciliation on a given boot. When held, it:
+///
+/// 1. runs [`TaskRegistry::reap_orphans_disk`] — reaps `executing` tasks whose
+///    worker died (reboot / crash) and stale `queued` tasks whose worker never
+///    started, persisting honest terminal states to the disk mirror;
+/// 2. clears reclaimable slot leases (dead owners) via
+///    [`TaskSemaphore::clear_reclaimable`] so freed slots are immediately
+///    reusable.
+///
+/// All steps are best-effort and never block the caller: a failure is logged
+/// to stderr and swallowed.
+///
+/// Invoked once per process at startup, from the status server's
+/// [`StatusServer::serve`] and from the `mcp` subcommand's startup path
+/// (`crate::cli`). The `task_reap` lock guarantees at most one instance
+/// performs the work per boot, so calling it from more than one site in a
+/// single process is harmless (the second call observes the lock as held by
+/// itself, or the work is idempotent).
+pub async fn boot_reap(state: &StateDir) {
+    let locks = Locks::from_state(state);
+    match locks.acquire("task_reap", 60_000) {
+        Ok(AcquireResult::Acquired) => {
+            let registry = TaskRegistry::new(state);
+            let reaped = registry.reap_orphans_disk().await;
+            if reaped > 0 {
+                eprintln!("[castor] boot reaper: reconciled {reaped} orphaned task(s)");
+            }
+            TaskSemaphore::new(state, 1).clear_reclaimable();
+            let _ = locks.release("task_reap");
+        }
+        Ok(AcquireResult::HeldBy { .. }) => {
+            // Another live instance is reconciling right now; skip.
+        }
+        Err(e) => {
+            eprintln!("[castor] boot reaper lock error: {e}");
+        }
     }
 }
 

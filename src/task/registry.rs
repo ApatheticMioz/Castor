@@ -480,6 +480,90 @@ impl TaskRegistry {
         reaped
     }
 
+    /// Reap orphaned tasks from the on-disk mirror, for startup / boot recovery.
+    ///
+    /// Unlike [`Self::reap_orphans`] — which only sees tasks this process holds in
+    /// memory — this scans `<state>/tasks/*.json` directly. That is the seam that
+    /// turns a reboot into honest terminal states: a task left `executing` (or
+    /// `queued`) by a process that died without running its shutdown path is
+    /// reconciled the next time an MCP instance boots and runs this reaper.
+    ///
+    /// Reap rules (idempotent: an already-terminal record is never touched):
+    /// - `executing` with a worker pid that is dead → `failed` /
+    ///   `"process terminated / system reboot"`. A *live* pid is always
+    ///   respected (never reaped), so a healthy long-running worker is never
+    ///   false-positived.
+    /// - `executing` with *no* pid but a heartbeat older than 60 s → `failed` /
+    ///   `"process terminated / system reboot"` (the worker died before it ever
+    ///   stamped its identity; a 60 s grace covers a fresh transition).
+    /// - `queued` with no pid whose `created_at` is older than 5 minutes →
+    ///   `cancelled` / `"worker never started / process terminated"`.
+    ///
+    /// Returns the number of tasks reaped.
+    pub async fn reap_orphans_disk(&self) -> usize {
+        const STALE_HEARTBEAT_MS: u64 = 60_000; // 60 s
+        const STALE_QUEUE_MS: u64 = 5 * 60 * 1000; // 5 min
+        let now = now_ms();
+        let dir = self.state.tasks();
+        let Ok(entries) = fs::read_dir(&dir) else {
+            return 0;
+        };
+        let mut reaped = 0;
+        for entry in entries.flatten() {
+            let path = entry.path();
+            let name = entry.file_name().to_string_lossy().into_owned();
+            if !name.starts_with("task_") || !name.ends_with(".json") {
+                continue;
+            }
+            let Ok(raw) = fs::read_to_string(&path) else {
+                continue;
+            };
+            let Ok(mut rec) = serde_json::from_str::<TaskRecord>(&raw) else {
+                continue;
+            };
+            if rec.status.is_terminal() {
+                continue;
+            }
+            match rec.status {
+                TaskStatus::Executing => {
+                    let pid = rec.pid;
+                    match pid {
+                        // No worker identity: only reap once the heartbeat has
+                        // gone stale (a freshly transitioned task gets 60 s).
+                        None if now.saturating_sub(rec.heartbeat) < STALE_HEARTBEAT_MS => continue,
+                        None => {
+                            rec.status = TaskStatus::Failed;
+                            rec.reason = Some("process terminated / system reboot".into());
+                            rec.ended_at = Some(now);
+                        }
+                        // Live worker: never reap (avoids false-positiving a
+                        // healthy long-running task).
+                        Some(p) if pid_alive(p) => continue,
+                        Some(_) => {
+                            rec.status = TaskStatus::Failed;
+                            rec.reason = Some("process terminated / system reboot".into());
+                            rec.ended_at = Some(now);
+                        }
+                    }
+                }
+                TaskStatus::Queued if rec.pid.is_none() => {
+                    if now.saturating_sub(rec.created_at) < STALE_QUEUE_MS {
+                        continue;
+                    }
+                    rec.status = TaskStatus::Cancelled;
+                    rec.reason = Some("worker never started / process terminated".into());
+                    rec.ended_at = Some(now);
+                }
+                _ => continue,
+            }
+            if self.save_to_disk(&rec).is_err() {
+                eprintln!("castor: failed to persist reaped task {}", rec.id);
+            }
+            reaped += 1;
+        }
+        reaped
+    }
+
     /// Extend the turn budget of an active task by `n` turns.
     ///
     /// Fails fast with [`RegistryError::NotFound`] if the task does not exist
@@ -676,6 +760,150 @@ mod tests {
             .unwrap();
         assert_eq!(reg.reap_orphans().await, 0);
         assert_eq!(reg.get(&id).await.unwrap().status, TaskStatus::Executing);
+    }
+
+    /// Write a raw task record straight to the disk mirror (bypassing the
+    /// registry) so the boot reaper's input can carry arbitrary timestamps /
+    /// pids that the live lifecycle would not permit.
+    fn write_raw_task(state: &StateDir, id: &str, rec: &TaskRecord) {
+        let dir = state.tasks();
+        let _ = fs::create_dir_all(&dir);
+        let json = serde_json::to_string_pretty(rec).unwrap();
+        fs::write(dir.join(format!("{id}.json")), json).unwrap();
+    }
+
+    #[tokio::test]
+    async fn reap_orphans_disk_reboots_orphans_to_terminal() {
+        let state = tmp_state();
+        let reg = TaskRegistry::new(&state);
+        let now = now_ms();
+        let old = now - 3_600_000; // 1 h ago (well past both the 5 min and 60 s thresholds)
+        let dead = dead_pid();
+
+        let a = generate_task_id("sess_a", "p"); // executing, dead pid → failed
+        let b = generate_task_id("sess_b", "p"); // queued, old, no pid → cancelled
+        let c = generate_task_id("sess_c", "p"); // queued, fresh, no pid → kept
+        let d = generate_task_id("sess_d", "p"); // executing, live pid → kept
+        let e = generate_task_id("sess_e", "p"); // completed (terminal) → untouched
+
+        write_raw_task(
+            &state,
+            &a,
+            &TaskRecord {
+                id: a.clone(),
+                status: TaskStatus::Executing,
+                reason: None,
+                prompt: "p".into(),
+                cwd: "/tmp".into(),
+                session_id: "a".into(),
+                pid: Some(dead),
+                heartbeat: old,
+                turns_budget: 0,
+                created_at: old,
+                started_at: Some(old),
+                ended_at: None,
+            },
+        );
+        write_raw_task(
+            &state,
+            &b,
+            &TaskRecord {
+                id: b.clone(),
+                status: TaskStatus::Queued,
+                reason: None,
+                prompt: "p".into(),
+                cwd: "/tmp".into(),
+                session_id: "b".into(),
+                pid: None,
+                heartbeat: old,
+                turns_budget: 0,
+                created_at: old,
+                started_at: None,
+                ended_at: None,
+            },
+        );
+        write_raw_task(
+            &state,
+            &c,
+            &TaskRecord {
+                id: c.clone(),
+                status: TaskStatus::Queued,
+                reason: None,
+                prompt: "p".into(),
+                cwd: "/tmp".into(),
+                session_id: "c".into(),
+                pid: None,
+                heartbeat: now,
+                turns_budget: 0,
+                created_at: now,
+                started_at: None,
+                ended_at: None,
+            },
+        );
+        write_raw_task(
+            &state,
+            &d,
+            &TaskRecord {
+                id: d.clone(),
+                status: TaskStatus::Executing,
+                reason: None,
+                prompt: "p".into(),
+                cwd: "/tmp".into(),
+                session_id: "d".into(),
+                pid: Some(std::process::id() as u32),
+                heartbeat: now,
+                turns_budget: 0,
+                created_at: now,
+                started_at: Some(now),
+                ended_at: None,
+            },
+        );
+        write_raw_task(
+            &state,
+            &e,
+            &TaskRecord {
+                id: e.clone(),
+                status: TaskStatus::Completed,
+                reason: None,
+                prompt: "p".into(),
+                cwd: "/tmp".into(),
+                session_id: "e".into(),
+                pid: Some(dead),
+                heartbeat: old,
+                turns_budget: 0,
+                created_at: old,
+                started_at: Some(old),
+                ended_at: Some(old),
+            },
+        );
+
+        // Boot reaper: reaps exactly the two genuine orphans (a, b); leaves c,
+        // d, and the terminal e alone.
+        assert_eq!(reg.reap_orphans_disk().await, 2, "only the two orphans should be reaped");
+
+        let ra = reg.get(&a).await.unwrap();
+        assert_eq!(ra.status, TaskStatus::Failed);
+        assert_eq!(ra.reason.as_deref(), Some("process terminated / system reboot"));
+        assert!(ra.ended_at.is_some());
+
+        let rb = reg.get(&b).await.unwrap();
+        assert_eq!(rb.status, TaskStatus::Cancelled);
+        assert_eq!(rb.reason.as_deref(), Some("worker never started / process terminated"));
+        assert!(rb.ended_at.is_some());
+
+        let rc = reg.get(&c).await.unwrap();
+        assert_eq!(rc.status, TaskStatus::Queued);
+        assert!(rc.reason.is_none());
+
+        let rd = reg.get(&d).await.unwrap();
+        assert_eq!(rd.status, TaskStatus::Executing);
+        assert!(rd.reason.is_none());
+
+        let re = reg.get(&e).await.unwrap();
+        assert_eq!(re.status, TaskStatus::Completed);
+
+        // Idempotent: a second pass reaps nothing new.
+        assert_eq!(reg.reap_orphans_disk().await, 0, "a second boot pass must be a no-op");
     }
 
     #[tokio::test]
