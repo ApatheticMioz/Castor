@@ -187,26 +187,26 @@
         </div>
 
         <!-- Filter Chips with exact counts -->
-        <div class="flex items-center gap-1 overflow-x-auto text-[11px] font-mono pb-0.5" id="spanFilters">
-          <button class="filter-btn active px-2 py-0.5 rounded bg-zinc-200 text-black font-semibold flex items-center gap-1" data-filter="all">
+        <div class="flex items-center gap-1 overflow-x-auto text-[10px] font-mono pb-0.5" id="spanFilters">
+          <button class="filter-btn active px-1.5 py-0.5 rounded bg-zinc-200 text-black font-semibold flex items-center gap-1" data-filter="all">
             <span>All</span>
-            <span class="filter-count text-[10px] opacity-75">(0)</span>
+            <span class="filter-count text-[9px] opacity-75">(0)</span>
           </button>
-          <button class="filter-btn px-2 py-0.5 rounded bg-zinc-900 text-zinc-400 hover:text-white border border-zinc-800 flex items-center gap-1" data-filter="edit">
+          <button class="filter-btn px-1.5 py-0.5 rounded bg-zinc-900 text-zinc-400 hover:text-white border border-zinc-800 flex items-center gap-1" data-filter="edit">
             <span>Edits</span>
-            <span class="filter-count text-[10px] opacity-75">(0)</span>
+            <span class="filter-count text-[9px] opacity-75">(0)</span>
           </button>
-          <button class="filter-btn px-2 py-0.5 rounded bg-zinc-900 text-zinc-400 hover:text-white border border-zinc-800 flex items-center gap-1" data-filter="bash">
-            <span>Terminal</span>
-            <span class="filter-count text-[10px] opacity-75">(0)</span>
+          <button class="filter-btn px-1.5 py-0.5 rounded bg-zinc-900 text-zinc-400 hover:text-white border border-zinc-800 flex items-center gap-1" data-filter="bash">
+            <span>Term</span>
+            <span class="filter-count text-[9px] opacity-75">(0)</span>
           </button>
-          <button class="filter-btn px-2 py-0.5 rounded bg-zinc-900 text-zinc-400 hover:text-white border border-zinc-800 flex items-center gap-1" data-filter="search">
+          <button class="filter-btn px-1.5 py-0.5 rounded bg-zinc-900 text-zinc-400 hover:text-white border border-zinc-800 flex items-center gap-1" data-filter="search">
             <span>Search</span>
-            <span class="filter-count text-[10px] opacity-75">(0)</span>
+            <span class="filter-count text-[9px] opacity-75">(0)</span>
           </button>
-          <button class="filter-btn px-2 py-0.5 rounded bg-zinc-900 text-zinc-400 hover:text-white border border-zinc-800 flex items-center gap-1" data-filter="read">
+          <button class="filter-btn px-1.5 py-0.5 rounded bg-zinc-900 text-zinc-400 hover:text-white border border-zinc-800 flex items-center gap-1" data-filter="read">
             <span>Read</span>
-            <span class="filter-count text-[10px] opacity-75">(0)</span>
+            <span class="filter-count text-[9px] opacity-75">(0)</span>
           </button>
         </div>
 
@@ -433,7 +433,8 @@
               <span class="text-zinc-400 text-xs font-bold uppercase">Token Distribution (this turn)</span>
               <span class="text-[10px] text-zinc-500 font-mono" id="tokenWaterfallTotal">0 tokens</span>
             </div>
-            <svg id="tokenWaterfall" width="100%" height="44" viewBox="0 0 400 44" preserveAspectRatio="none"></svg>
+            <div id="tokenWaterfallBar" class="w-full h-4 rounded bg-zinc-900 border border-zinc-800/80 overflow-hidden flex my-1"></div>
+            <div id="tokenWaterfallSummary" class="text-[10px] text-zinc-500 font-mono -mt-0.5">--</div>
             <div class="flex items-center gap-3 text-[10px] font-mono flex-wrap" id="tokenWaterfallLegend">
               <span class="flex items-center gap-1"><span class="w-2 h-2 rounded-sm bg-emerald-500"></span>Cached <span class="text-emerald-400" id="legCached">0</span></span>
               <span class="flex items-center gap-1"><span class="w-2 h-2 rounded-sm bg-cyan-500"></span>Prefill <span class="text-cyan-400" id="legPrefill">0</span></span>
@@ -579,7 +580,7 @@
 
       ctxGaugeLabel.textContent = hasData
         ? `${maxPrompt.toLocaleString()} / ${maxContext.toLocaleString()} (${Math.round(ratio * 100)}%)`
-        : `${maxPrompt.toLocaleString()} / -- tokens`;
+        : (maxPrompt > 0 ? `${maxPrompt.toLocaleString()} tok (auto)` : `0 / auto`);
 
       // Fill color by saturation: emerald → amber (≥75%) → rose (≥90%).
       let color = '#10b981';
@@ -904,16 +905,29 @@
         }`;
 
         const isExec = task.status === 'executing';
+        const isFailed = task.status === 'failed';
+        const isCompleted = task.status === 'completed';
         const dateStr = new Date(task.createdAt).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+
+        let statusBadge = '';
+        if (isExec) {
+          statusBadge = `<span class="text-[10px] px-1 rounded bg-emerald-950 text-emerald-400 border border-emerald-800 font-semibold">LIVE</span>`;
+        } else if (isFailed) {
+          statusBadge = `<span class="text-[10px] px-1 rounded bg-rose-950/70 text-rose-400 border border-rose-900/60 flex items-center gap-1 font-mono"><span class="w-1.5 h-1.5 rounded-full bg-rose-500"></span>${dateStr}</span>`;
+        } else if (isCompleted) {
+          statusBadge = `<span class="text-[10px] px-1 rounded text-zinc-400 flex items-center gap-1 font-mono"><span class="w-1.5 h-1.5 rounded-full bg-emerald-500/70"></span>${dateStr}</span>`;
+        } else {
+          statusBadge = `<span class="text-[10px] px-1 rounded text-zinc-500 font-mono">${dateStr}</span>`;
+        }
+
+        const cleanPrompt = (task.prompt || 'No prompt').replace(/^#+\s+/gm, '').replace(/[\r\n]+/g, ' ').trim();
 
         card.innerHTML = `
           <div class="flex items-center justify-between">
-            <span class="font-medium truncate max-w-[140px] ${isActive ? 'text-white' : 'text-zinc-300'}">${escapeHtml(task.id)}</span>
-            <span class="text-[10px] px-1 rounded ${isExec ? 'bg-emerald-950 text-emerald-400 border border-emerald-800' : 'text-zinc-500'}">
-              ${isExec ? 'LIVE' : dateStr}
-            </span>
+            <span class="font-medium truncate max-w-[175px] ${isActive ? 'text-white' : 'text-zinc-300'}">${escapeHtml(task.id)}</span>
+            ${statusBadge}
           </div>
-          <p class="text-[11px] text-zinc-500 font-sans line-clamp-1">${escapeHtml(task.prompt || 'No prompt')}</p>
+          <p class="text-[11px] text-zinc-500 font-sans line-clamp-1">${escapeHtml(cleanPrompt)}</p>
         `;
 
         card.addEventListener('click', () => selectTask(task.id));
@@ -958,14 +972,27 @@
             : 'bg-card border-border-subtle text-zinc-400 hover:border-zinc-700'
         }`;
 
-        const toolBadges = toolCalls.map((tc, tIdx) => {
+        // Group consecutive identical tool calls (e.g. web_search ×6) to prevent line wrapping
+        const groupedTools = [];
+        toolCalls.forEach((tc, tIdx) => {
+          const last = groupedTools[groupedTools.length - 1];
+          if (last && last.name === tc.name) {
+            last.count++;
+            last.indices.push(tIdx);
+          } else {
+            groupedTools.push({ name: tc.name, count: 1, indices: [tIdx] });
+          }
+        });
+
+        const toolBadges = groupedTools.map(g => {
           let badgeColor = 'bg-zinc-800 text-zinc-300 border-zinc-700';
-          if (TOOL_PILL_COLORS[tc.name]) badgeColor = TOOL_PILL_COLORS[tc.name];
+          if (TOOL_PILL_COLORS[g.name]) badgeColor = TOOL_PILL_COLORS[g.name];
 
-          const isToolActive = isSelected && tIdx === state.activeToolIndex;
+          const isToolActive = isSelected && g.indices.includes(state.activeToolIndex);
           const activeClass = isToolActive ? 'ring-1 ring-white font-extrabold text-white brightness-125' : '';
+          const countLabel = g.count > 1 ? ` <span class="opacity-75">×${g.count}</span>` : '';
 
-          return `<span class="tool-pill px-1.5 py-0.2 rounded text-[10px] font-bold border ${badgeColor} ${activeClass} hover:brightness-125 transition" data-tidx="${tIdx}">${escapeHtml(tc.name)}</span>`;
+          return `<span class="tool-pill px-1.5 py-0.2 rounded text-[10px] font-bold border ${badgeColor} ${activeClass} hover:brightness-125 transition" data-tidx="${g.indices[0]}">${escapeHtml(g.name)}${countLabel}</span>`;
         }).join('');
 
         const promptSummary = (dispatch?.content || '').trim().replace(/\n/g, ' ').slice(0, 50);
@@ -1047,12 +1074,13 @@
     }
 
     // -------------------------------------------------------------------
-    // 4-Phase Token Distribution Waterfall (pure inline SVG):
+    // 4-Phase Token Distribution Waterfall (responsive CSS flex progress):
     // Cached (emerald) | Prefill (cyan) | Reasoning (amber) | Completion (blue)
     // -------------------------------------------------------------------
     function renderTokenWaterfall(turn) {
-      const svg = document.getElementById('tokenWaterfall');
-      if (!svg) return;
+      const bar = document.getElementById('tokenWaterfallBar');
+      const summary = document.getElementById('tokenWaterfallSummary');
+      if (!bar) return;
       const m = turn.dispatch?.metrics || {};
       const prompt = m.prompt_tokens || 0;
       const cached = m.cached_tokens || 0;
@@ -1061,28 +1089,30 @@
       const completion = m.completion_tokens || 0;
       const total = prefill + reasoning + completion;
 
-      const W = 400, H = 44, barY = 10, barH = 16;
       const parts = [
-        { v: cached, color: '#10b981' },     // emerald
-        { v: prefill, color: '#06b6d4' },    // cyan
-        { v: reasoning, color: '#f59e0b' },  // amber
-        { v: completion, color: '#3b82f6' }, // blue
+        { v: cached, color: '#10b981', label: 'Cached' },     // emerald
+        { v: prefill, color: '#06b6d4', label: 'Prefill' },    // cyan
+        { v: reasoning, color: '#f59e0b', label: 'Reasoning' },// amber
+        { v: completion, color: '#3b82f6', label: 'Completion' },// blue
       ];
 
-      let x = 0;
-      let segs = '';
-      for (const p of parts) {
-        if (p.v <= 0 || total <= 0) continue;
-        const w = (p.v / total) * W;
-        segs += `<rect x="${x.toFixed(2)}" y="${barY}" width="${Math.max(0.5, w).toFixed(2)}" height="${barH}" fill="${p.color}"/>`;
-        if (w > 34) {
-          segs += `<text x="${(x + w / 2).toFixed(2)}" y="${barY - 2}" fill="${p.color}" font-size="8" text-anchor="middle" font-family="monospace">${p.v.toLocaleString()}</text>`;
+      let segsHtml = '';
+      if (total > 0) {
+        for (const p of parts) {
+          if (p.v <= 0) continue;
+          const pct = (p.v / total * 100).toFixed(2);
+          segsHtml += `<div style="width:${pct}%;background:${p.color}" class="h-full hover:brightness-125 transition" title="${p.label}: ${p.v.toLocaleString()} tokens (${pct}%)"></div>`;
         }
-        x += w;
+      } else {
+        segsHtml = `<div class="w-full h-full bg-zinc-800/50"></div>`;
       }
-      let labels = `<rect x="0" y="${barY}" width="${W}" height="${barH}" fill="#18181b"/>`;
-      svg.innerHTML = labels + segs +
-        `<text x="2" y="${barY + barH + 10}" fill="#71717a" font-size="8" font-family="monospace">${total.toLocaleString()} generated-side tokens</text>`;
+      bar.innerHTML = segsHtml;
+
+      if (summary) {
+        summary.textContent = total > 0
+          ? `${total.toLocaleString()} generated-side tokens (prompt: ${prompt.toLocaleString()}, completion: ${(completion + reasoning).toLocaleString()})`
+          : 'No tokens observed for this turn';
+      }
 
       document.getElementById('tokenWaterfallTotal').textContent = `${total.toLocaleString()} tokens`;
       document.getElementById('legCached').textContent = cached.toLocaleString();
@@ -1112,7 +1142,9 @@
     function drawSparkline(svg, vals, color, rangeId) {
       if (!svg) return;
       const rangeEl = document.getElementById(rangeId);
-      const W = 320, H = 48, pad = 4;
+      const W = svg.clientWidth || 320, H = 48, pad = 4;
+      svg.setAttribute('viewBox', `0 0 ${W} ${H}`);
+      svg.removeAttribute('preserveAspectRatio');
       if (!vals || vals.length === 0) {
         svg.innerHTML = `<text x="${W / 2}" y="${H / 2}" fill="#3f3f46" font-size="9" text-anchor="middle" font-family="monospace">no data</text>`;
         if (rangeEl) rangeEl.textContent = '';
