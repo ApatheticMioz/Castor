@@ -1,90 +1,90 @@
-<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 960 210" width="100%" height="100%" role="img" aria-label="Castor 4-Stage Workspace Containment Pipeline: Path Normalizer, Symlink Lock, Shell AST Filter, and In-Memory Syntax Gate with Rollback" style="font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif;">
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 960 200" width="100%" height="100%" role="img" aria-label="Castor Workspace Containment Pipeline: Path Normalizer, Symlink Lock, Shell Filter, and AST Syntax Gate" style="font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif;">
   <defs>
-    <!-- Background Gradient -->
-    <linearGradient id="bg2" x1="0%" y1="0%" x2="100%" y2="100%">
-      <stop offset="0%" stop-color="#0b0f19"/>
-      <stop offset="50%" stop-color="#0f172a"/>
-      <stop offset="100%" stop-color="#090d16"/>
+    <!-- Obsidian Canvas Background -->
+    <linearGradient id="obsidianBg2" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#07090E"/>
+      <stop offset="50%" stop-color="#0C1017"/>
+      <stop offset="100%" stop-color="#07090E"/>
     </linearGradient>
 
     <!-- Arrow Markers -->
-    <marker id="arr-blue" viewBox="0 0 10 10" refX="6" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse">
-      <path d="M 0 1 L 9 5 L 0 9 z" fill="#38bdf8"/>
+    <marker id="arr-azure2" viewBox="0 0 10 10" refX="6" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse">
+      <path d="M 0 1 L 9 5 L 0 9 z" fill="#60A5FA"/>
     </marker>
-    <marker id="arr-emerald" viewBox="0 0 10 10" refX="6" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse">
-      <path d="M 0 1 L 9 5 L 0 9 z" fill="#10b981"/>
+    <marker id="arr-green2" viewBox="0 0 10 10" refX="6" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse">
+      <path d="M 0 1 L 9 5 L 0 9 z" fill="#10B981"/>
     </marker>
 
     <!-- Shadow -->
-    <filter id="drop2" x="-10%" y="-10%" width="120%" height="120%">
-      <feDropShadow dx="0" dy="4" stdDeviation="6" flood-color="#000000" flood-opacity="0.4"/>
+    <filter id="shadow2" x="-8%" y="-8%" width="116%" height="116%">
+      <feDropShadow dx="0" dy="4" stdDeviation="6" flood-color="#000000" flood-opacity="0.5"/>
     </filter>
   </defs>
 
   <!-- Container -->
-  <rect width="960" height="210" rx="14" fill="url(#bg2)" stroke="#1e293b" stroke-width="1.5"/>
+  <rect width="960" height="200" rx="14" fill="url(#obsidianBg2)" stroke="#1E2638" stroke-width="1.5"/>
 
   <!-- Title -->
-  <text x="480" y="28" fill="#f8fafc" font-size="14" font-weight="800" letter-spacing="1" text-anchor="middle">WORKSPACE CONTAINMENT &amp; INTEGRITY PIPELINE</text>
+  <text x="480" y="26" fill="#F8FAFC" font-size="13.5" font-weight="800" letter-spacing="0.8" text-anchor="middle">WORKSPACE CONTAINMENT &amp; INTEGRITY PIPELINE</text>
 
   <!-- ==================== 4-STAGE PIPELINE ==================== -->
-  <g transform="translate(30, 48)" filter="url(#drop2)">
+  <g transform="translate(30, 44)" filter="url(#shadow2)">
 
     <!-- Stage 1: Path Normalizer -->
     <g transform="translate(0, 0)">
-      <rect width="195" height="105" rx="12" fill="#131e33" stroke="#0284c7" stroke-width="1.4"/>
-      <circle cx="97" cy="30" r="16" fill="#0c4a6e"/>
-      <text x="97" y="36" fill="#38bdf8" font-size="16" text-anchor="middle">🛑</text>
-      <text x="97" y="66" fill="#f0f9ff" font-size="13" font-weight="800" text-anchor="middle">Path Traversal</text>
-      <rect x="25" y="74" width="145" height="20" rx="4" fill="#082f49"/>
-      <text x="97" y="88" fill="#7dd3fc" font-size="10.5" font-weight="600" text-anchor="middle">Blocks ../ &amp; drive escapes</text>
+      <rect width="195" height="100" rx="10" fill="#0C1526" stroke="#2563EB" stroke-width="1.2"/>
+      <circle cx="97" cy="28" r="14" fill="#112240"/>
+      <text x="97" y="34" fill="#60A5FA" font-size="15" text-anchor="middle">🛑</text>
+      <text x="97" y="62" fill="#F0F9FF" font-size="12.5" font-weight="800" text-anchor="middle">Path Traversal</text>
+      <rect x="25" y="70" width="145" height="18" rx="4" fill="#0A1830"/>
+      <text x="97" y="83" fill="#93C5FD" font-size="10" font-weight="600" text-anchor="middle">Blocks ../ &amp; drive escapes</text>
     </g>
 
     <!-- Arrow 1 -> 2 -->
-    <line x1="198" y1="52" x2="228" y2="52" stroke="#38bdf8" stroke-width="2.5" marker-end="url(#arr-blue)"/>
+    <line x1="198" y1="50" x2="228" y2="50" stroke="#60A5FA" stroke-width="2.2" marker-end="url(#arr-azure2)"/>
 
-    <!-- Stage 2: Symlink & Root Lock -->
+    <!-- Stage 2: Symlink Realpath -->
     <g transform="translate(235, 0)">
-      <rect width="195" height="105" rx="12" fill="#131e33" stroke="#0284c7" stroke-width="1.4"/>
-      <circle cx="97" cy="30" r="16" fill="#0c4a6e"/>
-      <text x="97" y="36" fill="#38bdf8" font-size="16" text-anchor="middle">🔒</text>
-      <text x="97" y="66" fill="#f0f9ff" font-size="13" font-weight="800" text-anchor="middle">Realpath Anchor</text>
-      <rect x="25" y="74" width="145" height="20" rx="4" fill="#082f49"/>
-      <text x="97" y="88" fill="#7dd3fc" font-size="10.5" font-weight="600" text-anchor="middle">Locks execution inside tree</text>
+      <rect width="195" height="100" rx="10" fill="#0C1526" stroke="#2563EB" stroke-width="1.2"/>
+      <circle cx="97" cy="28" r="14" fill="#112240"/>
+      <text x="97" y="34" fill="#60A5FA" font-size="15" text-anchor="middle">🔒</text>
+      <text x="97" y="62" fill="#F0F9FF" font-size="12.5" font-weight="800" text-anchor="middle">Realpath Anchor</text>
+      <rect x="25" y="70" width="145" height="18" rx="4" fill="#0A1830"/>
+      <text x="97" y="83" fill="#93C5FD" font-size="10" font-weight="600" text-anchor="middle">Locks execution inside tree</text>
     </g>
 
     <!-- Arrow 2 -> 3 -->
-    <line x1="433" y1="52" x2="463" y2="52" stroke="#38bdf8" stroke-width="2.5" marker-end="url(#arr-blue)"/>
+    <line x1="433" y1="50" x2="463" y2="50" stroke="#60A5FA" stroke-width="2.2" marker-end="url(#arr-azure2)"/>
 
-    <!-- Stage 3: Shell AST Filter -->
+    <!-- Stage 3: Shell Command Filter -->
     <g transform="translate(470, 0)">
-      <rect width="195" height="105" rx="12" fill="#131e33" stroke="#0284c7" stroke-width="1.4"/>
-      <circle cx="97" cy="30" r="16" fill="#0c4a6e"/>
-      <text x="97" y="36" fill="#38bdf8" font-size="16" text-anchor="middle">🛡️</text>
-      <text x="97" y="66" fill="#f0f9ff" font-size="13" font-weight="800" text-anchor="middle">Command Filter</text>
-      <rect x="25" y="74" width="145" height="20" rx="4" fill="#082f49"/>
-      <text x="97" y="88" fill="#7dd3fc" font-size="10.5" font-weight="600" text-anchor="middle">AST blocks rm -rf &amp; bombs</text>
+      <rect width="195" height="100" rx="10" fill="#14111E" stroke="#7C3AED" stroke-width="1.2"/>
+      <circle cx="97" cy="28" r="14" fill="#201538"/>
+      <text x="97" y="34" fill="#A78BFA" font-size="15" text-anchor="middle">🛡️</text>
+      <text x="97" y="62" fill="#F0F9FF" font-size="12.5" font-weight="800" text-anchor="middle">Command Filter</text>
+      <rect x="25" y="70" width="145" height="18" rx="4" fill="#18102C"/>
+      <text x="97" y="83" fill="#C4B5FD" font-size="10" font-weight="600" text-anchor="middle">Blocks rm -rf &amp; fork bombs</text>
     </g>
 
     <!-- Arrow 3 -> 4 -->
-    <line x1="668" y1="52" x2="698" y2="52" stroke="#10b981" stroke-width="2.5" marker-end="url(#arr-emerald)"/>
+    <line x1="668" y1="50" x2="698" y2="50" stroke="#10B981" stroke-width="2.2" marker-end="url(#arr-green2)"/>
 
-    <!-- Stage 4: In-Memory AST Gate -->
+    <!-- Stage 4: In-Memory AST Gate (ast_replace) -->
     <g transform="translate(705, 0)">
-      <rect width="195" height="105" rx="12" fill="#0c2e26" stroke="#10b981" stroke-width="1.8"/>
-      <circle cx="97" cy="30" r="16" fill="#064e3b"/>
-      <text x="97" y="36" fill="#34d399" font-size="16" text-anchor="middle">↩️</text>
-      <text x="97" y="66" fill="#ecfdf5" font-size="13" font-weight="800" text-anchor="middle">In-Memory AST Gate</text>
-      <rect x="20" y="74" width="155" height="20" rx="4" fill="#065f46"/>
-      <text x="97" y="88" fill="#a7f3d0" font-size="10.5" font-weight="700" text-anchor="middle">Syntax Error → Auto Rollback</text>
+      <rect width="195" height="100" rx="10" fill="#07221A" stroke="#10B981" stroke-width="1.5"/>
+      <circle cx="97" cy="28" r="14" fill="#0A382C"/>
+      <text x="97" y="34" fill="#34D399" font-size="15" text-anchor="middle">↩️</text>
+      <text x="97" y="62" fill="#ECFDF5" font-size="12.5" font-weight="800" text-anchor="middle">AST Syntax Gate</text>
+      <rect x="20" y="70" width="155" height="18" rx="4" fill="#082A21"/>
+      <text x="97" y="83" fill="#A7F3D0" font-size="10" font-weight="700" text-anchor="middle">Syntax Error → Auto Rollback</text>
     </g>
   </g>
 
   <!-- Bottom Result Banner -->
-  <g transform="translate(30, 168)">
-    <rect width="900" height="26" rx="6" fill="#132338" stroke="#1e3a5f" stroke-width="1"/>
-    <text x="450" y="18" fill="#38bdf8" font-size="11.5" font-weight="700" text-anchor="middle">
-      ✓ Zero-Trust Boundary  ·  ✓ Safe Native Shell  ·  ✓ In-Memory Syntax Rollback Before Disk Commit
+  <g transform="translate(30, 158)">
+    <rect width="900" height="24" rx="5" fill="#0C1017" stroke="#1E2638" stroke-width="1"/>
+    <text x="450" y="16" fill="#7DD3FC" font-size="11" font-weight="700" text-anchor="middle">
+      ✓ Zero-Trust Boundary  ·  ✓ Safe Native Shell  ·  ✓ In-Memory Syntax Rollback on Error
     </text>
   </g>
 </svg>

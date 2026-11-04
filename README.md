@@ -141,8 +141,8 @@ completes (see § *Zero-Turn Reactive Lifecycle* below).
 ### 1. DGI (Decomposition Granularity Index)
 
 A **pre-execution firewall** that stops compound "mega-prompt" thrashing before it burns
-compute or leases a slot. A **sub-25 ms 1-forward-pass logit probe** against the serving
-engine (`/v1/completions` with a guided choice of `ADMIT` / `OVERLOADED`) classifies the
+compute or leases a slot. A **1-forward-pass logit probe** (sub-25 ms on vLLM via `guided_choice`;
+scales with decode speed on llama.cpp) against the serving engine classifies the
 dispatch prompt; the decision rule is:
 
 ```
@@ -232,19 +232,19 @@ so a new prompt reuses the prior KV prefix instead of re-prefilling it.
 <img src="https://raw.githubusercontent.com/ApatheticMioz/Castor/main/docs/assets/security_sandbox.svg"
      alt="Castor workspace containment" width="100%">
 
-Castor enforces **zero-trust containment** at every tool boundary, in this order:
+Castor enforces **zero-trust containment** at every tool boundary:
 
 | Layer | Mechanism | What it blocks |
 |---|---|---|
-| **1 — Path normalizer** | Normalizes traversal (`../`), drive letters, device namespaces | `../../etc/passwd`, `C:\`, `NUL`, `CON` |
+| **1 — Path normalizer** | Canonical path resolution & device namespace neutralization | `../../etc/passwd`, `C:\`, `NUL`, `CON` |
 | **2 — Symlink realpath** | Resolves canonical `realpath` of every target before acting | Symlinks pointing out of the workspace root |
-| **3 — Workspace-root immutability** | Root and parent paths are read-only from the tool's POV | Accidental or malicious deletion of the tree itself |
-| **4 — Dangerous command filter** | AST-level inspection of `bash` commands | `rm -rf /`, `format`, `dd`, fork bombs, `mkfs` |
-| **5 — In-memory AST syntax gate** | Parse-checks the file **before** it hits disk | Syntactically broken Rust / TS / JS / Python / JSON edits → **automatic in-memory rollback** |
+| **3 — Out-of-tree guard** | Enforces workspace boundary (`refuse_out_of_tree`) | Direct mutations targeting system or parent directories |
+| **4 — Dangerous command filter** | Signature & pattern blocks on shell commands (`shell.rs`) | `rm -rf /`, `format`, `dd`, fork bombs, `mkfs`, shell injection bypasses |
+| **5 — In-memory AST syntax gate** | Structural AST parser validation on `ast_replace` | Syntax parse errors on Rust / TS / JS / Python / JSON → **automatic in-memory rollback** |
 
-Every edit passes Layer 5 **before** the disk commit; if the AST parse fails, the
-file is atomically rolled back to its prior state. The sandbox never trusts the
-prompt, the model, or the tool author.
+File edits in `fs.rs` use atomic fsync writes via `NamedTempFile` preventing torn states;
+structural mutations via `ast_replace` pass Layer 5 **before** the disk commit, atomically
+rolling back on syntax parse failure.
 
 ---
 
@@ -264,7 +264,7 @@ Castor registers **three stdio MCP tools** with any client:
 |---|---|---|
 | `read_file` | core | Read files, PDFs (native in-memory extraction), and images (PNG/JPG/WebP/GIF/BMP) |
 | `write_file` | core | Create or overwrite files (sandboxed to the workspace) |
-| `edit_file` | core | Exact-substring edit, uniqueness-guarded, in-memory AST validation before commit |
+| `edit_file` | core | Exact-substring edit, uniqueness-guarded, atomic tempfile replacement |
 | `list_dir` | core | Directory listing with depth control |
 | `search_code` | core | Deterministic path-filtered text/regex search across the workspace |
 | `bash` | core | Isolated shell with the 5-layer filter; native `git` and `python3` |

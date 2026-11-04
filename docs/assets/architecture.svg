@@ -1,224 +1,212 @@
-<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1000 420" width="100%" height="100%" role="img" aria-label="Castor Architecture Diagram: Cloud Frontier pairs with Local Frontier across the Castor MCP Bridge" style="font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif;">
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1000 380" width="100%" height="100%" role="img" aria-label="Castor Architecture Diagram: The Dioscuri Dyad — Cloud Frontier pairs with Local Frontier across the Castor MCP Bridge" style="font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif;">
   <defs>
-    <!-- Background Gradient -->
-    <linearGradient id="bg" x1="0%" y1="0%" x2="100%" y2="100%">
-      <stop offset="0%" stop-color="#0b0f19"/>
-      <stop offset="50%" stop-color="#0f172a"/>
-      <stop offset="100%" stop-color="#090d16"/>
+    <!-- Obsidian Canvas Background -->
+    <linearGradient id="obsidianBg" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#07090E"/>
+      <stop offset="50%" stop-color="#0C1017"/>
+      <stop offset="100%" stop-color="#07090E"/>
     </linearGradient>
 
-    <!-- Cloud Gradient -->
-    <linearGradient id="cloudGlow" x1="0%" y1="0%" x2="100%" y2="100%">
-      <stop offset="0%" stop-color="#8b5cf6"/>
-      <stop offset="100%" stop-color="#6366f1"/>
+    <!-- Pollux Azure (Cloud / Reasoner) -->
+    <linearGradient id="polluxAzure" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#60A5FA"/>
+      <stop offset="55%" stop-color="#2563EB"/>
+      <stop offset="100%" stop-color="#1D4ED8"/>
     </linearGradient>
 
-    <!-- Bridge Gradient -->
-    <linearGradient id="bridgeGlow" x1="0%" y1="0%" x2="100%" y2="100%">
-      <stop offset="0%" stop-color="#0ea5e9"/>
-      <stop offset="100%" stop-color="#10b981"/>
+    <!-- Castor Amber (Local / Execution) -->
+    <linearGradient id="castorAmber" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#FDE047"/>
+      <stop offset="55%" stop-color="#F97316"/>
+      <stop offset="100%" stop-color="#EA580C"/>
     </linearGradient>
 
-    <!-- Local Gradient -->
-    <linearGradient id="localGlow" x1="0%" y1="0%" x2="100%" y2="100%">
-      <stop offset="0%" stop-color="#f59e0b"/>
-      <stop offset="100%" stop-color="#ea580c"/>
+    <!-- Bridge Gradient (Dyad Junction) -->
+    <linearGradient id="dyadBridge" x1="0%" y1="0%" x2="100%" y2="0%">
+      <stop offset="0%" stop-color="#2563EB"/>
+      <stop offset="50%" stop-color="#0284C7"/>
+      <stop offset="100%" stop-color="#EA580C"/>
     </linearGradient>
 
-    <!-- Badge Gradient -->
-    <linearGradient id="zeroCostGlow" x1="0%" y1="0%" x2="100%" y2="0%">
-      <stop offset="0%" stop-color="#10b981"/>
+    <!-- Emerald Savings Accent -->
+    <linearGradient id="savingsGreen" x1="0%" y1="0%" x2="100%" y2="0%">
+      <stop offset="0%" stop-color="#10B981"/>
       <stop offset="100%" stop-color="#059669"/>
     </linearGradient>
 
     <!-- Arrow Markers -->
-    <marker id="arr-purple" viewBox="0 0 10 10" refX="6" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse">
-      <path d="M 0 1 L 9 5 L 0 9 z" fill="#a855f7"/>
+    <marker id="arr-azure" viewBox="0 0 10 10" refX="6" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse">
+      <path d="M 0 1 L 9 5 L 0 9 z" fill="#60A5FA"/>
     </marker>
     <marker id="arr-green" viewBox="0 0 10 10" refX="6" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse">
-      <path d="M 0 1 L 9 5 L 0 9 z" fill="#10b981"/>
+      <path d="M 0 1 L 9 5 L 0 9 z" fill="#10B981"/>
     </marker>
 
-    <!-- Shadow -->
-    <filter id="drop" x="-10%" y="-10%" width="120%" height="120%">
-      <feDropShadow dx="0" dy="6" stdDeviation="10" flood-color="#000000" flood-opacity="0.5"/>
+    <!-- Clean Shadow Filter -->
+    <filter id="shadow" x="-8%" y="-8%" width="116%" height="116%">
+      <feDropShadow dx="0" dy="4" stdDeviation="8" flood-color="#000000" flood-opacity="0.6"/>
     </filter>
   </defs>
 
   <!-- Canvas Background -->
-  <rect width="1000" height="420" rx="16" fill="url(#bg)" stroke="#1e293b" stroke-width="1.5"/>
+  <rect width="1000" height="380" rx="14" fill="url(#obsidianBg)" stroke="#1E2638" stroke-width="1.5"/>
 
   <!-- ========================================================================= -->
-  <!-- 1. CLOUD FRONTIER (LEFT)                                                  -->
+  <!-- 1. CLOUD FRONTIER — POLLUX AZURE (LEFT)                                   -->
   <!-- ========================================================================= -->
-  <g transform="translate(45, 55)" filter="url(#drop)">
-    <!-- Container Card -->
-    <rect width="250" height="290" rx="16" fill="#131b2e" stroke="#7c3aed" stroke-width="1.6"/>
+  <g transform="translate(45, 45)" filter="url(#shadow)">
+    <!-- Card Container -->
+    <rect width="250" height="260" rx="14" fill="#0C1220" stroke="#2563EB" stroke-width="1.5"/>
     
-    <!-- Cloud Icon Illustration -->
-    <g transform="translate(65, 25)">
-      <!-- Stylized Cloud Vector -->
-      <path d="M 25 50 
-               A 24 24 0 0 1 45 22 
-               A 32 32 0 0 1 95 24 
-               A 22 22 0 0 1 115 50 
-               A 16 16 0 0 1 110 68 
-               L 18 68 
-               A 16 16 0 0 1 25 50 Z" 
-            fill="url(#cloudGlow)" opacity="0.95"/>
-      <!-- Brain / Sparkle Emblem -->
-      <path d="M 60 32 L 63 42 L 73 45 L 63 48 L 60 58 L 57 48 L 47 45 L 57 42 Z" fill="#ffffff"/>
+    <!-- Stylized Cloud Vector -->
+    <g transform="translate(68, 18)">
+      <path d="M 22 45 
+               A 22 22 0 0 1 42 20 
+               A 28 28 0 0 1 86 22 
+               A 20 20 0 0 1 104 45 
+               A 14 14 0 0 1 98 62 
+               L 16 62 
+               A 14 14 0 0 1 22 45 Z" 
+            fill="url(#polluxAzure)"/>
+      <circle cx="58" cy="40" r="4" fill="#FFFFFF"/>
     </g>
 
     <!-- Typography -->
-    <text x="125" y="125" fill="#f8fafc" font-size="18" font-weight="800" text-anchor="middle" letter-spacing="0.5">Cloud Frontier</text>
-    <text x="125" y="146" fill="#a78bfa" font-size="13" font-weight="600" text-anchor="middle">Plans · Reasons · Synthesizes</text>
+    <text x="125" y="110" fill="#F8FAFC" font-size="17" font-weight="800" text-anchor="middle" letter-spacing="0.4">Cloud Frontier</text>
+    <text x="125" y="128" fill="#93C5FD" font-size="12" font-weight="600" text-anchor="middle">Plans · Reasons · Synthesizes</text>
 
-    <!-- Model Logos / Badges -->
-    <g transform="translate(25, 168)">
-      <rect width="95" height="26" rx="6" fill="#201a42" stroke="#6d28d9" stroke-width="1"/>
-      <text x="47" y="17" fill="#ddd6fe" font-size="11" font-weight="700" text-anchor="middle">Claude Code</text>
+    <!-- Supported Orchestrators -->
+    <g transform="translate(25, 145)">
+      <rect width="95" height="24" rx="5" fill="#111C33" stroke="#1D4ED8" stroke-width="0.8"/>
+      <text x="47" y="16" fill="#BFDBFE" font-size="10.5" font-weight="700" text-anchor="middle">Claude Code</text>
 
-      <rect x="105" width="95" height="26" rx="6" fill="#201a42" stroke="#6d28d9" stroke-width="1"/>
-      <text x="152" y="17" fill="#ddd6fe" font-size="11" font-weight="700" text-anchor="middle">Antigravity</text>
+      <rect x="105" width="95" height="24" rx="5" fill="#111C33" stroke="#1D4ED8" stroke-width="0.8"/>
+      <text x="152" y="16" fill="#BFDBFE" font-size="10.5" font-weight="700" text-anchor="middle">Antigravity</text>
 
-      <rect y="34" width="95" height="26" rx="6" fill="#201a42" stroke="#6d28d9" stroke-width="1"/>
-      <text x="47" y="51" fill="#ddd6fe" font-size="11" font-weight="700" text-anchor="middle">Cursor</text>
+      <rect y="30" width="95" height="24" rx="5" fill="#111C33" stroke="#1D4ED8" stroke-width="0.8"/>
+      <text x="47" y="46" fill="#BFDBFE" font-size="10.5" font-weight="700" text-anchor="middle">Cursor</text>
 
-      <rect x="105" y="34" width="95" height="26" rx="6" fill="#1e1e38" stroke="#4c1d95" stroke-width="0.8"/>
-      <text x="152" y="51" fill="#c4b5fd" font-size="11" font-weight="600" text-anchor="middle">Any MCP</text>
+      <rect x="105" y="30" width="95" height="24" rx="5" fill="#0E172A" stroke="#1E293B" stroke-width="0.8"/>
+      <text x="152" y="46" fill="#94A3B8" font-size="10.5" font-weight="600" text-anchor="middle">Any MCP</text>
     </g>
 
-    <!-- Context Protection Badge -->
-    <g transform="translate(25, 240)">
-      <rect width="200" height="30" rx="8" fill="#1e1838" stroke="#8b5cf6" stroke-width="1"/>
-      <text x="100" y="20" fill="#e9d5ff" font-size="11.5" font-weight="700" text-anchor="middle">🧠 High-Level Reasoning</text>
+    <!-- Protected Context Callout -->
+    <g transform="translate(25, 215)">
+      <rect width="200" height="26" rx="6" fill="#101C36" stroke="#2563EB" stroke-width="0.8"/>
+      <text x="100" y="17" fill="#60A5FA" font-size="11" font-weight="700" text-anchor="middle">Protected Context · Diffs Only</text>
     </g>
   </g>
 
   <!-- ========================================================================= -->
   <!-- 2. CASTOR MCP BRIDGE (CENTER)                                             -->
   <!-- ========================================================================= -->
-  <g transform="translate(370, 55)" filter="url(#drop)">
-    <!-- Container Card -->
-    <rect width="260" height="290" rx="16" fill="#0d1b2a" stroke="#0ea5e9" stroke-width="1.8"/>
+  <g transform="translate(370, 45)" filter="url(#shadow)">
+    <!-- Card Container -->
+    <rect width="260" height="260" rx="14" fill="#0B1320" stroke="url(#dyadBridge)" stroke-width="1.6"/>
 
-    <!-- Bridge Gateway / Bolt Illustration -->
-    <g transform="translate(85, 20)">
-      <!-- Gateway Arch -->
-      <path d="M 15 65 L 15 28 Q 45 10 75 28 L 75 65" fill="none" stroke="url(#bridgeGlow)" stroke-width="3"/>
+    <!-- Central Microkernel Emblem -->
+    <g transform="translate(90, 18)">
+      <circle cx="40" cy="35" r="24" fill="#0E1A2D" stroke="#38BDF8" stroke-width="1.8"/>
       <!-- Lightning Bolt / MCP Core -->
-      <circle cx="45" cy="40" r="22" fill="#0f2942" stroke="#38bdf8" stroke-width="1.5"/>
-      <path d="M 47 26 L 36 41 L 46 41 L 43 54 L 54 39 L 44 39 Z" fill="#38bdf8"/>
+      <path d="M 42 22 L 32 36 L 41 36 L 38 48 L 48 34 L 39 34 Z" fill="#60A5FA"/>
     </g>
 
     <!-- Typography -->
-    <text x="130" y="125" fill="#f8fafc" font-size="19" font-weight="800" text-anchor="middle" letter-spacing="0.5">Castor Bridge</text>
-    <text x="130" y="146" fill="#38bdf8" font-size="13" font-weight="600" text-anchor="middle">In-Process Rust Microkernel</text>
+    <text x="130" y="110" fill="#F8FAFC" font-size="18" font-weight="800" text-anchor="middle" letter-spacing="0.4">Castor Bridge</text>
+    <text x="130" y="128" fill="#7DD3FC" font-size="12" font-weight="600" text-anchor="middle">In-Process Rust Microkernel</text>
 
-    <!-- Feature Pillars (Icons + 2 words) -->
-    <g transform="translate(25, 168)">
-      <!-- Pillar 1: DGI Firewall -->
-      <rect width="210" height="30" rx="6" fill="#082f49" stroke="#0284c7" stroke-width="1"/>
-      <text x="15" y="20" fill="#38bdf8" font-size="13">🛡️</text>
-      <text x="36" y="19" fill="#e0f2fe" font-size="11.5" font-weight="700">DGI Logit Firewall</text>
-      <text x="195" y="19" fill="#7dd3fc" font-size="10" text-anchor="end">&lt;25ms</text>
+    <!-- Three Architectural Pillars -->
+    <g transform="translate(25, 145)">
+      <!-- 1. DGI -->
+      <rect width="210" height="26" rx="5" fill="#0C1B2E" stroke="#0284C7" stroke-width="0.8"/>
+      <text x="12" y="17" fill="#60A5FA" font-size="11">🛡️</text>
+      <text x="32" y="17" fill="#E0F2FE" font-size="11" font-weight="700">DGI Logit Firewall</text>
+      <text x="198" y="17" fill="#7DD3FC" font-size="9.5" text-anchor="end">Gate</text>
 
-      <!-- Pillar 2: Token Semaphore -->
-      <rect y="36" width="210" height="30" rx="6" fill="#082f49" stroke="#0284c7" stroke-width="1"/>
-      <text x="15" y="56" fill="#38bdf8" font-size="13">🚥</text>
-      <text x="36" y="55" fill="#e0f2fe" font-size="11.5" font-weight="700">Token-Budget Semaphore</text>
-      <text x="195" y="55" fill="#7dd3fc" font-size="10" text-anchor="end">KV pool</text>
+      <!-- 2. Token Semaphore -->
+      <rect y="32" width="210" height="26" rx="5" fill="#0C1B2E" stroke="#0284C7" stroke-width="0.8"/>
+      <text x="12" y="49" fill="#60A5FA" font-size="11">🚥</text>
+      <text x="32" y="49" fill="#E0F2FE" font-size="11" font-weight="700">Token Semaphore</text>
+      <text x="198" y="49" fill="#7DD3FC" font-size="9.5" text-anchor="end">KV pool</text>
 
-      <!-- Pillar 3: Zero-Turn Wait -->
-      <rect y="72" width="210" height="30" rx="6" fill="#064e3b" stroke="#10b981" stroke-width="1"/>
-      <text x="15" y="92" fill="#34d399" font-size="13">⚡</text>
-      <text x="36" y="91" fill="#d1fae5" font-size="11.5" font-weight="700">Zero-Turn Wait (:18021)</text>
-      <text x="195" y="91" fill="#6ee7b7" font-size="10" text-anchor="end">$0 idle</text>
+      <!-- 3. Zero-Turn Wait -->
+      <rect y="64" width="210" height="26" rx="5" fill="#062E25" stroke="#10B981" stroke-width="0.8"/>
+      <text x="12" y="81" fill="#34D399" font-size="11">⚡</text>
+      <text x="32" y="81" fill="#D1FAE5" font-size="11" font-weight="700">Zero-Turn Wait (:18021)</text>
+      <text x="198" y="81" fill="#6EE7B7" font-size="9.5" text-anchor="end">$0 wait</text>
     </g>
   </g>
 
   <!-- ========================================================================= -->
-  <!-- 3. LOCAL FRONTIER (RIGHT)                                                 -->
+  <!-- 3. LOCAL FRONTIER — CASTOR AMBER (RIGHT)                                  -->
   <!-- ========================================================================= -->
-  <g transform="translate(705, 55)" filter="url(#drop)">
-    <!-- Container Card -->
-    <rect width="250" height="290" rx="16" fill="#1c1613" stroke="#ea580c" stroke-width="1.6"/>
+  <g transform="translate(705, 45)" filter="url(#shadow)">
+    <!-- Card Container -->
+    <rect width="250" height="260" rx="14" fill="#16100C" stroke="#EA580C" stroke-width="1.5"/>
 
-    <!-- Workstation / Terminal Illustration -->
-    <g transform="translate(75, 18)">
-      <!-- Monitor Screen -->
-      <rect width="100" height="60" rx="6" fill="#0f172a" stroke="url(#localGlow)" stroke-width="2"/>
-      <!-- Monitor Stand -->
-      <path d="M 42 60 L 35 70 L 65 70 L 58 60 Z" fill="#475569"/>
-      <!-- Code Prompt Symbol on Screen -->
-      <text x="12" y="24" fill="#22c55e" font-size="12" font-family="monospace" font-weight="bold">&gt;_</text>
-      <line x1="30" y1="21" x2="65" y2="21" stroke="#38bdf8" stroke-width="2"/>
-      <line x1="12" y1="35" x2="85" y2="35" stroke="#f59e0b" stroke-width="2"/>
-      <line x1="12" y1="46" x2="50" y2="46" stroke="#a855f7" stroke-width="2"/>
+    <!-- Terminal Monitor Illustration -->
+    <g transform="translate(80, 16)">
+      <rect width="90" height="54" rx="6" fill="#0C0A09" stroke="url(#castorAmber)" stroke-width="1.6"/>
+      <path d="M 38 54 L 32 64 L 58 64 L 52 54 Z" fill="#44403C"/>
+      <text x="10" y="22" fill="#FDE047" font-size="11" font-family="monospace" font-weight="bold">&gt;_</text>
+      <line x1="28" y1="19" x2="60" y2="19" stroke="#F97316" stroke-width="1.8"/>
+      <line x1="10" y1="31" x2="78" y2="31" stroke="#60A5FA" stroke-width="1.8"/>
+      <line x1="10" y1="41" x2="48" y2="41" stroke="#10B981" stroke-width="1.8"/>
     </g>
 
     <!-- Typography -->
-    <text x="125" y="125" fill="#f8fafc" font-size="18" font-weight="800" text-anchor="middle" letter-spacing="0.5">Local Frontier</text>
-    <text x="125" y="146" fill="#fb923c" font-size="13" font-weight="600" text-anchor="middle">vLLM · llama.cpp · LM Studio</text>
+    <text x="125" y="110" fill="#F8FAFC" font-size="17" font-weight="800" text-anchor="middle" letter-spacing="0.4">Local Frontier</text>
+    <text x="125" y="128" fill="#FDBA74" font-size="12" font-weight="600" text-anchor="middle">vLLM · llama.cpp · LM Studio</text>
 
-    <!-- The $0 Local Tool Loop -->
-    <g transform="translate(20, 168)">
-      <rect width="210" height="66" rx="10" fill="#291811" stroke="#c2410c" stroke-width="1.2"/>
-      
-      <!-- Loop Circle / Cycle -->
-      <g transform="translate(14, 12)">
-        <circle cx="16" cy="19" r="14" fill="#431407" stroke="#f97316" stroke-width="1.5"/>
-        <text x="16" y="24" fill="#ffedd5" font-size="14" text-anchor="middle">🔄</text>
-      </g>
-      
-      <text x="54" y="26" fill="#fed7aa" font-size="12" font-weight="800">In-Tree Tool Loop</text>
-      <text x="54" y="44" fill="#fdba74" font-size="11">read · edit · bash · test</text>
-      <text x="54" y="58" fill="#34d399" font-size="10.5" font-weight="700">Sandbox Protected</text>
+    <!-- In-Tree Tool Loop -->
+    <g transform="translate(20, 145)">
+      <rect width="210" height="54" rx="8" fill="#24140D" stroke="#C2410C" stroke-width="1"/>
+      <text x="14" y="24" fill="#FED7AA" font-size="11.5" font-weight="800">🔄 In-Tree Tool Loop</text>
+      <text x="14" y="42" fill="#FDBA74" font-size="10.5">read · write · edit · bash · search</text>
     </g>
 
     <!-- Cost Highlight Badge -->
-    <g transform="translate(20, 244)">
-      <rect width="210" height="28" rx="8" fill="url(#zeroCostGlow)"/>
-      <text x="105" y="19" fill="#ffffff" font-size="12" font-weight="800" text-anchor="middle" letter-spacing="0.5">★ $0 CLOUD TOKEN COST ★</text>
+    <g transform="translate(20, 208)">
+      <rect width="210" height="28" rx="6" fill="url(#savingsGreen)"/>
+      <text x="105" y="18" fill="#FFFFFF" font-size="11" font-weight="800" text-anchor="middle" letter-spacing="0.5">★ $0 CLOUD TOKEN COST ★</text>
     </g>
   </g>
 
   <!-- ========================================================================= -->
-  <!-- 4. DATA FLOW ARROWS & LABELS                                              -->
+  <!-- 4. DATA FLOW CONNECTORS                                                   -->
   <!-- ========================================================================= -->
 
-  <!-- Top Dispatch Arrow: Cloud -> Castor -> Local -->
-  <path d="M 295 130 L 370 130" stroke="#a855f7" stroke-width="2.5" marker-end="url(#arr-purple)"/>
-  <rect x="303" y="112" width="60" height="18" rx="4" fill="#241442" stroke="#7c3aed" stroke-width="0.8"/>
-  <text x="333" y="125" fill="#ddd6fe" font-size="9.5" font-weight="700" text-anchor="middle">Prompt</text>
+  <!-- Top Dispatch: Cloud -> Castor -> Local -->
+  <path d="M 295 115 L 370 115" stroke="#60A5FA" stroke-width="2.5" marker-end="url(#arr-azure)"/>
+  <rect x="303" y="98" width="60" height="17" rx="4" fill="#0C1A30" stroke="#2563EB" stroke-width="0.8"/>
+  <text x="333" y="110" fill="#BFDBFE" font-size="9" font-weight="700" text-anchor="middle">Prompt</text>
 
-  <path d="M 630 130 L 705 130" stroke="#a855f7" stroke-width="2.5" marker-end="url(#arr-purple)"/>
-  <rect x="640" y="112" width="56" height="18" rx="4" fill="#241442" stroke="#7c3aed" stroke-width="0.8"/>
-  <text x="668" y="125" fill="#ddd6fe" font-size="9.5" font-weight="700" text-anchor="middle">Dispatch</text>
+  <path d="M 630 115 L 705 115" stroke="#60A5FA" stroke-width="2.5" marker-end="url(#arr-azure)"/>
+  <rect x="640" y="98" width="56" height="17" rx="4" fill="#0C1A30" stroke="#2563EB" stroke-width="0.8"/>
+  <text x="668" y="110" fill="#BFDBFE" font-size="9" font-weight="700" text-anchor="middle">Dispatch</text>
 
-  <!-- Bottom Return Arrow: Local -> Castor -> Cloud -->
-  <path d="M 705 280 L 630 280" stroke="#10b981" stroke-width="2.5" marker-end="url(#arr-green)"/>
-  <rect x="638" y="262" width="60" height="18" rx="4" fill="#063c2c" stroke="#10b981" stroke-width="0.8"/>
-  <text x="668" y="275" fill="#a7f3d0" font-size="9.5" font-weight="700" text-anchor="middle">Verified</text>
+  <!-- Bottom Return: Local -> Castor -> Cloud -->
+  <path d="M 705 250 L 630 250" stroke="#10B981" stroke-width="2.5" marker-end="url(#arr-green)"/>
+  <rect x="638" y="233" width="60" height="17" rx="4" fill="#04261E" stroke="#10B981" stroke-width="0.8"/>
+  <text x="668" y="245" fill="#A7F3D0" font-size="9" font-weight="700" text-anchor="middle">Verified</text>
 
-  <path d="M 370 280 L 295 280" stroke="#10b981" stroke-width="2.5" marker-end="url(#arr-green)"/>
-  <rect x="308" y="262" width="50" height="18" rx="4" fill="#063c2c" stroke="#10b981" stroke-width="0.8"/>
-  <text x="333" y="275" fill="#a7f3d0" font-size="9.5" font-weight="700" text-anchor="middle">Diffs</text>
+  <path d="M 370 250 L 295 250" stroke="#10B981" stroke-width="2.5" marker-end="url(#arr-green)"/>
+  <rect x="308" y="233" width="50" height="17" rx="4" fill="#04261E" stroke="#10B981" stroke-width="0.8"/>
+  <text x="333" y="245" fill="#A7F3D0" font-size="9" font-weight="700" text-anchor="middle">Diffs</text>
 
   <!-- ========================================================================= -->
   <!-- 5. BOTTOM PUNCHLINE BANNER                                                -->
   <!-- ========================================================================= -->
-  <g transform="translate(100, 365)">
-    <rect width="800" height="36" rx="10" fill="#111827" stroke="#374151" stroke-width="1.2"/>
-    <text x="400" y="23" fill="#f8fafc" font-size="13" font-weight="700" text-anchor="middle">
-      <tspan fill="#c084fc">Cloud plans once</tspan>
-      <tspan fill="#64748b"> ──► </tspan>
-      <tspan fill="#38bdf8">Castor orchestrates</tspan>
-      <tspan fill="#64748b"> ──► </tspan>
-      <tspan fill="#fb923c">Local engine loops for $0</tspan>
-      <tspan fill="#64748b"> ──► </tspan>
-      <tspan fill="#34d399">Only diff returns to cloud</tspan>
+  <g transform="translate(100, 325)">
+    <rect width="800" height="34" rx="8" fill="#0C1017" stroke="#1E2638" stroke-width="1.2"/>
+    <text x="400" y="21" fill="#F8FAFC" font-size="12" font-weight="700" text-anchor="middle">
+      <tspan fill="#60A5FA">Cloud plans once</tspan>
+      <tspan fill="#475569"> ──► </tspan>
+      <tspan fill="#38BDF8">Castor orchestrates</tspan>
+      <tspan fill="#475569"> ──► </tspan>
+      <tspan fill="#F97316">Local engine loops for $0</tspan>
+      <tspan fill="#475569"> ──► </tspan>
+      <tspan fill="#10B981">Only diff returns to cloud</tspan>
     </text>
   </g>
 </svg>
