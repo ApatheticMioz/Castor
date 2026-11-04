@@ -31,6 +31,12 @@ const TIMEOUT: std::time::Duration = std::time::Duration::from_secs(15);
 /// Output cap for [`WebClient::fetch_docs`] (~20KB).
 const MAX_OUTPUT_BYTES: usize = 20_000;
 
+/// Hard cap on the total response body streamed by [`WebClient::fetch_docs`]
+/// (10 MiB). Exceeding it aborts the fetch with a typed
+/// [`WebError::SizeExceeded`] error instead of buffering the whole payload in
+/// memory.
+const MAX_FETCH_BYTES: usize = 10 * 1024 * 1024;
+
 /// User-Agent sent on every request.
 const USER_AGENT: &str = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36 Castor/0.1.0";
 
@@ -66,6 +72,10 @@ pub enum WebError {
         content_type: String,
         byte_length: usize,
     },
+    #[error(
+        "FetchSizeExceededError: '{url}' body exceeds the {max_bytes}-byte cap; aborting fetch (consider a smaller page_range or a more specific URL)"
+    )]
+    SizeExceeded { url: String, max_bytes: usize },
     #[error("PdfError: {reason}")]
     PdfParse { reason: String },
 }
@@ -342,7 +352,7 @@ impl WebClient {
             return Err(WebError::InvalidUrl(scheme.to_string()));
         }
 
-        let resp = self
+        let mut resp = self
             .client
             .get(parsed.clone())
             .header(
@@ -375,16 +385,7 @@ impl WebClient {
             .unwrap_or("")
             .to_lowercase();
 
-        let bytes = resp
-            .bytes()
-            .await
-            .map_err(|e| WebError::Http {
-                method: "GET".into(),
-                url: url.to_string(),
-                status: 0,
-                reason: e.to_string(),
-            })?
-            .to_vec();
+        let bytes = read_body_capped(&mut resp, url).await?;
 
         let category = classify(&content_type, &bytes);
         let (out_type, markdown, length) = match category {
@@ -492,6 +493,45 @@ fn classify(content_type: &str, bytes: &[u8]) -> Category {
 fn has_nul_byte(bytes: &[u8]) -> bool {
     let limit = bytes.len().min(8192);
     bytes[..limit].contains(&0)
+}
+
+/// Stream a `reqwest` response body into memory chunk-by-chunk, enforcing a
+/// hard byte cap.
+///
+/// Unlike [`reqwest::Response::bytes`] (which buffers the entire body with no
+/// bound), this reads the body as a stream of [`reqwest::Response::chunk`]s and
+/// aborts with a typed [`WebError::SizeExceeded`] as soon as the accumulated
+/// total would exceed [`MAX_FETCH_BYTES`] (10 MiB). A hostile or misbehaving
+/// endpoint that streams gigabytes of content can no longer force the process
+/// to allocate it all before we get a chance to refuse.
+///
+/// Transport-level failures (connection reset mid-stream, etc.) map to
+/// [`WebError::Http`] with status `0`.
+async fn read_body_capped(resp: &mut reqwest::Response, url: &str) -> Result<Vec<u8>, WebError> {
+    let mut buf: Vec<u8> = Vec::new();
+    loop {
+        let chunk = resp
+            .chunk()
+            .await
+            .map_err(|e| WebError::Http {
+                method: "GET".into(),
+                url: url.to_string(),
+                status: 0,
+                reason: e.to_string(),
+            })?;
+        match chunk {
+            None => return Ok(buf),
+            Some(c) => {
+                if buf.len() + c.len() > MAX_FETCH_BYTES {
+                    return Err(WebError::SizeExceeded {
+                        url: url.to_string(),
+                        max_bytes: MAX_FETCH_BYTES,
+                    });
+                }
+                buf.extend_from_slice(&c);
+            }
+        }
+    }
 }
 
 /// Truncate to the output cap, cutting at a clean boundary and appending a

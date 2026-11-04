@@ -580,20 +580,26 @@ impl FsExecutor {
     }
 
     fn atomic_write(&self, target: &Path, content: &str) -> Result<(), FsError> {
+        use std::io::Write;
+
         let parent = target.parent().unwrap_or(Path::new("."));
         fs::create_dir_all(parent)?;
-        let tmp = parent.join(format!(
-            ".castor_tmp_{}_{}",
-            std::process::id(),
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap()
-                .as_nanos()
-        ));
-        fs::write(&tmp, content)?;
-        if let Err(e) = fs::rename(&tmp, target) {
-            let _ = fs::remove_file(&tmp);
-            return Err(e.into());
+
+        // Crate-first atomic write: `tempfile::NamedTempFile::new_in(parent)`
+        // guarantees the temp file lives on the same filesystem as the target
+        // (so `persist`'s rename is atomic), `write_all` + `sync_all` force the
+        // bytes to disk before the swap, and `persist(target)` atomically
+        // renames it into place. Every failure maps to `FsError::Io`.
+        let mut tmp = tempfile::NamedTempFile::new_in(parent)?;
+        tmp.write_all(content.as_bytes())?;
+        tmp.as_file().sync_all()?;
+        if let Err(e) = tmp.persist(target) {
+            // `PersistError` carries the underlying `io::Error` (rename/lock
+            // failure) plus the un-persisted temp file, which is cleaned up by
+            // its `Drop`. Map it to a plain IO error; the existing target is
+            // left untouched.
+            let io_err: std::io::Error = e.into();
+            return Err(FsError::Io(io_err));
         }
         Ok(())
     }

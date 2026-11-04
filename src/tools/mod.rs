@@ -333,8 +333,9 @@ impl ToolExecutor for CompositeExecutor {
                         }
                         Ok(ToolOutcome { text })
                     }
-                    Err(e) => Ok(ToolOutcome {
-                        text: format!("Error: {e}"),
+                    Err(e) => Err(ToolError::Execute {
+                        name: name.to_string(),
+                        message: e.to_string(),
                     }),
                 }
             }
@@ -373,8 +374,9 @@ impl ToolExecutor for CompositeExecutor {
                             })
                         }
                     }
-                    Err(e) => Ok(ToolOutcome {
-                        text: format!("Error: {e}"),
+                    Err(e) => Err(ToolError::Execute {
+                        name: name.to_string(),
+                        message: e.to_string(),
                     }),
                 }
             }
@@ -399,8 +401,9 @@ impl ToolExecutor for CompositeExecutor {
                             summary.rolled_back.len()
                         ),
                     }),
-                    Err(e) => Ok(ToolOutcome {
-                        text: format!("Error: {e}"),
+                    Err(e) => Err(ToolError::Execute {
+                        name: name.to_string(),
+                        message: e.to_string(),
                     }),
                 }
             }
@@ -439,8 +442,9 @@ impl ToolExecutor for CompositeExecutor {
                             })
                         }
                     }
-                    Err(e) => Ok(ToolOutcome {
-                        text: format!("Error: {e}"),
+                    Err(e) => Err(ToolError::Execute {
+                        name: name.to_string(),
+                        message: e.to_string(),
                     }),
                 }
             }
@@ -453,8 +457,9 @@ impl ToolExecutor for CompositeExecutor {
                     .and_then(|v| v.as_str());
                 match self.web.fetch_docs(url, page_range).await {
                     Ok(res) => Ok(ToolOutcome { text: res.markdown }),
-                    Err(e) => Ok(ToolOutcome {
-                        text: format!("Error: {e}"),
+                    Err(e) => Err(ToolError::Execute {
+                        name: name.to_string(),
+                        message: e.to_string(),
                     }),
                 }
             }
@@ -482,8 +487,9 @@ impl ToolExecutor for CompositeExecutor {
                             Ok(ToolOutcome { text: formatted })
                         }
                     }
-                    Err(e) => Ok(ToolOutcome {
-                        text: format!("Error: {e}"),
+                    Err(e) => Err(ToolError::Execute {
+                        name: name.to_string(),
+                        message: e.to_string(),
                     }),
                 }
             }
@@ -493,8 +499,9 @@ impl ToolExecutor for CompositeExecutor {
                 if let Some(ref ext) = self.extensions {
                     match ext.call(other, args_json).await {
                         Ok(text) => Ok(ToolOutcome { text }),
-                        Err(e) => Ok(ToolOutcome {
-                            text: format!("Error: {e}"),
+                        Err(e) => Err(ToolError::Execute {
+                            name: name.to_string(),
+                            message: e.to_string(),
                         }),
                     }
                 } else {

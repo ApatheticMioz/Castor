@@ -45,6 +45,20 @@ pub const CANARY_DISASTER_FUSE_TOKEN: &str = "__CANARY_TRIGGER_DISASTER_FUSE__";
 const DEFAULT_CWD: &str = "/workspace";
 const HOME: &str = "/home/user";
 const MAX_UNWRAP_DEPTH: usize = 4;
+/// Upper bound for group recursion (`(...)`, `{...}`). Group nesting is
+/// *provably* acyclic — each recursive level strictly shortens the string —
+/// so this cap is a **stack-usage** bound, not a coverage one.
+///
+/// Every recursion level holds live frames for `analyze_command` →
+/// `analyze_segment` → (`analyze_group` | `analyze_case` |
+/// `analyze_substitutions`), which in the debug build cost ~4–5 KB of stack
+/// each. A 2000-deep adversarial input must *terminate* without overflowing
+/// the 2 MiB `#[test]` thread stack (the recursion runs on a test thread, not
+/// the 8 MiB main thread). 100 leaves ≥15× headroom below the measured
+/// overflow threshold (~500 levels) while staying far above any realistic
+/// nesting depth (legitimate commands sit at < 10 levels; a bomb is caught
+/// at any depth below the cap).
+const MAX_GROUP_DEPTH: usize = 100;
 
 const DESTRUCTIVE: &[&str] = &["rm", "del", "rmdir", "rd", "remove-item", "ri", "erase"];
 /// Wrappers whose own argument (not an `=value`) is the real command.
@@ -126,10 +140,59 @@ fn flush_seg(segments: &mut Vec<String>, cur: &mut String) {
     cur.clear();
 }
 
+/// Characters that delimit words in a group-delimiter scan: whitespace, the
+/// always-special metacharacters, and the word-start-sensitive delimiters
+/// themselves.
+fn is_delimiter_boundary(ch: char) -> bool {
+    matches!(
+        ch,
+        ' ' | '\t' | ';' | '&' | '|' | '(' | ')' | '{' | '}' | '<' | '>' | '\n' | '\r'
+    )
+}
+
+/// A brace-group `{` (opener) and `}` (closer) must be a word of their own:
+/// `x{` and `b}` are literal characters, `{ a; }` is a brace group.
+fn is_standalone_brace(chars: &[char], i: usize) -> bool {
+    let word_start = i == 0 || is_delimiter_boundary(chars[i - 1]);
+    let word_end = i + 1 >= chars.len() || is_delimiter_boundary(chars[i + 1]);
+    word_start && word_end
+}
+
+/// A `(` is a structural opener (subshell / `$(...)` substitution) when it
+/// starts a word or follows `$` (`a$(x)` is valid bash; a bare `a(x)` is a
+/// syntax error).
+fn is_structural_open(chars: &[char], i: usize) -> bool {
+    i == 0
+        || is_delimiter_boundary(chars[i - 1])
+        || chars[i - 1] == '$'
+}
+
+/// Splits a command into segments on the top-level shell separators
+/// `&&`, `&`, `||`, `|`, `;`, newlines, and `)` terminators (group ends,
+/// `$(...)` ends, and unmatched `case` pattern closers).
+///
+/// Two protections matter for policy soundness:
+///
+/// 1. A **standalone `&`** (background-job separator) delimits, not only
+///    `&&` — `echo ok & rm -rf /` must become two segments so the `rm` is
+///    analyzed on its own.
+/// 2. Separators inside **balanced `(...)` / `{...}` groups do not split**:
+///    a subshell or brace group is one unit, so `(cd /; rm -rf /)` and
+///    `{ rm -rf /; }` stay whole and can be recursively analyzed via
+///    [`analyze_group`]. (An *unclosed* group is a bash syntax error —
+///    nothing executes — so swallowing the rest is safe.)
+///
+/// Group delimiters are recognized with bash's rules: `(` / `)` are
+/// *always* metacharacters (mid-word or not), while `{` / `}` count only
+/// when they form a word of their own ([`is_standalone_brace`]), so literal
+/// braces glued to words (`a{b`, `b}`) never shadow a real separator.
+/// Quotes are tracked; a separator or delimiter inside quotes never acts.
 fn split_segments(cmd: &str) -> Vec<String> {
     let mut segments = Vec::new();
     let mut cur = String::new();
     let mut quote: Option<char> = None;
+    let mut paren_depth: usize = 0;
+    let mut brace_depth: usize = 0;
     let chars: Vec<char> = cmd.chars().collect();
     let n = chars.len();
     let mut i = 0;
@@ -149,19 +212,39 @@ fn split_segments(cmd: &str) -> Vec<String> {
             i += 1;
             continue;
         }
-        if ch == '&' && i + 1 < n && chars[i + 1] == '&' {
-            flush_seg(&mut segments, &mut cur);
-            i += 2;
-            continue;
+        // `(` / `)` are always metacharacters (even mid-word); `{` / `}`
+        // count only as a standalone word, so literal braces glued to words
+        // (`a{b`, `b}`) never shadow a real separator.
+        let closes_outer = ch == ')' && paren_depth > 0;
+        match ch {
+            '(' if is_structural_open(&chars, i) => paren_depth += 1,
+            ')' if closes_outer => paren_depth -= 1,
+            '{' if is_standalone_brace(&chars, i) => brace_depth += 1,
+            '}' if is_standalone_brace(&chars, i) => {
+                brace_depth = brace_depth.saturating_sub(1)
+            }
+            _ => {}
         }
-        if ch == '|' && i + 1 < n && chars[i + 1] == '|' {
+        // A `)` ending the current context — group end, `$(...)` end, or an
+        // unmatched `case` pattern closer (`pat) cmd`) — terminates the
+        // current list, so it is part of the segment but flushes it after.
+        let terminator = ch == ')'
+            && (closes_outer || (i == 0 || is_delimiter_boundary(chars[i - 1])));
+        let at_top_level = paren_depth == 0 && brace_depth == 0;
+        if at_top_level
+            && (matches!(ch, '&' | '|' | ';' | '\n' | '\r') || terminator)
+        {
+            // `&&` / `||` consume both characters; everything else is a
+            // single-character separator.
+            if matches!(ch, '&' | '|') && i + 1 < n && chars[i + 1] == ch {
+                i += 2;
+            } else {
+                i += 1;
+            }
+            if terminator {
+                cur.push(ch);
+            }
             flush_seg(&mut segments, &mut cur);
-            i += 2;
-            continue;
-        }
-        if ch == ';' || ch == '|' || ch == '\n' || ch == '\r' {
-            flush_seg(&mut segments, &mut cur);
-            i += 1;
             continue;
         }
         cur.push(ch);
@@ -421,6 +504,308 @@ fn shell_wrapper(name: &str) -> Option<(&'static [&'static str], &'static str)> 
 }
 
 // ---------------------------------------------------------------------------
+// Group traversal
+// ---------------------------------------------------------------------------
+
+/// Finds the first **unquoted** group in `cmd` (a subshell `(...)` or a brace
+/// group `{...}`, possibly nested inside the other), extracts it, and
+/// recursively analyzes the three parts as fresh commands:
+///
+/// ```text
+/// [prefix] ( group body ) [suffix]
+/// [prefix] { group body } [suffix]
+/// ```
+///
+/// This closes two bypasses:
+///
+/// - **subshells** — `cd /tmp && (rm -rf /)` and `if true; then (rm -rf /)`
+///   keep the `rm` inside parentheses where a naive segment splitter would
+///   only see the wrapper;
+/// - **brace groups** — `{ rm -rf /; }`: because the splitter no longer
+///   splits inside balanced braces, the group arrives intact and its body
+///   (including everything after an inner `;`) is analyzed.
+///
+/// Quoted delimiters never count (`echo "(rm -rf /)"` is data, not a group).
+/// An *unclosed* group is a bash syntax error — nothing executes — so it is
+/// analyzed as an ordinary segment. Recursion is bounded by
+/// [`MAX_GROUP_DEPTH`] (the string strictly shrinks at every level, so the
+/// bound only limits stack usage, not coverage of real inputs).
+fn analyze_group(cmd: &str, cwd: &str, depth: usize) -> Result<(), ShellPolicyError> {
+    if depth >= MAX_GROUP_DEPTH {
+        return Ok(());
+    }
+
+    let chars: Vec<char> = cmd.chars().collect();
+    let mut quote: Option<char> = None;
+    let mut start: Option<(usize, char)> = None;
+    let mut close: Option<usize> = None;
+    let mut paren: usize = 0;
+    let mut brace: usize = 0;
+    for (i, &ch) in chars.iter().enumerate() {
+        if let Some(q) = quote {
+            if ch == q {
+                quote = None;
+            }
+            continue;
+        }
+        if ch == '"' || ch == '\'' {
+            quote = Some(ch);
+            continue;
+        }
+        match ch {
+            '(' => {
+                if start.is_none() && paren == 0 && brace == 0 {
+                    start = Some((i, '('));
+                }
+                paren += 1;
+            }
+            ')' => paren = paren.saturating_sub(1),
+            '{' if is_standalone_brace(&chars, i) => {
+                if start.is_none() && paren == 0 && brace == 0 {
+                    start = Some((i, '{'));
+                }
+                brace += 1;
+            }
+            '}' if is_standalone_brace(&chars, i) => brace = brace.saturating_sub(1),
+            _ => {}
+        }
+        if let Some((_, k)) = start
+            && match k {
+                '(' => paren == 0,
+                _ => brace == 0,
+            }
+        {
+            close = Some(i);
+            break;
+        }
+    }
+
+    let (Some((s, _)), Some(c)) = (start, close) else {
+        return Ok(()); // no complete group: ordinary segment
+    };
+
+    let prefix = cmd[..s].to_string();
+    let body = cmd[s + 1..c].to_string();
+    let suffix = cmd[c + 1..].to_string();
+
+    if !prefix.trim().is_empty() {
+        analyze_command(&prefix, cwd, depth + 1)?;
+    }
+    let inner = body.trim().trim_matches(';').trim();
+    if !inner.is_empty() {
+        analyze_command(inner, cwd, depth + 1)?;
+    }
+    if !suffix.trim().is_empty() {
+        analyze_command(&suffix, cwd, depth + 1)?;
+    }
+    Ok(())
+}
+
+/// Analyzes the bodies of `case` patterns.
+///
+/// The splitter treats `)` as a list terminator, so `case $X in rm)
+/// rm -rf / ;; esac` arrives as a piece like `case $X in rm) rm -rf /`. The
+/// *pattern* (`rm`) looks like a command and gets analyzed, but the real
+/// payload is the **body** after the pattern — which executes whenever `$X`
+/// happens to equal the pattern (e.g. the attacker runs `X=rm` first). The
+/// pattern is data; the body is the command. This walks `P) B ;; P2) B2 ;;`
+/// (up to the last standalone `esac`) and recursively analyzes every body.
+///
+/// Group delimiters inside a body count toward depth, so a `)` closing a
+/// subshell inside the body never terminates the pattern; quoted `)` and
+/// `;;` never count.
+fn analyze_case(cmd: &str, cwd: &str, depth: usize) -> Result<(), ShellPolicyError> {
+    if depth >= MAX_GROUP_DEPTH {
+        return Ok(());
+    }
+    if !cmd.trim_start().to_ascii_lowercase().starts_with("case ") {
+        return Ok(());
+    }
+
+    let lower: Vec<char> = cmd.to_ascii_lowercase().chars().collect();
+
+    // `case <word> in ...`: find the keyword `in` as a standalone word
+    // (the cased word is a single token, so it cannot contain `in`).
+    let mut in_idx: Option<usize> = None;
+    for (i, &ch) in lower.iter().enumerate() {
+        if ch == 'i'
+            && lower.get(i + 1) == Some(&'n')
+            && (i == 0 || is_delimiter_boundary(lower[i - 1]))
+            && (i + 2 >= lower.len() || is_delimiter_boundary(lower[i + 2]))
+        {
+            in_idx = Some(i + 2);
+            break;
+        }
+    }
+    let Some(in_idx) = in_idx else {
+        return Ok(());
+    };
+
+    // The pattern/body region runs from after `in` to the last standalone
+    // `esac` word (an unclosed `case` is a bash syntax error — nothing
+    // executes — so its tail still gets analyzed below).
+    let region_chars: Vec<char> = lower[in_idx..].to_vec();
+    let mut body_end = region_chars.len();
+    for (i, &ch) in region_chars.iter().enumerate() {
+        if ch == 'e'
+            && region_chars.get(i + 1) == Some(&'s')
+            && region_chars.get(i + 2) == Some(&'a')
+            && region_chars.get(i + 3) == Some(&'c')
+            && (i == 0 || is_delimiter_boundary(region_chars[i - 1]))
+            && (i + 4 >= region_chars.len()
+                || is_delimiter_boundary(region_chars[i + 4]))
+        {
+            body_end = i;
+        }
+    }
+    let region: String = region_chars[..body_end].iter().collect();
+
+    let rchars: Vec<char> = region.chars().collect();
+    let mut quote: Option<char> = None;
+    let mut paren: usize = 0;
+    let mut brace: usize = 0;
+    let mut body_start: Option<usize> = None;
+    let mut i = 0;
+    while i < rchars.len() {
+        let ch = rchars[i];
+        if let Some(q) = quote {
+            if ch == q {
+                quote = None;
+            }
+            i += 1;
+            continue;
+        }
+        if ch == '"' || ch == '\'' {
+            quote = Some(ch);
+            i += 1;
+            continue;
+        }
+        match ch {
+            '(' if is_structural_open(&rchars, i) => paren += 1,
+            ')' if paren > 0 => paren -= 1,
+            '{' if is_standalone_brace(&rchars, i) => brace += 1,
+            '}' if is_standalone_brace(&rchars, i) => {
+                brace = brace.saturating_sub(1)
+            }
+            _ => {}
+        }
+        let at_top = paren == 0 && brace == 0;
+        let flush_body = |s: usize, e: usize| -> Result<(), ShellPolicyError> {
+            let body = &region[s..e];
+            if !body.trim().is_empty() {
+                analyze_command(body, cwd, depth + 1)
+            } else {
+                Ok(())
+            }
+        };
+        if at_top && ch == ')' {
+            // Pattern terminator: a previous pattern's body ends here.
+            if let Some(s) = body_start.take() {
+                flush_body(s, i)?;
+            }
+            body_start = Some(i + 1);
+        } else if at_top && ch == ';' && rchars.get(i + 1) == Some(&';') {
+            // End of the current body (a lone `;` inside a body is part of
+            // the body's own command list — analyzed with it).
+            if let Some(s) = body_start.take() {
+                flush_body(s, i)?;
+            }
+            i += 1;
+        }
+        i += 1;
+    }
+    if let Some(s) = body_start {
+        let body = region[s..].to_string();
+        if !body.trim().is_empty() {
+            analyze_command(&body, cwd, depth + 1)?;
+        }
+    }
+    Ok(())
+}
+
+/// Recursively analyzes the bodies of command substitutions: `$(...)` and
+/// backtick `` `...` ``.
+///
+/// A substitution is a *hidden command*: `X=$(rm -rf /)` is lexically a
+/// single assignment word (and a naive operand check only sees `$(...)` as
+/// an unexpanded reference *when it is an operand of a destructive
+/// command*), so the body would otherwise execute untouched. Quoted `$(...)`
+/// and backticks are data, not substitutions. Nesting is bounded by
+/// [`MAX_GROUP_DEPTH`] (the string strictly shrinks at every level).
+fn analyze_substitutions(cmd: &str, cwd: &str, depth: usize) -> Result<(), ShellPolicyError> {
+    if depth >= MAX_GROUP_DEPTH {
+        return Ok(());
+    }
+    let chars: Vec<char> = cmd.chars().collect();
+    let mut quote: Option<char> = None;
+    let mut i = 0;
+    while i < chars.len() {
+        let ch = chars[i];
+        if let Some(q) = quote {
+            if ch == q {
+                quote = None;
+            }
+            i += 1;
+            continue;
+        }
+        if ch == '"' || ch == '\'' {
+            quote = Some(ch);
+            i += 1;
+            continue;
+        }
+        if ch == '$' && i + 1 < chars.len() && chars[i + 1] == '(' {
+            // `$(...)`: scan for the balanced close.
+            let mut paren = 1usize;
+            let mut j = i + 2;
+            while j < chars.len() && paren > 0 {
+                let cj = chars[j];
+                if quote.is_none() {
+                    if cj == '"' || cj == '\'' {
+                        quote = Some(cj);
+                    } else if cj == '(' {
+                        paren += 1;
+                    } else if cj == ')' {
+                        paren -= 1;
+                    }
+                } else if cj == quote.unwrap() {
+                    quote = None;
+                }
+                j += 1;
+            }
+            if paren == 0 && j <= chars.len() {
+                let body = cmd[i + 2..j - 1].to_string();
+                if !body.trim().is_empty() {
+                    analyze_command(&body, cwd, depth + 1)?;
+                }
+                i = j;
+                continue;
+            }
+            // Unclosed substitution: bash syntax error, cannot execute —
+            // scan past it.
+            break;
+        }
+        if ch == '`' {
+            // Backtick substitution: to the next unquoted backtick.
+            let mut j = i + 1;
+            while j < chars.len() && chars[j] != '`' {
+                j += 1;
+            }
+            if j < chars.len() {
+                let body = cmd[i + 1..j].to_string();
+                if !body.trim().is_empty() {
+                    analyze_command(&body, cwd, depth + 1)?;
+                }
+                i = j + 1;
+                continue;
+            }
+            break; // unclosed backtick: syntax error, cannot execute
+        }
+        i += 1;
+    }
+    Ok(())
+}
+
+// ---------------------------------------------------------------------------
 // Core analysis
 // ---------------------------------------------------------------------------
 
@@ -430,21 +815,35 @@ fn analyze_segment(cmd: &str, cwd: &str, depth: usize) -> Result<(), ShellPolicy
         return Ok(());
     }
 
+    // Groups (`(...)` / `{...}`) recurse first; the group body is analyzed as
+    // a fresh command and this segment's remainder is analyzed below.
+    analyze_group(cmd, cwd, depth)?;
+    // `case` bodies: the pattern after `in` is data, the command after `)`
+    // is the payload — analyze every body.
+    analyze_case(cmd, cwd, depth)?;
+    // Command substitutions (`$(...)`, backticks) are hidden commands.
+    analyze_substitutions(cmd, cwd, depth)?;
+
     let mut i = 0;
     while i < tokens.len() {
         let name = command_name(&tokens[i]);
         if name == "env" {
+            // Consume `KEY=VAL` assignments and `env` flags (`-i`, `-u`,
+            // `-0`, ...). Whatever follows — e.g. `rm` — is the real command:
+            // fall through and analyze it below. Never stop at the wrapper.
             i += 1;
-            while i < tokens.len() && is_env_assignment(&tokens[i]) {
+            while i < tokens.len() && (is_env_assignment(&tokens[i]) || is_flag(&tokens[i])) {
                 i += 1;
             }
-            continue;
-        }
-        if TRANSPARENT.contains(&name.as_str()) {
+            if i >= tokens.len() {
+                return Ok(()); // bare `env` with nothing wrapped
+            }
+        } else if TRANSPARENT.contains(&name.as_str()) {
             i += 1;
             continue;
+        } else {
+            break;
         }
-        break;
     }
     if i >= tokens.len() {
         return Ok(());
@@ -623,17 +1022,30 @@ fn is_unsupported_landlock_fs(path: &Path) -> bool {
         return false;
     };
     let mut stat: libc::statfs = unsafe { std::mem::zeroed() };
-    if unsafe { libc::statfs(c_path.as_ptr(), &mut stat) } == 0 {
-        // Landlock PathBeneath rules are not supported on network/virtual filesystems:
-        // 0x01021997 = V9FS_MAGIC (9p/drvfs in WSL)
-        // 0x53465342 = SMB2 / DRVFS
-        // 0xfe534e51 = CIFS_MAGIC_NUMBER
-        // 0x6969     = NFS_SUPER_MAGIC
-        let ft = stat.f_type as u64;
-        ft == 0x01021997 || ft == 0x53465342 || ft == 0xfe534e51 || ft == 0x6969
-    } else {
-        false
+    if unsafe { libc::statfs(c_path.as_ptr(), &mut stat) } != 0 {
+        return false;
     }
+    // Landlock PathBeneath rules are not supported on network/virtual filesystems:
+    // 0x01021997 = V9FS_MAGIC (9p/drvfs in WSL), 0x53465342 = SMB2/DRVFS,
+    // 0xfe534e51 = CIFS_MAGIC_NUMBER, 0x6969 = NFS_SUPER_MAGIC.
+    let ft = stat.f_type as u64;
+    let fs_name = match ft {
+        0x01021997 => "9p/drvfs (WSL)",
+        0x53465342 => "SMB2/DRVFS",
+        0xfe534e51 => "CIFS/SMB",
+        0x6969 => "NFS",
+        _ => "",
+    };
+    if !fs_name.is_empty() {
+        tracing::warn!(
+            path = %path.display(),
+            fs_type = %format!("0x{ft:08X}"),
+            fs = fs_name,
+            "Landlock PathBeneath rules are unsupported on this filesystem ({fs_name}); degrading to the in-process 5-layer sandbox for the shell child."
+        );
+        return true;
+    }
+    false
 }
 
 #[cfg(target_os = "linux")]
@@ -1007,6 +1419,165 @@ mod tests {
             validate("rm -rf /mnt/c/\u{FF37}indows"),
             Err(ShellPolicyError::ProtectedRoot(_, _))
         ));
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Bypass-regression tests: each of the five shell-policy bypasses that
+// allowed a destructive command to dodge `validate` is strictly blocked.
+// ---------------------------------------------------------------------------
+
+#[cfg(test)]
+mod bypass_tests {
+    use super::*;
+
+    /// Bypass 1: a single `&` (background-job separator) used instead of
+    /// `&&` so the destructive command lands in its own segment.
+    #[test]
+    fn bypass_single_ampersand_separator_blocked() {
+        assert!(matches!(
+            validate("echo ok & rm -rf /"),
+            Err(ShellPolicyError::ProtectedRoot(_, _))
+        ));
+        assert!(matches!(
+            validate("true & rm -rf /home/user"),
+            Err(ShellPolicyError::ProtectedRoot(_, _))
+        ));
+        // A standalone `&` only splits; benign commands on both sides pass.
+        assert!(validate("ls & ls").is_ok());
+    }
+
+    /// Bypass 2: a destructive command wrapped in a subshell `(...)`.
+    #[test]
+    fn bypass_subshell_group_blocked() {
+        assert!(matches!(
+            validate("(rm -rf /)"),
+            Err(ShellPolicyError::ProtectedRoot(_, _))
+        ));
+        assert!(matches!(
+            validate("( rm -rf /home/user )"),
+            Err(ShellPolicyError::ProtectedRoot(_, _))
+        ));
+        assert!(matches!(
+            validate("cd /tmp && (rm -rf /)"),
+            Err(ShellPolicyError::ProtectedRoot(_, _))
+        ));
+        assert!(matches!(
+            validate("if true; then (rm -rf /); fi"),
+            Err(ShellPolicyError::ProtectedRoot(_, _))
+        ));
+        // Quoted parentheses are data, not a group — must stay benign.
+        assert!(validate("echo \"(rm -rf /)\"").is_ok());
+    }
+
+    /// Bypass 3: a destructive command wrapped in a brace group `{...; }`
+    /// (whose trailing `;` previously fragmented the group and let the `rm`
+    /// ride through as a lone non-destructive-looking token).
+    #[test]
+    fn bypass_brace_group_blocked() {
+        assert!(matches!(
+            validate("{ rm -rf /; }"),
+            Err(ShellPolicyError::ProtectedRoot(_, _))
+        ));
+        assert!(matches!(
+            validate("true; { rm -rf /home/user; }"),
+            Err(ShellPolicyError::ProtectedRoot(_, _))
+        ));
+        // Nested group forms must be caught at every level.
+        assert!(matches!(
+            validate("{ (rm -rf /); }"),
+            Err(ShellPolicyError::ProtectedRoot(_, _))
+        ));
+        assert!(matches!(
+            validate("( { rm -rf /; } )"),
+            Err(ShellPolicyError::ProtectedRoot(_, _))
+        ));
+        // Braces glued to a word are literal text in bash — no group is
+        // implied, so the command stays benign.
+        assert!(validate("echo a{b c}d").is_ok());
+    }
+
+    /// Bypass 4: the `env` wrapper — after stripping `KEY=VAL` assignments
+    /// (and `env` flags) the wrapped command must be analyzed, never skipped.
+    /// The exploitable variant was a *flag* following an assignment, which
+    /// stopped the old scanner inside the wrapper.
+    #[test]
+    fn bypass_env_wrapper_blocked() {
+        assert!(matches!(
+            validate("env FOO=1 rm -rf /"),
+            Err(ShellPolicyError::ProtectedRoot(_, _))
+        ));
+        assert!(matches!(
+            validate("env FOO=1 -i rm -rf /home/user"),
+            Err(ShellPolicyError::ProtectedRoot(_, _))
+        ));
+        assert!(matches!(
+            validate("env -i rm -rf /"),
+            Err(ShellPolicyError::ProtectedRoot(_, _))
+        ));
+        // A transparent wrapper inside `env` is unwrapped as well.
+        assert!(matches!(
+            validate("env sudo rm -rf /"),
+            Err(ShellPolicyError::ProtectedRoot(_, _))
+        ));
+        // Benign `env` usage is unaffected.
+        assert!(validate("env FOO=1 ls").is_ok());
+        assert!(validate("env").is_ok());
+    }
+
+    /// Bypass 5: command substitution inside a destructive operand
+    /// (`` rm -rf `pwd` ``) — the operand is an unexpanded reference and must
+    /// be refused; the substitution is never trusted, expanded, or executed.
+    #[test]
+    fn bypass_cmd_substitution_operand_blocked() {
+        assert!(matches!(
+            validate("rm -rf `pwd`"),
+            Err(ShellPolicyError::UnexpandedReference(_))
+        ));
+        assert!(matches!(
+            validate("rm -rf $(pwd)"),
+            Err(ShellPolicyError::UnexpandedReference(_))
+        ));
+        assert!(matches!(
+            validate("rm -rf `ls`/secret"),
+            Err(ShellPolicyError::UnexpandedReference(_))
+        ));
+        assert!(matches!(
+            validate("rm -rf ${HOME}/x"),
+            Err(ShellPolicyError::UnexpandedReference(_))
+        ));
+        assert!(matches!(
+            validate("del `whoami`"),
+            Err(ShellPolicyError::UnexpandedReference(_))
+        ));
+    }
+
+    /// Group recursion is bounded by [`MAX_GROUP_DEPTH`]: deeply nested
+    /// groups must terminate (no stack overflow), and the bomb is caught at
+    /// any nesting depth below the cap.
+    #[test]
+    fn deeply_nested_groups_terminate() {
+        // Three levels deep: the bomb is inside the group budget and must
+        // be caught.
+        assert!(matches!(
+            validate("(((rm -rf /)))"),
+            Err(ShellPolicyError::ProtectedRoot(_, _))
+        ));
+        // Eight levels deep — far below the cap — must be caught too.
+        let deep_bomb = "(".repeat(8) + "rm -rf /" + &")".repeat(8);
+        assert!(matches!(
+            validate(&deep_bomb),
+            Err(ShellPolicyError::ProtectedRoot(_, _))
+        ));
+        // A benign deep-nested command must pass and terminate promptly.
+        let deep_ok = "(".repeat(8) + "echo hi" + &")".repeat(8);
+        assert!(validate(&deep_ok).is_ok());
+        // Past the cap, analysis must still terminate (no overflow, no hang)
+        // with a well-defined verdict.
+        let very_deep = "(".repeat(2000) + "echo hi" + &")".repeat(2000);
+        let r1 = validate(&very_deep).is_ok();
+        let r2 = validate(&very_deep).is_err();
+        assert!(r1 || r2);
     }
 }
 

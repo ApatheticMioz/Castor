@@ -58,6 +58,8 @@ chrono = "0.4"
 humantime = "2.1"
 path-clean = "1.0"
 dunce = "1.0"
+# Atomic persistence: `NamedTempFile::new_in` + fsync + rename for `atomic_write`.
+tempfile = "3"
 base64 = "0.23"
 getrandom = { version = "0.2", features = ["std"] }
 unicode-normalization = "0.1"
