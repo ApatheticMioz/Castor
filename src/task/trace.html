@@ -209,6 +209,30 @@
             <span class="filter-count text-[10px] opacity-75">(0)</span>
           </button>
         </div>
+
+        <!-- Color Legend: semantic tool-pill key + timing-waterfall phase key.
+             Sticky (lives in the non-scrolling pane header), so it stays visible
+             above the timeline at any scroll position and at 1080p. -->
+        <div class="flex flex-col gap-1.5 pt-1 border-t border-border/70" id="colorLegend">
+          <!-- Tool pill color key: each swatch shows its semantic tint via a
+               currentColor square, so the key is legible against the dark panel. -->
+          <div class="flex items-center gap-1.5 text-[10px] font-mono">
+            <span class="text-zinc-600 font-semibold tracking-wide shrink-0 w-[38px]">TOOLS</span>
+            <span class="flex items-center gap-1 text-sky-400"><span class="inline-block w-2.5 h-2.5 rounded-sm border border-sky-800/80 bg-sky-950/70"><span class="block w-full h-full bg-current opacity-80"></span></span><span class="text-sky-300">Read</span></span>
+            <span class="flex items-center gap-1 text-teal-300"><span class="inline-block w-2.5 h-2.5 rounded-sm border border-teal-800/80 bg-teal-950/70"><span class="block w-full h-full bg-current opacity-80"></span></span><span class="text-teal-200">Search</span></span>
+            <span class="flex items-center gap-1 text-purple-300"><span class="inline-block w-2.5 h-2.5 rounded-sm border border-purple-800/80 bg-purple-950/70"><span class="block w-full h-full bg-current opacity-80"></span></span><span class="text-purple-200">Edit</span></span>
+            <span class="flex items-center gap-1 text-amber-300"><span class="inline-block w-2.5 h-2.5 rounded-sm border border-amber-800/80 bg-amber-950/70"><span class="block w-full h-full bg-current opacity-80"></span></span><span class="text-amber-200">Write</span></span>
+            <span class="flex items-center gap-1 text-emerald-400"><span class="inline-block w-2.5 h-2.5 rounded-sm border border-emerald-800/80 bg-emerald-950/70"><span class="block w-full h-full bg-current opacity-80"></span></span><span class="text-emerald-300">Bash</span></span>
+            <span class="flex items-center gap-1 text-orange-300" title="web_search / web_fetch / paper_lookup"><span class="inline-block w-2.5 h-2.5 rounded-sm border border-orange-800/80 bg-orange-950/70"><span class="block w-full h-full bg-current opacity-80"></span></span><span class="text-orange-200">Web</span></span>
+          </div>
+          <!-- Timing waterfall phase key -->
+          <div class="flex items-center gap-1.5 text-[10px] font-mono">
+            <span class="text-zinc-600 font-semibold tracking-wide shrink-0 w-[38px]">TIMING</span>
+            <span class="flex items-center gap-1"><span class="inline-block w-2.5 h-1.5 rounded-full bg-cyan-500"></span><span class="text-cyan-300">Prefill/TTFT</span></span>
+            <span class="flex items-center gap-1"><span class="inline-block w-2.5 h-1.5 rounded-full bg-blue-500"></span><span class="text-blue-300">Decode</span></span>
+            <span class="flex items-center gap-1"><span class="inline-block w-2.5 h-1.5 rounded-full bg-emerald-500"></span><span class="text-emerald-300">Tool</span></span>
+          </div>
+        </div>
       </div>
 
       <div class="flex-1 overflow-y-auto p-1.5 flex flex-col gap-1" id="spansListContainer">
@@ -465,6 +489,24 @@
       lastActiveStatus: null,
       autoSync: true,
       followLive: localStorage.getItem('castor_trace_follow_live') !== 'false',
+    };
+
+    // Semantic tool-pill colors (shared by the timeline pills and the legend).
+    // Read→Sky, Search→Teal, Edit→Purple, Write→Amber, Bash→Emerald,
+    // Research (web_search/web_fetch/paper_lookup)→Orange. `ast_replace` sits in
+    // the Edit family. Unknown tools fall through to the neutral zinc default.
+    const TOOL_PILL_COLORS = {
+      read_file: 'bg-sky-950/70 text-sky-400 border-sky-800/80',
+      list_dir: 'bg-sky-950/70 text-sky-400 border-sky-800/80',
+      search_code: 'bg-teal-950/70 text-teal-300 border-teal-800/80',
+      ast_search: 'bg-teal-950/70 text-teal-300 border-teal-800/80',
+      edit_file: 'bg-purple-950/70 text-purple-300 border-purple-800/80',
+      ast_replace: 'bg-purple-950/70 text-purple-300 border-purple-800/80',
+      write_file: 'bg-amber-950/70 text-amber-300 border-amber-800/80',
+      bash: 'bg-emerald-950/70 text-emerald-400 border-emerald-800/80',
+      web_search: 'bg-orange-950/70 text-orange-300 border-orange-800/80',
+      web_fetch: 'bg-orange-950/70 text-orange-300 border-orange-800/80',
+      paper_lookup: 'bg-orange-950/70 text-orange-300 border-orange-800/80',
     };
 
     // DOM Elements
@@ -918,10 +960,7 @@
 
         const toolBadges = toolCalls.map((tc, tIdx) => {
           let badgeColor = 'bg-zinc-800 text-zinc-300 border-zinc-700';
-          if (tc.name === 'bash') badgeColor = 'bg-emerald-950 text-emerald-400 border-emerald-800';
-          else if (tc.name === 'edit_file') badgeColor = 'bg-blue-950 text-blue-400 border-blue-800';
-          else if (tc.name === 'write_file') badgeColor = 'bg-amber-950 text-amber-400 border-amber-800';
-          else if (tc.name === 'search_code' || tc.name === 'ast_search') badgeColor = 'bg-cyan-950 text-cyan-400 border-cyan-800';
+          if (TOOL_PILL_COLORS[tc.name]) badgeColor = TOOL_PILL_COLORS[tc.name];
 
           const isToolActive = isSelected && tIdx === state.activeToolIndex;
           const activeClass = isToolActive ? 'ring-1 ring-white font-extrabold text-white brightness-125' : '';

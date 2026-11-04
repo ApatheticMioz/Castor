@@ -143,15 +143,30 @@ fn is_orphaned(status: &str, pid: Option<u32>) -> bool {
     matches!(pid, Some(p) if !pid_alive(p))
 }
 
-/// Scan `<state>/tasks` for task JSON records, sorted newest first by mtime.
-/// Returns a tuple of (summaries, total_count).
+/// Scan `<state>/tasks` for task JSON records, sorted by `created_at`
+/// descending (newest dispatched first). Returns a tuple of (summaries,
+/// total_count).
+///
+/// Ordering uses each task's own `created_at` dispatch timestamp, not the file
+/// `mtime`: reaping or updating a record rewrites it and bumps its mtime to
+/// "now", which would otherwise bubble a stale task to the top of the sidebar
+/// above genuinely newer dispatches. `created_at` is stable per task, so the
+/// list stays strictly chronological by dispatch time. Records without a
+/// `created_at` field fall back to their mtime.
+///
+/// The `created_at` of *every* eligible record is resolved before applying
+/// `limit`; the prior implementation read only `limit` files after the mtime
+/// sort, which could drop a newer dispatch in favour of a stale-but-recently
+/// touched one.
 pub fn read_recent_tasks(state: &StateDir, limit: usize) -> (Vec<TaskSummary>, usize) {
     let dir = state.tasks();
     let Ok(entries) = fs::read_dir(&dir) else {
         return (Vec::new(), 0);
     };
 
-    let mut files_with_mtime: Vec<(PathBuf, u64)> = Vec::new();
+    // Each eligible record: (path, mtime, created_at, parsed_value).
+    let mut keyed: Vec<(PathBuf, u64, u64, Option<Value>)> = Vec::new();
+    let mut total_count = 0usize;
 
     for entry in entries.flatten() {
         let path = entry.path();
@@ -168,6 +183,8 @@ pub fn read_recent_tasks(state: &StateDir, limit: usize) -> (Vec<TaskSummary>, u
         {
             continue;
         }
+        // Count every eligible record for the total, parseable or not.
+        total_count += 1;
 
         let mtime = entry
             .metadata()
@@ -179,18 +196,25 @@ pub fn read_recent_tasks(state: &StateDir, limit: usize) -> (Vec<TaskSummary>, u
             .map(|d| d.as_millis() as u64)
             .unwrap_or(0);
 
-        files_with_mtime.push((path, mtime));
+        let val = fs::read_to_string(&path)
+            .ok()
+            .and_then(|raw| serde_json::from_str::<Value>(&raw).ok());
+        let created_at = val
+            .as_ref()
+            .and_then(|v| v.get("created_at"))
+            .and_then(|c| c.as_u64())
+            .unwrap_or(mtime);
+
+        keyed.push((path, mtime, created_at, val));
     }
 
-    files_with_mtime.sort_by_key(|a| std::cmp::Reverse(a.1));
-    let total_count = files_with_mtime.len();
+    // Newest dispatched first. `sort_by_key` is stable, so a burst of dispatches
+    // sharing a `created_at` keeps a deterministic order.
+    keyed.sort_by_key(|k| std::cmp::Reverse(k.2));
 
     let mut summaries = Vec::new();
-    for (path, mtime) in files_with_mtime.into_iter().take(limit) {
-        let Ok(raw) = fs::read_to_string(&path) else {
-            continue;
-        };
-        let Ok(val) = serde_json::from_str::<Value>(&raw) else {
+    for (path, mtime, created_at, val) in keyed.into_iter().take(limit) {
+        let Some(val) = val else {
             continue;
         };
 
@@ -236,11 +260,6 @@ pub fn read_recent_tasks(state: &StateDir, limit: usize) -> (Vec<TaskSummary>, u
             .and_then(|v| v.as_str())
             .unwrap_or_default()
             .to_string();
-
-        let created_at = val
-            .get("created_at")
-            .and_then(|v| v.as_u64())
-            .unwrap_or(mtime);
 
         let started_at = val.get("started_at").and_then(|v| v.as_u64());
         let ended_at = val.get("ended_at").and_then(|v| v.as_u64());
@@ -696,13 +715,25 @@ mod tests {
 
     /// Write a minimal task record file into a state dir for tests.
     fn write_task(state: &StateDir, id: &str, status: &str, pid: Option<u32>) {
+        write_task_with_created_at(state, id, status, pid, 0);
+    }
+
+    /// Write a task record with an explicit `created_at` (dispatch time in
+    /// epoch milliseconds).
+    fn write_task_with_created_at(
+        state: &StateDir,
+        id: &str,
+        status: &str,
+        pid: Option<u32>,
+        created_at: u64,
+    ) {
         let val = serde_json::json!({
             "id": id,
             "status": status,
             "prompt": format!("task {id}"),
             "cwd": "/tmp",
             "session_id": format!("sess_{id}"),
-            "created_at": 0,
+            "created_at": created_at,
             "turns_budget": 10,
             "pid": pid,
         });
@@ -749,6 +780,78 @@ mod tests {
 
         let done = tasks.iter().find(|t| t.id == "done").expect("done present");
         assert_eq!(done.status, "completed", "terminal tasks must be untouched");
+
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// The sidebar list must order by each task's `created_at` dispatch time
+    /// (newest first), NOT by file mtime. Simulating a stale record being
+    /// reaped/updated rewrites it and bumps its mtime to "now"; a naive mtime
+    /// sort would bubble it above the genuinely newer dispatch. `created_at` is
+    /// stable, so the newer dispatch must stay on top.
+    #[test]
+    fn test_read_recent_tasks_orders_by_created_at_not_mtime() {
+        let root =
+            std::env::temp_dir().join(format!("castor_trace_order_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        let state = StateDir::new(&root);
+
+        let now_ms = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_millis() as u64;
+
+        // "old" was dispatched first but is the most recently *touched* on disk
+        // (simulating a reaper/update that just rewrote it). "new" was dispatched
+        // later and must therefore sort above it despite the older mtime.
+        write_task_with_created_at(&state, "old", "failed", None, now_ms - 60_000);
+        write_task_with_created_at(&state, "new", "completed", None, now_ms - 1_000);
+
+        // Bump "old"'s mtime past "new"'s by rewriting it "now". A short sleep
+        // guarantees the bump strictly outranks "new"'s mtime on any filesystem
+        // (sub-second or second granularity), so this test genuinely
+        // discriminates created_at-ordering from a naive mtime-ordering.
+        std::thread::sleep(std::time::Duration::from_millis(1_100));
+        let old_path = state.tasks().join("old.json");
+        let old_raw = std::fs::read_to_string(&old_path).unwrap();
+        std::fs::write(&old_path, &old_raw).unwrap();
+
+        let (tasks, total) = read_recent_tasks(&state, 10);
+        assert_eq!(total, 2);
+
+        // Newest dispatch first, even though "old" has the freshest mtime.
+        let order: Vec<&str> = tasks.iter().map(|t| t.id.as_str()).collect();
+        assert_eq!(
+            order,
+            vec!["new", "old"],
+            "tasks must be sorted by created_at descending, not mtime"
+        );
+
+        // mtime fallback: a record with no created_at field is still listed
+        // (ordered by its mtime) and does not disturb the created_at contract.
+        let nc_path = state.tasks().join("no_created.json");
+        let nc_val = serde_json::json!({
+            "id": "no_created",
+            "status": "completed",
+            "prompt": "task no_created",
+            "cwd": "/tmp",
+            "session_id": "sess_no_created",
+            "turns_budget": 10
+        });
+        std::fs::write(&nc_path, nc_val.to_string()).unwrap();
+
+        let (tasks2, total2) = read_recent_tasks(&state, 10);
+        assert_eq!(total2, 3);
+        let new_pos = tasks2.iter().position(|t| t.id == "new").unwrap();
+        let old_pos = tasks2.iter().position(|t| t.id == "old").unwrap();
+        assert!(
+            tasks2.iter().any(|t| t.id == "no_created"),
+            "mtime-fallback record must be listed"
+        );
+        assert!(
+            new_pos < old_pos,
+            "newer dispatch must still precede older regardless of the fallback record"
+        );
 
         let _ = std::fs::remove_dir_all(&root);
     }
