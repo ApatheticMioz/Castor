@@ -106,10 +106,15 @@ impl FsExecutor {
         if !resolved.exists() {
             return Err(FsError::InvalidArgs(format!("File not found: {path}")));
         }
-        let meta = fs::metadata(&resolved)?;
-        if meta.is_dir() {
+        // Guard against non-regular files (FIFOs, sockets, device nodes): opening
+        // one for reading would block a tokio worker thread on an unbounded
+        // read. `symlink_metadata` inspects the path itself, so a symlink that
+        // points at a regular file still passes (it is dereferenced by the reads
+        // below) while a symlink to a FIFO is refused here instead of hanging.
+        let meta = resolved.symlink_metadata()?;
+        if !meta.file_type().is_file() {
             return Err(FsError::InvalidArgs(format!(
-                "Path is a directory, not a file: {path}"
+                "Cannot read non-regular file (FIFO, socket, or device): {path}"
             )));
         }
         let ext = resolved.extension().and_then(|e| e.to_str()).unwrap_or("");
@@ -396,14 +401,18 @@ impl FsExecutor {
 
     fn search_code(&self, query: &str, path: &str, max_results: usize) -> Result<String, FsError> {
         let resolved = self.resolve_read(path)?;
-        let search_dir = if resolved.is_file() {
-            resolved
-                .parent()
-                .unwrap_or_else(|| self.root())
-                .to_path_buf()
-        } else {
-            resolved
-        };
+        // When the caller passes a single file, do NOT widen the search to its
+        // parent directory: `path` names exactly what should be searched, so
+        // matches are constrained to that one file (sibling files are excluded).
+        if resolved.is_file() {
+            if self.is_inside_git_repo(&resolved)
+                && !self.is_git_ignored(&resolved)
+            {
+                return self.git_grep_file(query, &resolved, max_results);
+            }
+            return self.search_single_file(query, &resolved, max_results);
+        }
+        let search_dir = resolved;
 
         if self.is_inside_git_repo(&search_dir) {
             // `git grep` only sees tracked files plus explicitly `--untracked` ones.
@@ -416,6 +425,19 @@ impl FsExecutor {
             }
         }
         self.fallback_search(query, &search_dir, max_results)
+    }
+
+    /// Search a single file with `git grep` by passing its workspace-relative
+    /// path as the pathspec, so only that file is searched.
+    fn git_grep_file(
+        &self,
+        query: &str,
+        file: &Path,
+        max_results: usize,
+    ) -> Result<String, FsError> {
+        let rel = file.strip_prefix(self.root()).unwrap_or(file);
+        let rel_str = rel.to_string_lossy().to_string();
+        self.git_grep_with_pathspec(query, Some(&rel_str), max_results)
     }
 
     fn is_git_ignored(&self, dir: &Path) -> bool {
@@ -450,13 +472,31 @@ impl FsExecutor {
         search_dir: &Path,
         max_results: usize,
     ) -> Result<String, FsError> {
+        // Constrain the search to `search_dir` by passing its workspace-relative
+        // path as the `git grep` pathspec.
         let rel = search_dir.strip_prefix(self.root()).unwrap_or(search_dir);
         let rel_str = rel.to_string_lossy().to_string();
+        let pathspec = if rel_str.is_empty() || rel_str == "." {
+            None
+        } else {
+            Some(rel_str.as_str())
+        };
+        self.git_grep_with_pathspec(query, pathspec, max_results)
+    }
 
+    /// Run `git grep` with an explicit pathspec (or `None` to search the whole
+    /// worktree). Shared by the directory-based [`Self::git_grep`] and the
+    /// single-file [`Self::git_grep_file`] entry points.
+    fn git_grep_with_pathspec(
+        &self,
+        query: &str,
+        pathspec: Option<&str>,
+        max_results: usize,
+    ) -> Result<String, FsError> {
         let mut args = vec!["grep", "-n", "-I", "-F", "--untracked", "-e", query];
-        if !rel_str.is_empty() && rel_str != "." {
+        if let Some(ps) = pathspec {
             args.push("--");
-            args.push(&rel_str);
+            args.push(ps);
         }
 
         let output = std::process::Command::new("git")
@@ -524,6 +564,41 @@ impl FsExecutor {
         }
         if !skipped.is_empty() {
             let _ = writeln!(out, "  ({} binary files skipped)", skipped.len());
+        }
+        Ok(out)
+    }
+
+    /// Search a single file by reading it directly and matching line-by-line.
+    /// Used as the non-git fallback when `search_code` is given a file path.
+    /// The match prefix is the file's workspace-relative path, so output stays
+    /// consistent with the directory-walk format.
+    fn search_single_file(
+        &self,
+        query: &str,
+        file: &Path,
+        max_results: usize,
+    ) -> Result<String, FsError> {
+        let rel = file.strip_prefix(self.root()).unwrap_or(file);
+        let rel_str = rel.to_string_lossy().to_string();
+        let content = fs::read_to_string(file)?;
+        let mut matches: Vec<String> = Vec::new();
+        for (i, line) in content.lines().enumerate() {
+            if matches.len() >= max_results {
+                break;
+            }
+            if line.contains(query) {
+                matches.push(format!(
+                    "{rel_str}:{}:{}",
+                    i + 1,
+                    truncate_line(line, MAX_SEARCH_LINE_CHARS)
+                ));
+            }
+        }
+
+        use std::fmt::Write;
+        let mut out = format!("{} match(es) for '{query}':\n", matches.len());
+        for m in &matches {
+            let _ = writeln!(out, "  {m}");
         }
         Ok(out)
     }
@@ -601,6 +676,17 @@ impl FsExecutor {
         let parent = target.parent().unwrap_or(Path::new("."));
         fs::create_dir_all(parent)?;
 
+        // `tempfile::NamedTempFile` creates its temp file with 0600, and
+        // `persist`'s rename keeps those bits — so a rewrite of an existing
+        // file would silently downgrade its permissions (e.g. 0644 → 0600).
+        // Capture the current permissions up front and restore them after the
+        // swap so a rewrite preserves the original file mode.
+        let original_perms = target
+            .exists()
+            .then(|| fs::metadata(target).ok())
+            .flatten()
+            .map(|m| m.permissions());
+
         // Crate-first atomic write: `tempfile::NamedTempFile::new_in(parent)`
         // guarantees the temp file lives on the same filesystem as the target
         // (so `persist`'s rename is atomic), `write_all` + `sync_all` force the
@@ -616,6 +702,11 @@ impl FsExecutor {
             // left untouched.
             let io_err: std::io::Error = e.into();
             return Err(FsError::Io(io_err));
+        }
+        // Restore the pre-existing permissions (if the file already existed)
+        // so a rewrite does not downgrade the mode to the tempfile default.
+        if let Some(perms) = original_perms {
+            fs::set_permissions(target, perms)?;
         }
         Ok(())
     }
@@ -801,6 +892,43 @@ mod tests {
         root
     }
 
+    /// Test root for the Unix-only tests (permission modes, FIFOs).
+    ///
+    /// `std::env::temp_dir()` can land on a non-Unix filesystem (e.g. a Windows
+    /// drvfs 9p mount when `TMPDIR` points at a Windows path) where `chmod` and
+    /// `mkfifo` are no-ops / unsupported, which would make these tests fail for
+    /// reasons unrelated to the code under test. Probe the base by round-tripping
+    /// a `chmod` and fall back to `/tmp` (always a real Unix FS on Linux) when
+    /// the mode does not stick.
+    #[cfg(unix)]
+    fn unix_test_root(name: &str) -> PathBuf {
+        use std::os::unix::fs::PermissionsExt;
+
+        fn base_dir() -> PathBuf {
+            let probe =
+                std::env::temp_dir().join(format!("_castor_perm_probe_{}", std::process::id()));
+            if fs::create_dir_all(&probe).is_ok() {
+                let f = probe.join("m");
+                let ok = fs::write(&f, "x").is_ok()
+                    && fs::set_permissions(&f, fs::Permissions::from_mode(0o644)).is_ok()
+                    && fs::metadata(&f)
+                        .ok()
+                        .map(|m| m.permissions().mode() & 0o777 == 0o644)
+                        .unwrap_or(false);
+                let _ = fs::remove_dir_all(&probe);
+                if ok {
+                    return std::env::temp_dir();
+                }
+            }
+            PathBuf::from("/tmp")
+        }
+
+        let root = base_dir().join(format!("castor_fs_{}_{}", std::process::id(), name));
+        let _ = fs::remove_dir_all(&root);
+        fs::create_dir_all(&root).unwrap();
+        root
+    }
+
     fn executor(root: &Path) -> FsExecutor {
         FsExecutor::new(root).unwrap()
     }
@@ -961,11 +1089,11 @@ mod tests {
         let err = ex.read_file("empty.jpg", 1, None).unwrap_err();
         assert!(matches!(err, FsError::InvalidArgs(msg) if msg.contains("0 bytes")));
 
-        // Directory with image extension is rejected
+        // Directory with image extension is rejected (non-regular file guard)
         let img_dir = root.join("folder.webp");
         fs::create_dir_all(&img_dir).unwrap();
         let err_dir = ex.read_file("folder.webp", 1, None).unwrap_err();
-        assert!(matches!(err_dir, FsError::InvalidArgs(msg) if msg.contains("is a directory")));
+        assert!(matches!(err_dir, FsError::InvalidArgs(msg) if msg.contains("non-regular file")));
     }
 
     #[test]
@@ -1147,5 +1275,128 @@ mod tests {
         // Out of bounds start
         let out_oob = ex.read_file("test.txt", 100, Some(200)).unwrap();
         assert!(out_oob.contains("showing: 50-50"));
+    }
+
+    /// Rewriting an existing file must preserve its mode (e.g. 0644), not
+    /// downgrade it to the `tempfile` 0600 default. A brand-new file keeps the
+    /// 0600 tempfile default (nothing to preserve).
+    #[cfg(unix)]
+    #[test]
+    fn atomic_write_preserves_existing_permissions() {
+        use std::os::unix::fs::PermissionsExt;
+        let root = unix_test_root("atomic_perms");
+        let file = root.join("perm.txt");
+        fs::write(&file, "original\n").unwrap();
+        let mut p = fs::metadata(&file).unwrap().permissions();
+        p.set_mode(0o644);
+        fs::set_permissions(&file, p).unwrap();
+        assert_eq!(fs::metadata(&file).unwrap().permissions().mode() & 0o777, 0o644);
+
+        let ex = executor(&root);
+        // Rewrite the existing file: its 0644 mode must survive.
+        ex.write_file("perm.txt", "rewritten\n", true).unwrap();
+        let after = fs::metadata(&file).unwrap().permissions();
+        assert_eq!(
+            after.mode() & 0o777,
+            0o644,
+            "rewrite must preserve the original 0644 mode"
+        );
+
+        // A brand-new file has no prior mode to preserve, so it stays at the
+        // tempfile default (0600) rather than being promoted to 0644.
+        let fresh = root.join("fresh.txt");
+        ex.write_file("fresh.txt", "new\n", true).unwrap();
+        assert_eq!(
+            fs::metadata(&fresh).unwrap().permissions().mode() & 0o777,
+            0o600,
+            "a new file must keep the 0600 tempfile default"
+        );
+    }
+
+    /// `read_file` must refuse non-regular files (FIFOs, sockets, devices, and
+    /// directories) with `InvalidArgs` instead of blocking on an unbounded read.
+    #[cfg(unix)]
+    #[test]
+    fn read_file_rejects_non_regular_files() {
+        use std::os::unix::fs::PermissionsExt;
+        let root = unix_test_root("nonregular_read");
+        let ex = executor(&root);
+
+        // FIFO: opening it for read would block the worker thread.
+        let fifo = root.join("pipe.fifo");
+        let cstr = std::ffi::CString::new(fifo.to_str().unwrap()).unwrap();
+        let perms = std::fs::Permissions::from_mode(0o644);
+        let rc = unsafe { libc::mkfifo(cstr.as_ptr(), perms.mode()) };
+        assert_eq!(rc, 0, "libc::mkfifo should succeed");
+        let err = ex.read_file("pipe.fifo", 1, None).unwrap_err();
+        assert!(
+            matches!(err, FsError::InvalidArgs(ref msg) if msg.contains("non-regular file")),
+            "FIFO must be refused with InvalidArgs, got {err:?}"
+        );
+
+        // Directory: non-regular file, refused with the same guard.
+        let d = root.join("adirectory");
+        fs::create_dir_all(&d).unwrap();
+        let err_d = ex.read_file("adirectory", 1, None).unwrap_err();
+        assert!(
+            matches!(err_d, FsError::InvalidArgs(ref msg) if msg.contains("non-regular file")),
+            "directory must be refused with InvalidArgs, got {err_d:?}"
+        );
+    }
+
+    /// Searching with a *file* path (non-git workspace) must return matches from
+    /// that file only, never from sibling files, even though a directory search
+    /// would return both.
+    #[test]
+    fn search_code_constrained_to_single_file() {
+        let root = test_root("search_single_file");
+        fs::write(root.join("alpha.txt"), "alpha NEEDLE line\n").unwrap();
+        fs::write(root.join("beta.txt"), "beta NEEDLE line\n").unwrap();
+        let ex = executor(&root);
+
+        // Directory search finds both siblings.
+        let dir_out = ex.search_code("NEEDLE", ".", 100).unwrap();
+        assert!(dir_out.contains("alpha.txt"), "{dir_out}");
+        assert!(dir_out.contains("beta.txt"), "{dir_out}");
+
+        // File search is constrained to that one file.
+        let file_out = ex.search_code("NEEDLE", "alpha.txt", 100).unwrap();
+        assert!(file_out.contains("alpha.txt"), "{file_out}");
+        assert!(
+            !file_out.contains("beta.txt"),
+            "sibling file must not appear in a single-file search: {file_out}"
+        );
+        assert!(file_out.contains("1 match(es)"), "{file_out}");
+    }
+
+    /// Same as above but inside a git repo, exercising the `git grep` pathspec
+    /// branch (`git_grep_file`) rather than the filesystem-walk fallback.
+    #[test]
+    fn search_code_constrained_to_single_file_in_git_repo() {
+        let root = test_root("search_single_file_git");
+        fs::write(root.join("alpha.txt"), "alpha NEEDLE line\n").unwrap();
+        fs::write(root.join("beta.txt"), "beta NEEDLE line\n").unwrap();
+        let init = std::process::Command::new("git")
+            .args(["init", "-q"])
+            .current_dir(&root)
+            .output()
+            .unwrap();
+        assert!(init.status.success(), "git init failed: {init:?}");
+
+        let ex = executor(&root);
+
+        // Directory search (git grep --untracked) finds both siblings.
+        let dir_out = ex.search_code("NEEDLE", ".", 100).unwrap();
+        assert!(dir_out.contains("alpha.txt"), "{dir_out}");
+        assert!(dir_out.contains("beta.txt"), "{dir_out}");
+
+        // File search uses the file as the git grep pathspec → only that file.
+        let file_out = ex.search_code("NEEDLE", "alpha.txt", 100).unwrap();
+        assert!(file_out.contains("alpha.txt"), "{file_out}");
+        assert!(
+            !file_out.contains("beta.txt"),
+            "sibling file must not appear in a single-file git search: {file_out}"
+        );
+        assert!(file_out.contains("1 match(es)"), "{file_out}");
     }
 }
