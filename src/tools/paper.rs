@@ -10,7 +10,11 @@ use std::time::Duration;
 use thiserror::Error;
 
 const DEFAULT_TIMEOUT_SECS: u64 = 15;
-const DEFAULT_USER_AGENT: &str = "Castor/1.1 (mailto:castor@local.dev)";
+/// The default `User-Agent` (mailto) identifier OpenAlex expects for polite
+/// scraping. The version segment is derived from the crate at compile time so
+/// OpenAlex attributes load to a concrete release (currently `Castor/1.4.1`).
+const DEFAULT_USER_AGENT: &str =
+    concat!("Castor/", env!("CARGO_PKG_VERSION"), " (mailto:castor@local.dev)");
 
 /// Errors produced by [`PaperClient`].
 #[derive(Debug, Error)]
@@ -127,18 +131,20 @@ impl PaperClient {
         api_key: Option<String>,
     ) -> Self {
         let user_agent = match email.as_deref().map(str::trim).filter(|s| !s.is_empty()) {
-            Some(e) => format!("Castor/1.1 (mailto:{e})"),
+            Some(e) => format!("Castor/{} (mailto:{e})", env!("CARGO_PKG_VERSION")),
             None => DEFAULT_USER_AGENT.to_string(),
         };
 
         let mut headers = reqwest::header::HeaderMap::new();
-        if let Some(val) = api_key
-            .as_deref()
-            .map(str::trim)
-            .filter(|s| !s.is_empty())
-            .and_then(|k| reqwest::header::HeaderValue::from_str(k).ok())
+        // OpenAlex accepts a POLITE pool key only via the standard
+        // `Authorization: Bearer <key>` header (or the `?api_key=` query
+        // param). A custom `api_key` header is silently ignored, so a
+        // configured key would fail to authenticate and the request would
+        // fall to the unauthenticated rate limit.
+        if let Some(key) = api_key.as_deref().map(str::trim).filter(|s| !s.is_empty())
+            && let Ok(val) = reqwest::header::HeaderValue::from_str(&format!("Bearer {key}"))
         {
-            headers.insert("api_key", val);
+            headers.insert(reqwest::header::AUTHORIZATION, val);
         }
 
         let client = reqwest::Client::builder()
@@ -354,6 +360,7 @@ fn parse_openalex_work(val: &serde_json::Value) -> Option<PaperEntity> {
 mod tests {
     use super::*;
     use axum::Router;
+    use axum::http::request::Parts;
     use axum::http::StatusCode;
     use axum::response::IntoResponse;
     use axum::routing::get;
@@ -518,5 +525,95 @@ mod tests {
         );
         let papers = c.lookup("RCACopilot", 1).await.unwrap();
         assert_eq!(papers.len(), 1);
+    }
+
+    /// Regression: OpenAlex accepts the POLITE pool key only via the standard
+    /// `Authorization: Bearer <key>` header (a custom `api_key` header is
+    /// silently ignored). This stateful mock captures the headers the client
+    /// actually sends and echoes them back, so we can assert both the auth
+    /// header and the crate-versioned user agent.
+    #[derive(Clone)]
+    struct Capture(std::sync::Arc<std::sync::Mutex<(String, String)>>);
+
+    async fn capture_handler(
+        axum::extract::State(state): axum::extract::State<Capture>,
+        parts: Parts,
+    ) -> axum::response::Response {
+        let auth = parts
+            .headers
+            .get(reqwest::header::AUTHORIZATION)
+            .and_then(|v| v.to_str().ok())
+            .unwrap_or("")
+            .to_string();
+        let ua = parts
+            .headers
+            .get(reqwest::header::USER_AGENT)
+            .and_then(|v| v.to_str().ok())
+            .unwrap_or("")
+            .to_string();
+        *state.0.lock().unwrap() = (auth, ua);
+        json_body(r#"{"results":[]}"#)
+    }
+
+    async fn capture_router() -> (Router, Capture) {
+        let cap = Capture(std::sync::Arc::new(std::sync::Mutex::new((
+            String::new(),
+            String::new(),
+        ))));
+        let app = Router::new()
+            .route("/works", get(capture_handler))
+            .with_state(cap.clone());
+        (app, cap)
+    }
+
+    #[tokio::test]
+    async fn paper_client_no_key_sends_no_authorization_and_default_user_agent() {
+        let (app, cap) = capture_router().await;
+        let base = start(app).await;
+        let c = PaperClient::with_base_url(&base);
+        c.lookup("RCACopilot", 1).await.unwrap();
+
+        let (auth, ua) = {
+            let g = cap.0.lock().unwrap();
+            (g.0.clone(), g.1.clone())
+        };
+        assert!(
+            auth.is_empty(),
+            "no Authorization header expected without a key, got: {auth:?}"
+        );
+        assert_eq!(
+            ua,
+            format!("Castor/{} (mailto:castor@local.dev)", env!("CARGO_PKG_VERSION")),
+            "default user agent should be the crate-versioned mailto, got: {ua:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn paper_client_sends_bearer_authorization_and_versioned_user_agent() {
+        let (app, cap) = capture_router().await;
+        let base = start(app).await;
+        let c = PaperClient::with_options(
+            Some(&base),
+            Some("apatheticmioz@gmail.com".to_string()),
+            Some("test_secret_api_key".to_string()),
+        );
+        c.lookup("RCACopilot", 1).await.unwrap();
+
+        let (auth, ua) = {
+            let g = cap.0.lock().unwrap();
+            (g.0.clone(), g.1.clone())
+        };
+        // The key must travel as a standard `Authorization: Bearer <key>` header.
+        assert_eq!(auth, "Bearer test_secret_api_key");
+        // The user agent is derived from the crate version and carries the
+        // polite-pool email.
+        assert_eq!(
+            ua,
+            format!(
+                "Castor/{} (mailto:apatheticmioz@gmail.com)",
+                env!("CARGO_PKG_VERSION")
+            ),
+            "user agent should be the crate-versioned mailto, got: {ua:?}"
+        );
     }
 }

@@ -238,6 +238,21 @@ impl ExtensionBridge {
             .collect::<Vec<_>>()
             .join("\n");
 
+        // MCP servers signal a failed tool execution via the structured
+        // `isError` flag, not by returning a protocol-level error. The runner
+        // and telemetry flag a turn as an error purely from the
+        // `"Error:"` prefix on `ToolOutcome.text` (see runner tool_result
+        // events), so surface a server-reported `isError` through that
+        // convention: prepend `"Error: "` when the text does not already
+        // carry it. `is_error: None` (absent) and `Some(false)` are treated
+        // as success and left untouched.
+        if result.is_error == Some(true) && !text.starts_with("Error:") {
+            let mut prefixed = String::with_capacity(text.len() + "Error: ".len());
+            prefixed.push_str("Error: ");
+            prefixed.push_str(&text);
+            return Ok(cap_result(&prefixed));
+        }
+
         Ok(cap_result(&text))
     }
 
@@ -386,6 +401,16 @@ def handle(msg):
                         "description": "Returns a large payload.",
                         "inputSchema": {"type": "object", "properties": {}},
                     },
+                    {
+                        "name": "fail",
+                        "description": "Returns a tool error (isError=true).",
+                        "inputSchema": {"type": "object", "properties": {}},
+                    },
+                    {
+                        "name": "fail_errored",
+                        "description": "Returns an error whose text is already prefixed.",
+                        "inputSchema": {"type": "object", "properties": {}},
+                    },
                 ]
             },
         })
@@ -396,8 +421,16 @@ def handle(msg):
         args = params.get("arguments") or {}
         if name == "echo":
             text = "echo:" + str(args.get("text", ""))
+            is_err = False
         elif name == "big":
             text = "x" * 50000
+            is_err = False
+        elif name == "fail":
+            text = "boom: the extension blew up"
+            is_err = True
+        elif name == "fail_errored":
+            text = "Error: already prefixed by the server"
+            is_err = True
         else:
             write({
                 "jsonrpc": "2.0",
@@ -408,7 +441,7 @@ def handle(msg):
         write({
             "jsonrpc": "2.0",
             "id": id,
-            "result": {"content": [{"type": "text", "text": text}], "isError": False},
+            "result": {"content": [{"type": "text", "text": text}], "isError": is_err},
         })
         return
 
@@ -504,6 +537,50 @@ for line in sys.stdin:
             .clone();
         let out = bridge.call(&full, r#"{"text":"hi"}"#).await.unwrap();
         assert_eq!(out, "echo:hi");
+        bridge.shutdown_all().await;
+    }
+
+    /// A server-reported `isError=true` with text that does NOT already carry
+    /// the `Error:` prefix must be surfaced with that prefix prepended, so the
+    /// runner/telemetry (which key off the `Error:` prefix) flag the turn as a
+    /// failed tool call rather than a successful one.
+    #[tokio::test]
+    async fn call_is_error_true_prepend_error_prefix() {
+        let bridge = ExtensionBridge::spawn(&[mock_command()]).await.unwrap();
+        let full = bridge
+            .tool_schemas()
+            .iter()
+            .find(|s| s.name.ends_with("__fail"))
+            .unwrap()
+            .name
+            .clone();
+        let out = bridge.call(&full, "{}").await.unwrap();
+        assert!(
+            out.starts_with("Error: "),
+            "expected the isError result to be prefixed, got: {out:?}"
+        );
+        assert_eq!(out, "Error: boom: the extension blew up");
+        bridge.shutdown_all().await;
+    }
+
+    /// A server-reported `isError=true` whose text ALREADY starts with
+    /// `Error:` must NOT be double-prefixed.
+    #[tokio::test]
+    async fn call_is_error_true_no_double_prefix() {
+        let bridge = ExtensionBridge::spawn(&[mock_command()]).await.unwrap();
+        let full = bridge
+            .tool_schemas()
+            .iter()
+            .find(|s| s.name.ends_with("__fail_errored"))
+            .unwrap()
+            .name
+            .clone();
+        let out = bridge.call(&full, "{}").await.unwrap();
+        assert!(
+            out.starts_with("Error: ") && !out.starts_with("Error: Error:"),
+            "expected a single Error: prefix, got: {out:?}"
+        );
+        assert_eq!(out, "Error: already prefixed by the server");
         bridge.shutdown_all().await;
     }
 
