@@ -58,6 +58,8 @@ pub enum AstError {
     Pattern(String),
     #[error("{0}")]
     Language(String),
+    #[error("SyntaxValidationError: {0}")]
+    SyntaxFailure(String),
 }
 
 /// A single AST match. `line`/`col` are 0-indexed.
@@ -81,7 +83,7 @@ pub struct ReplaceSummary {
 }
 
 /// Resolve a file path to its canonical `SupportLang` via
-/// `SupportLang::from_path`, which knows the full 28-language extension map
+/// `SupportLang::from_path`, which knows the full 27-language extension map
 /// (e.g. `.go` → Go, `.sh` → Bash, `.json` → Json, `.rs` → Rust). Returns
 /// `None` for unrecognized extensions (the file is skipped on directory scans).
 fn infer_lang_by_extension(path: &Path) -> Option<SupportLang> {
@@ -89,7 +91,7 @@ fn infer_lang_by_extension(path: &Path) -> Option<SupportLang> {
 }
 
 /// Parse a language alias (e.g. `"js"`, `"ts"`, `"py"`, `"rs"`) into a
-/// `SupportLang`. All 28 canonical aliases from `SupportLang::all_langs` are
+/// `SupportLang`. All 27 canonical aliases from `SupportLang::all_langs` are
 /// accepted (case-insensitively).
 fn parse_lang(alias: &str) -> Result<SupportLang, AstError> {
     alias
@@ -162,7 +164,7 @@ fn resolve_target(root: &Path, raw: &str) -> Result<PathBuf, AstError> {
 
 /// Search for a syntactic pattern under `root` (or within `path` if specified).
 ///
-/// `lang` is a target language alias from the 28-language `SupportLang` set
+/// `lang` is a target language alias from the 27-language `SupportLang` set
 /// (e.g. `"ts"`, `"js"`, `"py"`, `"go"`, `"rs"`). Files whose extension maps to
 /// a different language are skipped.
 pub fn ast_search(
@@ -330,13 +332,39 @@ fn replace_in_memory(
 }
 
 /// Syntax gate: reparse `content` and report whether any ERROR-kind node is
-/// present (tree-sitter error recovery). Presence means the rewrite is
-/// malformed and the file must be rolled back.
-fn syntax_gate(content: &str, lang: SupportLang) -> bool {
+/// present (tree-sitter error recovery). Presence means the content is
+/// malformed. Used by [`ast_replace`] for its rollback decision and by
+/// [`validate_file_syntax`] to gate `edit_file` writes when the `ast` feature
+/// is enabled.
+pub fn syntax_gate(content: &str, lang: SupportLang) -> bool {
     let doc = lang.ast_grep(content);
     let mut has_error = false;
     walk_for_errors(&doc.root(), &mut has_error);
     has_error
+}
+
+/// Validate that `content` parses cleanly as the language that
+/// [`infer_lang_by_extension`] resolves for `path`.
+///
+/// Returns `Ok(())` when the extension does not map to any supported
+/// grammar (nothing to validate, so no language is assumed) or when the
+/// content parses without any ERROR/UNDEFINED node. Returns
+/// [`AstError::SyntaxFailure`] when the resolved grammar flags the content as
+/// malformed — this is what lets `FsExecutor::edit_file` refuse a write that
+/// would introduce syntax errors into a source file.
+pub fn validate_file_syntax(path: &Path, content: &str) -> Result<(), AstError> {
+    let Some(lang) = infer_lang_by_extension(path) else {
+        // Unrecognized extension: no bundled grammar, so there is no syntax to
+        // validate. (This also keeps non-code edits like `.txt`/`.md` free.)
+        return Ok(());
+    };
+    if syntax_gate(content, lang) {
+        return Err(AstError::SyntaxFailure(format!(
+            "in-memory {lang} parse of {} found ERROR/UNDEFINED nodes",
+            path.display()
+        )));
+    }
+    Ok(())
 }
 
 fn walk_for_errors(node: &Node<ast_grep_core::tree_sitter::StrDoc<SupportLang>>, out: &mut bool) {
@@ -695,5 +723,55 @@ mod tests {
             matches!(err, AstError::Sandbox(SandboxError::WorkspaceRoot(_))),
             "expected a sandbox refusal, got {err:?}"
         );
+    }
+
+    #[test]
+    fn validate_file_syntax_accepts_valid_rust() {
+        // A syntactically valid Rust string parses cleanly with no ERROR node.
+        let path = std::path::Path::new("src/lib.rs");
+        let content = "fn add(a: i32, b: i32) -> i32 {\n    a + b\n}\n";
+        assert!(validate_file_syntax(path, content).is_ok());
+    }
+
+    #[test]
+    fn validate_file_syntax_accepts_valid_typescript() {
+        let path = std::path::Path::new("src/app.ts");
+        let content = "function greet(name: string): string {\n  return `hi ${name}`;\n}\n";
+        assert!(validate_file_syntax(path, content).is_ok());
+    }
+
+    #[test]
+    fn validate_file_syntax_rejects_invalid_rust() {
+        // `let x = ;;;` is malformed Rust: the missing initializer produces an
+        // ERROR node, so the gate must report a syntax failure.
+        let path = std::path::Path::new("src/lib.rs");
+        let content = "fn main() {\n    let x = ;;;\n}\n";
+        let err = validate_file_syntax(path, content).unwrap_err();
+        assert!(
+            matches!(err, AstError::SyntaxFailure(_)),
+            "expected a SyntaxFailure, got {err:?}"
+        );
+        assert!(
+            err.to_string().contains("SyntaxValidationError"),
+            "error message must be labelled SyntaxValidationError, got: {err}"
+        );
+    }
+
+    #[test]
+    fn validate_file_syntax_rejects_invalid_typescript() {
+        // A dangling `function` with no body is malformed TS.
+        let path = std::path::Path::new("src/app.ts");
+        let content = "function broken(\n";
+        let err = validate_file_syntax(path, content).unwrap_err();
+        assert!(matches!(err, AstError::SyntaxFailure(_)));
+    }
+
+    #[test]
+    fn validate_file_syntax_ignores_unsupported_extension() {
+        // An unrecognized extension has no bundled grammar, so validation is a
+        // no-op `Ok` (there is no language to assume) even for "nonsense" text.
+        let path = std::path::Path::new("notes.txt");
+        let content = "let x = ;;;\n";
+        assert!(validate_file_syntax(path, content).is_ok());
     }
 }

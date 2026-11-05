@@ -150,12 +150,15 @@ The exact list below is the present-state inventory from
 Use structural AST tools, not string matching, for syntactic discovery and refactoring:
 - `ast_search` — find code by pattern with metavariables via native `ast-grep` (`function $NAME($$$ARGS) { $$$BODY }`).
 - `ast_replace` — multi-file structural AST refactoring with automatic rollback on syntax error.
-- Code edits made via `edit_file` are automatically validated by in-memory AST
-  and syntax gates before disk commit.
+- With the `ast` feature enabled, code edits made via `edit_file` are also
+  validated by an in-memory AST syntax gate before disk commit; without it,
+  `edit_file` performs the plain exact-substring replacement only.
 
 ### 3.3 Edit primitives
 - `edit_file` — exact-substring, uniqueness-guarded, per-region line-ending
-  preservation with transparent in-memory syntax validation.
+  preservation. Under the `ast` feature the rewritten content additionally passes
+  an in-memory AST syntax gate before commit; without the feature there is no
+  syntax validation and the edit is a plain substring replacement.
 - Fuzzy matching is not supported; modifications use exact substrings.
 
 ### 3.4 Module layout
@@ -206,7 +209,7 @@ src/
     mod.rs               # Composite tool executor (lean 8-tool core + feature-gated ast/paper) implementing runner::ToolExecutor
     fs.rs                # Filesystem tools (read, write, edit, list, search)
     sandbox.rs           # Zero-trust path containment and workspace security policy
-    shell.rs             # Safe bash executor and command AST validator (git ops and Python run here)
+    shell.rs             # Safe bash executor and lexical command scanner (regex/segment tokenizer; not a code AST parser; git ops and Python run here)
     ast.rs               # [feature: ast] Structural AST search and replace via native ast-grep
     web.rs               # Web search (SearXNG -> Brave) and fetch (markdown conversion)
     paper.rs             # [feature: paper] Academic paper lookup via OpenAlex (metadata, affiliations, OA PDFs)
@@ -285,8 +288,25 @@ explicit `ALLOW_ENGINE_INTERRUPT=1` opt-in before they execute.
 
 ## 6. Security & Reporting
 
-- The sandbox is a **zero-trust** defense-in-depth boundary:
-  Path Normalizer -> Symlink Realpath resolution -> Workspace Root Guard -> Dangerous-Shell Filter -> AST Syntax Validation.
+- The sandbox is a **zero-trust** defense-in-depth boundary over all file and
+  shell paths (`src/tools/sandbox.rs`). The path-containment pipeline runs five
+  layers in order: lexical path Normalizer (null-byte / tilde / reserved-device /
+  `.`-`..` collapse) -> Workspace Root Guard (canonicalize the root) -> Symlink
+  Realpath resolution (refuse escapes) -> Out-of-tree refusal -> `check_binary`
+  (layer 5: magic-number sniff -> `BinaryFileError` fail-fast on read). These
+  layers govern *path access*; they do not parse code.
+- The **shell command scanner** (`src/tools/shell.rs` `validate`) is a separate
+  *lexical* gate, not a path layer: it tokenizes and splits the command into
+  segments and matches dangerous patterns with regexes (fork bombs, disk wipes,
+  `rm`/`del` on protected roots, `dd` to devices, `sudo`/wrapper unwrapping,
+  unexpanded `$` references) before anything is spawned. It is a *command-string*
+  policy check, not a code AST parser.
+- **In-memory AST syntax validation** is a third, distinct concern and is
+  **feature-gated under `ast`**: on `edit_file` and `ast_replace` the fully
+  rewritten content is reparsed in memory and any `ERROR`/`UNDEFINED` tree-sitter
+  node blocks the write (or triggers rollback). It validates *source-file edits
+  only* (via extension-resolved grammar) and applies to neither path access nor
+  the shell command scanner.
 - **Never** open a public issue for a security vulnerability. Report
   privately per [`SECURITY.md`](SECURITY.md).
 - The sandbox containment test suite (`src/tools/sandbox.rs`) is the regression net for the boundary.

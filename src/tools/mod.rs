@@ -124,6 +124,15 @@ impl CompositeExecutor {
 /// `bash`, `web_search`, `web_fetch`). `ast` appends the structural AST
 /// surgery tools; `paper` appends OpenAlex `paper_lookup`.
 pub fn builtin_tool_schemas() -> Vec<ToolSchema> {
+    // The `edit_file` description depends on the `ast` feature gate: with
+    // `ast`, edits pass an in-memory AST syntax gate before commit; without it,
+    // `edit_file` is a plain exact-substring replacement and must NOT promise
+    // AST validation.
+    #[cfg(feature = "ast")]
+    const EDIT_FILE_DESC: &str = "Replace an exact substring in a file, validating the rewritten content with in-memory AST syntax before committing. Target must match uniquely unless replace_all is true.";
+    #[cfg(not(feature = "ast"))]
+    const EDIT_FILE_DESC: &str = "Replace an exact substring in a file. Target must match uniquely unless replace_all is true.";
+
     // `mut` is needed only for the feature-gated `push` blocks below (`ast`,
     // `paper`); allow the warning on builds where both are off.
     #[allow(unused_mut)]
@@ -156,7 +165,7 @@ pub fn builtin_tool_schemas() -> Vec<ToolSchema> {
         },
         ToolSchema {
             name: "edit_file".to_string(),
-            description: "Replace an exact substring in a file with in-memory AST syntax validation before commit. Target must match uniquely unless replace_all is true.".to_string(),
+            description: EDIT_FILE_DESC.to_string(),
             parameters: json!({
                 "type": "object",
                 "properties": {

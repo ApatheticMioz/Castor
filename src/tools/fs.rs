@@ -300,6 +300,22 @@ impl FsExecutor {
             original.replacen(&effective_target, &effective_replacement, 1)
         };
 
+        // AST gate: when the `ast` feature is enabled, parse the fully-rewritten
+        // content in memory before committing it to disk. If the resolved
+        // grammar flags an ERROR/UNDEFINED node, the write is refused and the
+        // file is left byte-identical. Without the feature, `edit_file` performs
+        // the plain exact-substring replacement only (no compile, no AST call).
+        #[cfg(feature = "ast")]
+        if let Err(e) = super::ast::validate_file_syntax(&resolved, &updated) {
+            let detail = match e {
+                super::ast::AstError::SyntaxFailure(detail) => detail,
+                other => other.to_string(),
+            };
+            return Err(FsError::EditError(format!(
+                "SyntaxValidationError: replacement introduces syntax errors in {path}. No write performed. {detail}"
+            )));
+        }
+
         self.atomic_write(&resolved, &updated)?;
         let diff_snippet = Self::render_diff_snippet(&effective_target, &effective_replacement);
         Ok(format!(
@@ -971,6 +987,70 @@ mod tests {
         assert!(out.contains("```diff"));
         assert!(out.contains("- fn old_logic() -> bool { true }"));
         assert!(out.contains("+ fn new_logic() -> bool { false }"));
+    }
+
+    #[cfg(feature = "ast")]
+    #[test]
+    fn edit_file_rejects_syntax_error_without_writing() {
+        // With the `ast` feature on, an edit whose result does not parse must be
+        // refused with a SyntaxValidationError and the file must stay untouched.
+        let root = test_root("edit_syntax_gate");
+        let file = root.join("lib.rs");
+        let original = "fn broken_marker() {}\n";
+        fs::write(&file, original).unwrap();
+        let ex = executor(&root);
+
+        let err = ex
+            .edit_file(
+                "lib.rs",
+                "fn broken_marker() {}",
+                "fn broken_marker() { let x = ;;; }",
+                false,
+            )
+            .unwrap_err();
+        assert!(
+            matches!(err, FsError::EditError(_)),
+            "expected an EditError, got {err:?}"
+        );
+        assert!(
+            err.to_string().contains("SyntaxValidationError"),
+            "error must be labelled SyntaxValidationError, got: {err}"
+        );
+        assert!(
+            err.to_string().contains("No write performed"),
+            "error must state that no write was performed, got: {err}"
+        );
+        assert_eq!(
+            fs::read_to_string(&file).unwrap(),
+            original,
+            "file must be byte-identical after a refused edit"
+        );
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[cfg(feature = "ast")]
+    #[test]
+    fn edit_file_allows_valid_rust_edit() {
+        // A syntactically valid rewrite passes the gate and is committed.
+        let root = test_root("edit_syntax_ok");
+        let file = root.join("lib.rs");
+        let original = "fn add(a: i32, b: i32) -> i32 {\n    a + b\n}\n";
+        fs::write(&file, original).unwrap();
+        let ex = executor(&root);
+
+        let out = ex
+            .edit_file(
+                "lib.rs",
+                "fn add(a: i32, b: i32) -> i32 {",
+                "fn add_two(a: i32, b: i32) -> i32 {",
+                false,
+            )
+            .unwrap();
+        assert!(out.contains("Replaced 1 occurrence(s)"));
+        let after = fs::read_to_string(&file).unwrap();
+        assert!(after.contains("fn add_two("));
+        assert!(after.contains("a + b"));
+        let _ = std::fs::remove_dir_all(&root);
     }
 
     #[test]

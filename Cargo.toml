@@ -32,7 +32,7 @@ path = "src/main.rs"
 
 [dependencies]
 # Optional under the `ast` feature (structural AST surgery tools).
-# The `builtin-parser` feature enables all 28 bundled tree-sitter grammars in
+# The `builtin-parser` feature enables all 27 bundled tree-sitter grammars in
 # one shot, so `SupportLang::from_path` can resolve any of them.
 ast-grep-core = { version = "0.45", optional = true }
 ast-grep-language = { version = "0.45", default-features = false, features = ["builtin-parser"], optional = true }
