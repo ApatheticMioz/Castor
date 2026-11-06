@@ -9,7 +9,12 @@
 //! Named sessions persist their sanitized conversation history to
 //! `<state>/sessions/<id>/messages.json` (end of each turn + normal
 //! completion) and resume it at the start of a later dispatch, subject to
-//! the 75% `max_context` watermark.
+//! the 75% `max_context` watermark. A running session is additionally bounded
+//! in flight: once its accumulated history reaches 90% of `max_context`
+//! (re-checked every turn, not only at resume), tool dispatch is disabled for
+//! that turn and the session lands cleanly on a final completion in the
+//! remaining 10% headroom, so a growing context never overflows the engine's
+//! window into an unhandled HTTP 400.
 //!
 //! Budgets, cooperative landing, loop detection, and the JSONL event ledger
 //! live here; the loop detector and event logger are split into submodules.
@@ -64,6 +69,16 @@ fn is_reasoning_ceiling(completion: &crate::engine::Completion) -> bool {
             .as_deref()
             .is_some_and(|f| f == REASONING_CEILING_FINISH)
 }
+
+/// The in-flight context-ceiling directive, appended as a final user message
+/// once a running session's accumulated history reaches 90% of
+/// [`SessionOptions::max_context`]. It tells the model to stop dispatching
+/// tools and synthesize an immediate final response so the next request stays
+/// within the engine's context window (a >`max_context` send would otherwise
+/// surface as an unhandled HTTP 400 and fail the task).
+const CONTEXT_CEILING_DIRECTIVE: &str =
+    "[System: Working context budget has reached 90%. Do not execute further tools. \
+     Synthesize your final conclusions and response immediately.]";
 
 /// Sliding-window size for loop detection (action hashes).
 const LOOP_WINDOW: usize = 6;
@@ -255,8 +270,7 @@ fn metrics_json(m: &Metrics) -> serde_json::Value {
     serde_json::Value::Object(o)
 }
 
-/// Per-turn slot-bookkeeping context injected into [`SessionOptions`] (Issues
-/// #23 / #28).
+/// Per-turn slot-bookkeeping context injected into [`SessionOptions`].
 ///
 /// It carries everything the runner's turn loop needs to record a turn's token
 /// footprint on a held lease and to participate in the pool's cooperative
@@ -269,31 +283,26 @@ fn metrics_json(m: &Metrics) -> serde_json::Value {
 ///   exit).
 /// - `task_id`: the task bound to the lease (key for
 ///   [`crate::task::semaphore::TaskSemaphore::update_context_tokens`]).
-/// - `min_eviction_detect_tokens` / `cache_hit_yield_ratio`: the yield-gate
-///   thresholds, injected from [`crate::config::Config`] so the runner stays
-///   free of any config dependency (mirrors [`should_yield`]).
+///
+/// The yield gate itself is owned entirely by the pool
+/// ([`crate::task::semaphore::TaskSemaphore::should_yield`]) and is driven by
+/// the pool's own token-budget state, so no per-turn threshold knobs are
+/// injected here.
 #[derive(Clone)]
 pub struct LeaseYieldContext {
     pub sem: std::sync::Arc<crate::task::semaphore::TaskSemaphore>,
     pub lease: std::sync::Arc<std::sync::Mutex<crate::task::semaphore::SlotLease>>,
     pub task_id: String,
-    pub min_eviction_detect_tokens: u32,
-    pub cache_hit_yield_ratio: f64,
 }
 
 impl std::fmt::Debug for LeaseYieldContext {
     /// `sem` and `lease` hold non-`Debug` handles (`oneshot::Sender` inside the
-    /// wait-queue; the slot lease file path), so we print only the identity
-    /// and the yield-gate thresholds — enough to log a yield decision without
-    /// pulling in the whole semaphore state.
+    /// wait-queue; the slot lease file path), so we print only the task id —
+    /// enough to log a yield decision without pulling in the whole semaphore
+    /// state.
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("LeaseYieldContext")
             .field("task_id", &self.task_id)
-            .field(
-                "min_eviction_detect_tokens",
-                &self.min_eviction_detect_tokens,
-            )
-            .field("cache_hit_yield_ratio", &self.cache_hit_yield_ratio)
             .finish()
     }
 }
@@ -320,12 +329,22 @@ pub struct SessionOptions {
     /// Consecutive non-mutating bash probes before the probe-budget advisory
     /// is injected. Defaults to 4.
     pub probe_budget: usize,
-    /// The engine's max context (in tokens). Drives the session-history
-    /// watermark: a resumed session rolls to a fresh `[system, user]` pair
-    /// when the loaded history plus the new prompt is expected to exceed
-    /// 75% of this budget (tokens approximated as `chars / 4`). `0` (the
-    /// default) means the watermark is disabled — history always resumes
-    /// when present (zero behavior change for callers that don't set it).
+    /// The engine's max context (in tokens). Drives two in-session gates
+    /// (tokens approximated as `chars / 4`):
+    ///
+    /// - **75% resume watermark** — a resumed session rolls to a fresh
+    ///   `[system, user]` pair when the loaded history plus the new prompt
+    ///   would exceed 75% of this budget (checked once, at resume, in
+    ///   [`should_resume`]).
+    /// - **90% in-flight ceiling** — while a session runs, [`run_session`]
+    ///   re-checks the accumulated history against 90% of this budget at the
+    ///   top of every turn; when reached, it disables further tool dispatch,
+    ///   appends [`CONTEXT_CEILING_DIRECTIVE`], and lands the final completion
+    ///   in the remaining 10% headroom.
+    ///
+    /// `0` (the default) disables both gates — history always resumes when
+    /// present and the in-flight ceiling never trips (zero behavior change for
+    /// callers that don't set it).
     pub max_context: usize,
     /// Reasoning open tag the runner strips from assistant content and
     /// sanitizes inside tool results. `None` means "use the reserved default"
@@ -809,6 +828,21 @@ fn watermark_tokens(max_context: usize) -> usize {
     (max_context as u64 * 75 / 100) as usize
 }
 
+/// The 90% in-flight ceiling for a given `max_context` token budget.
+///
+/// Unlike the 75% resume-time watermark (which only fires once, on session
+/// resume, in [`should_resume`]), this ceiling is re-checked at the top of
+/// **every** turn inside [`run_session`]. When a session's accumulated history
+/// reaches it, tool dispatch is disabled for that turn,
+/// [`CONTEXT_CEILING_DIRECTIVE`] is appended, and the model is given one
+/// final completion in the remaining 10% headroom — so a session whose
+/// in-conversation context grows monotonically (large tool outputs, multi-step
+/// traces) always lands cleanly within the engine's window instead of sending
+/// a >`max_context` request and failing with an unhandled HTTP 400.
+fn in_flight_ceiling_tokens(max_context: usize) -> usize {
+    (max_context as u64 * 90 / 100) as usize
+}
+
 /// The token footprint of a *resumed* session's loaded history, subject to the
 /// same 75% [`max_context`] watermark gate used by [`run_session`] on resume.
 ///
@@ -1002,6 +1036,15 @@ async fn chat_with_watchdog(
 /// salvage pass writes a plain-text report to
 /// `<state_or_workspace>/.scratch/salvage_<session_id>.md` (see
 /// [`SessionOptions`] and the deliberation-ceiling salvage path below).
+///
+/// **In-flight 90% context ceiling**: with `options.max_context > 0`, each
+/// turn first checks the accumulated [`history_tokens`] against the 90%
+/// [`in_flight_ceiling_tokens`]. When reached, that turn disables tool
+/// dispatch (the engine is called with no tool schemas), appends
+/// [`CONTEXT_CEILING_DIRECTIVE`], and the loop breaks after the turn so the
+/// model completes in the remaining 10% headroom. The session then lands on
+/// a clean `Completed` terminal status instead of growing into an
+/// over-window request that the engine rejects with an HTTP 400.
 #[allow(clippy::too_many_arguments)] // each argument is a distinct session dependency
 pub async fn run_session(
     engine: &dyn ChatEngine,
@@ -1083,10 +1126,54 @@ pub async fn run_session(
         .map(|o| o.effective_close_tag())
         .unwrap_or_else(|| concat!("</th", "ink>").to_string());
 
+    // In-flight 90% context ceiling (re-checked every turn, not only at
+    // resume). When the session's accumulated history reaches 90% of
+    // `max_context`, the next turn disables tool dispatch, appends the ceiling
+    // directive, and lands the final completion in the remaining 10% headroom.
+    // `0` disables the gate (callers that don't configure a budget are
+    // unchanged).
+    let ceiling_tokens = in_flight_ceiling_tokens(
+        options
+            .map(|o| o.max_context)
+            .unwrap_or(0)
+    );
+    let mut ceiling_triggered = false;
+    let mut break_after_turn = false;
+
     while turns < budget {
+        // In-flight 90% context ceiling: before building the request, check
+        // the accumulated history against the 90% budget. When it is reached
+        // for the first time, append the directive (forcing a final, tool-free
+        // completion in the remaining headroom) and mark this as the last turn.
+        if !ceiling_triggered
+            && ceiling_tokens > 0
+            && history_tokens(&messages) >= ceiling_tokens
+        {
+            tracing::info!(
+                session = %session_id,
+                history_tokens = history_tokens(&messages),
+                ceiling_tokens,
+                "in-flight 90% context ceiling reached; disabling tool dispatch and \
+                 landing a final completion in the remaining headroom"
+            );
+            let _ = logger.append(serde_json::json!({
+                "type": "context_ceiling",
+                "turn": turns,
+                "history_tokens": history_tokens(&messages),
+                "max_context": ceiling_tokens,
+            }));
+            messages.push(msg("user", CONTEXT_CEILING_DIRECTIVE));
+            ceiling_triggered = true;
+            break_after_turn = true;
+        }
+
         // Cooperative landing: in the last ~5 turns, inject a budget notice.
+        // The ceiling turn already forces a terminal landing (tool dispatch
+        // disabled and the loop breaks after it), so the landing notice is
+        // skipped on that turn — the ceiling directive itself is the "land
+        // now" directive and must remain the final user message the model sees.
         let remaining = budget - turns;
-        if remaining <= LANDING_WINDOW && !landing_injected {
+        if !ceiling_triggered && remaining <= LANDING_WINDOW && !landing_injected {
             let notice = format!(
                 "[System: Lease Extension] You have {remaining} turns left in your budget. Land now: \
                  synthesize your final deliverable, findings, and grounded conclusions. \
@@ -1099,15 +1186,24 @@ pub async fn run_session(
         turns += 1;
 
         // Build the request: messages first, tool schemas last (APC contract).
-        // The per-turn stall watchdog wraps the call when a
+        // On the ceiling turn (90% of `max_context` reached) tool dispatch is
+        // disabled: the model is called with an empty tool list and the
+        // ceiling directive already in `messages`, so it cannot emit further
+        // tool calls and must produce its final response in the remaining
+        // 10% headroom. The per-turn stall watchdog wraps the call when a
         // timeout or reasoning-token budget is configured; otherwise the call
         // is issued directly (zero behavior change for unconfigured callers).
+        let active_tools: &[ToolSchema] = if break_after_turn {
+            &[]
+        } else {
+            tools
+        };
         let watchdog = wd_timeout > 0 || wd_max_reasoning > 0;
         let completion = if watchdog {
             let primary = chat_with_watchdog(
                 engine,
                 &messages,
-                tools,
+                active_tools,
                 effort,
                 wd_timeout,
                 wd_max_reasoning,
@@ -1122,19 +1218,19 @@ pub async fn run_session(
                         "Transient SSE stream error on turn {turns}: {err}; retrying once"
                     );
                     tokio::time::sleep(std::time::Duration::from_millis(500)).await;
-                    engine.chat(&messages, tools, true, effort).await?
+                    engine.chat(&messages, active_tools, true, effort).await?
                 }
                 Err(err) => return Err(RunnerError::Engine(err)),
             }
         } else {
-            match engine.chat(&messages, tools, true, effort).await {
+            match engine.chat(&messages, active_tools, true, effort).await {
                 Ok(c) => c,
                 Err(crate::engine::EngineError::Sse(err)) => {
                     tracing::warn!(
                         "Transient SSE stream error on turn {turns}: {err}; retrying once"
                     );
                     tokio::time::sleep(std::time::Duration::from_millis(500)).await;
-                    engine.chat(&messages, tools, true, effort).await?
+                    engine.chat(&messages, active_tools, true, effort).await?
                 }
                 Err(err) => return Err(RunnerError::Engine(err)),
             }
@@ -1176,6 +1272,30 @@ pub async fn run_session(
         });
 
         if completion.tool_calls.is_empty() {
+            // In-flight 90% ceiling landed: the directive already forced a
+            // final, tool-free completion in the remaining headroom. Record
+            // it and break immediately — skipping the severed-stop
+            // continuation, the reasoning-ceiling salvage pass, and the
+            // degenerate-final salvage retry, all of which would issue further
+            // engine calls (and dispatch tools) that the ceiling must
+            // prevent.
+            if break_after_turn {
+                final_text = if !completion.content.trim().is_empty() {
+                    completion.content
+                } else if let Some(rc) = completion
+                    .reasoning_content
+                    .as_deref()
+                    .map(str::trim)
+                    .filter(|s| !s.is_empty())
+                {
+                    rc.to_string()
+                } else {
+                    completion.content
+                };
+                final_produced = true;
+                break;
+            }
+
             // Compute the ceiling signal before moving `completion.content`.
             let ceiling_hit = is_reasoning_ceiling(&completion);
 
@@ -1524,6 +1644,28 @@ pub async fn run_session(
             break;
         }
 
+        // Defensive invariant on the in-flight 90% ceiling turn: we sent the
+        // model an empty tool list, so it cannot legitimately emit tool calls.
+        // If one slips through (e.g. a server that ignores the tool list),
+        // never dispatch it — land on the text the model produced and break,
+        // keeping the "no further tool dispatches" contract absolute.
+        if break_after_turn && !completion.tool_calls.is_empty() {
+            final_text = if !completion.content.trim().is_empty() {
+                completion.content
+            } else if let Some(rc) = completion
+                .reasoning_content
+                .as_deref()
+                .map(str::trim)
+                .filter(|s| !s.is_empty())
+            {
+                rc.to_string()
+            } else {
+                String::new()
+            };
+            final_produced = true;
+            break;
+        }
+
         // Execute each tool call.
         for tc in &completion.tool_calls {
             let outcome = match executor.execute(&tc.name, &tc.arguments).await {
@@ -1642,16 +1784,16 @@ impasse, state your findings and ask for alignment rather than continuing to re-
             save_messages(state, session_id, &messages);
         }
 
-        // Issues #23 / #28: per-turn slot bookkeeping + cooperative yield.
-        // Only runs when the worker injected a `LeaseYieldContext`. We record
-        // the turn's token footprint on the held lease, then let the pool's
-        // yield gate decide whether this worker should hand its slot to a
-        // younger / more cache-efficient worker. `completion` is still alive
-        // here (the next loop iteration re-binds it), so we read its metrics.
+        // Per-turn slot bookkeeping + cooperative yield (only runs when the
+        // worker injected a `LeaseYieldContext`). We record the turn's token
+        // footprint on the held lease, then let the pool's yield gate decide
+        // whether this worker should hand its slot to another worker. The
+        // gate is driven entirely by the pool's token-budget state (no
+        // per-turn threshold knobs). `completion` is still alive here (the
+        // next loop iteration re-binds it), so we read its metrics.
         if let Some(ctx) = options.and_then(|o| o.lease_context.as_ref()) {
             let prompt_tokens = completion.metrics.prompt_tokens;
             let completion_tokens = completion.metrics.completion_tokens;
-            let cached_tokens = completion.metrics.cached_tokens;
             let turn_tokens = prompt_tokens
                 .map(|p| p as u32)
                 .unwrap_or_else(|| history_tokens(&messages) as u32)
@@ -1659,17 +1801,10 @@ impasse, state your findings and ask for alignment rather than continuing to re-
             ctx.sem.update_context_tokens(&ctx.task_id, turn_tokens);
             // Lock scope is deliberately narrowed to the synchronous decision
             // (read lease + decide + snapshot) so no guard is held across the
-            // async re-acquire below (Issues #23 / #28, clippy::await_holding_lock).
+            // async re-acquire below (clippy::await_holding_lock).
             let maybe_swap = match ctx.lease.lock() {
                 Ok(current) => {
-                    if ctx.sem.should_yield(
-                        &current,
-                        turn_tokens,
-                        cached_tokens.map(|c| c as u32),
-                        prompt_tokens.map(|p| p as u32),
-                        ctx.min_eviction_detect_tokens,
-                        ctx.cache_hit_yield_ratio,
-                    ) {
+                    if ctx.sem.should_yield(&current) {
                         Some(current.clone())
                     } else {
                         None
@@ -1686,20 +1821,13 @@ impasse, state your findings and ask for alignment rather than continuing to re-
                     "turn_tokens": turn_tokens,
                     "reason": "pool_yield_gate",
                 }));
-                // True cooperative yield handoff (Issues #23 / #28): release
-                // the held slot, wait (up to 30s) until no *older* lease
-                // remains so the older worker makes real progress, then
-                // re-acquire. This prevents the younger worker from winning its
-                // own slot back in the very next FIFO turn.
-                let new_lease = ctx
-                    .sem
-                    .yield_to_older_and_reacquire(
-                        &old,
-                        &ctx.task_id,
-                        turn_tokens,
-                        std::time::Duration::from_secs(30),
-                    )
-                    .await;
+                // Cooperative yield handoff: release the held slot, then
+                // re-enter the standard token-budgeted acquire. The yield gate
+                // fired only when the pool is overcommitted, so the re-acquire
+                // naturally re-enters the FIFO queue and waits for capacity
+                // rather than winning its own slot back immediately.
+                ctx.sem.release(&old);
+                let new_lease = ctx.sem.acquire_with_tokens(&ctx.task_id, turn_tokens).await;
                 if let Ok(mut slot) = ctx.lease.lock() {
                     *slot = new_lease;
                 }
@@ -1728,11 +1856,14 @@ impasse, state your findings and ask for alignment rather than continuing to re-
             .map_err(RunnerError::Io)?;
         final_text = completion.content;
         status = "completed_budget_exhausted".to_string();
-    } else if status == "completed" && turns >= budget {
+    } else if status == "completed" && turns >= budget && !ceiling_triggered {
         // The model landed on the last turn (cooperative landing). Only
         // reclassify a plain "completed" result — never a more specific
         // terminal status such as `reasoning_budget_exhausted`, which must
-        // never be masked (honest-status invariant).
+        // never be masked (honest-status invariant). A break caused by the
+        // in-flight 90% context ceiling is a clean `completed` landing (the
+        // directive forced a final response), not budget exhaustion, so it is
+        // never reclassified here.
         status = "completed_budget_exhausted".to_string();
     }
 
@@ -1901,17 +2032,26 @@ mod tests {
         }
     }
 
-    /// A recording engine that stamps a wall-clock [`std::time::Instant`] per
-    /// `chat` call (in addition to recording calls) so a test can order
-    /// external events (e.g. an older lease release) against the turn calls.
-    struct TimedEngine {
+    /// One recorded `chat` call from [`ScriptedEngine`]: the wall-clock instant,
+    /// the exact messages it was invoked with, and the tool list (so tests can
+    /// assert the ceiling turn sent an empty tool list).
+    type ScriptedCall = (std::time::Instant, Vec<Message>, Vec<ToolSchema>);
+
+    /// A recording engine that replays a fixed sequence of scripted
+    /// [`Completion`]s and, per `chat` call, records the wall-clock [`Instant`]
+    /// plus the exact `&[Message]` it was invoked with (and the tool list).
+    /// This lets a test assert on the in-flight context ceiling (directive
+    /// appended, empty tool list on the final call) *and* order external
+    /// events (e.g. an older lease release) against the turn calls.
+    struct ScriptedEngine {
         responses: tokio::sync::Mutex<VecDeque<Completion>>,
-        call_times: tokio::sync::Mutex<Vec<std::time::Instant>>,
+        calls: tokio::sync::Mutex<Vec<ScriptedCall>>,
     }
 
-    /// A completion carrying the low cache-hit-ratio metrics that trip the
-    /// yield gate: `cached = 0` over a large `prompt`.
-    fn timed_comp(content: &str, tool_calls: Vec<ToolCall>) -> Completion {
+    /// Build a [`Completion`] with the given content / tool calls and a small
+    /// deterministic token footprint (`prompt_tokens` reported, no cached /
+    /// completion tokens).
+    fn comp_metrics(content: &str, tool_calls: Vec<ToolCall>, prompt_tokens: u64) -> Completion {
         let finish = if tool_calls.is_empty() {
             "stop"
         } else {
@@ -1926,8 +2066,8 @@ mod tests {
                 ttft_ms: None,
                 total_ms: 1.0,
                 tokens_per_sec: None,
-                prompt_tokens: Some(20_000),
-                cached_tokens: Some(0),
+                prompt_tokens: Some(prompt_tokens),
+                cached_tokens: None,
                 completion_tokens: None,
                 reasoning_tokens: None,
             },
@@ -1935,15 +2075,18 @@ mod tests {
     }
 
     #[async_trait]
-    impl ChatEngine for TimedEngine {
+    impl ChatEngine for ScriptedEngine {
         async fn chat(
             &self,
-            _messages: &[Message],
-            _tools: &[ToolSchema],
+            messages: &[Message],
+            tools: &[ToolSchema],
             _stream: bool,
             _reasoning_effort: Option<&str>,
         ) -> Result<Completion, EngineError> {
-            self.call_times.lock().await.push(std::time::Instant::now());
+            self.calls
+                .lock()
+                .await
+                .push((std::time::Instant::now(), messages.to_vec(), tools.to_vec()));
             self.responses
                 .lock()
                 .await
@@ -3645,64 +3788,157 @@ mod tests {
         );
     }
 
-    /// Finding 5 — true cooperative yield handoff, end-to-end.
+    /// In-flight 90% context ceiling, end-to-end.
     ///
-    /// An *older* worker (spawned task) grabs a slot and releases it ~80ms
-    /// later. The session runs as a *younger* worker (a 2nd slot, single
-    /// tenant) with a low cache-hit ratio. On Turn 1 the yield gate fires;
-    /// the runner must release its own slot, **wait until the older lease is
-    /// actually freed**, and only then re-acquire and run Turn 2. We prove the
-    /// wait by asserting the older release instant lands strictly between the
-    /// Turn-1 and Turn-2 engine calls.
+    /// With `max_context = 1000` (90% ceiling at 900), a 3_700-char prompt
+    /// (925 tokens by `chars / 4`) puts the accumulated history over the
+    /// ceiling before the *first* engine call. The runner must then append
+    /// [`CONTEXT_CEILING_DIRECTIVE`], disable tool dispatch (send an *empty*
+    /// tool list), land one final text completion in the remaining 10%
+    /// headroom, and break — emitting exactly one engine call, no further tool
+    /// dispatch, and logging a `context_ceiling` event. `max_context > 0` here
+    /// but the 75% resume watermark is irrelevant (no prior history file
+    /// exists, so the session starts fresh with the prompt).
     #[tokio::test]
-    async fn cooperative_yield_waits_for_older_lease_before_next_turn() {
+    async fn in_flight_context_ceiling_disables_tools_and_lands_final() {
+        let state = tmp_state();
+        let state_root = state.root().to_path_buf();
+        let logger = logger_for(&state);
+
+        // 3_700 chars / 4 = 925 tokens > 900 (90% of 1000) — over the ceiling
+        // before the first turn.
+        let big_prompt = "x".repeat(3_700);
+
+        // The model answers with a final (tool-free) completion once the
+        // ceiling directive is present.
+        let engine = ScriptedEngine {
+            responses: tokio::sync::Mutex::new(vec![comp_metrics("Done.", Vec::new(), 950)].into()),
+            calls: tokio::sync::Mutex::new(Vec::new()),
+        };
+        let executor = MockExecutor::new(Vec::new());
+
+        // `max_context = 1000` → 90% ceiling at 900. No stall watchdog, no
+        // lease context — this isolates the in-flight ceiling alone.
+        let mut options = SessionOptions::with_state(state);
+        options.max_context = 1_000;
+
+        let res = run_session(
+            &engine,
+            &executor,
+            &logger,
+            "sys",
+            &big_prompt,
+            &[tool_schema("bash")],
+            5,
+            Some(&options),
+        )
+        .await
+        .unwrap();
+
+        // A ceiling landing is a clean "completed" (never reclassified to
+        // budget-exhausted, which would mask the honest ceiling status).
+        assert_eq!(res.status, "completed");
+
+        // Exactly one engine call: the ceiling turn. It must carry the
+        // ceiling directive as the final user message and an *empty* tool list
+        // (tool dispatch disabled), so the model cannot emit further calls.
+        let calls = engine.calls.lock().await.clone();
+        assert_eq!(
+            calls.len(),
+            1,
+            "the ceiling must land the session in a single final call: {calls:?}"
+        );
+        let (_, msgs, tools_sent) = &calls[0];
+        let last_user = msgs
+            .iter()
+            .rev()
+            .find(|m| m.role == "user")
+            .expect("a user message must be present");
+        assert!(
+            last_user.content.contains("Working context budget has reached 90%"),
+            "the ceiling directive must be the final user message: {last_user:?}"
+        );
+        assert!(
+            tools_sent.is_empty(),
+            "tool dispatch must be disabled on the ceiling turn, but sent {tools_sent:?}"
+        );
+
+        // And the ceiling event is logged.
+        let events = logger.read_all();
+        assert!(
+            events.iter().any(|e| e["type"] == "context_ceiling"),
+            "expected a context_ceiling event: {events:?}"
+        );
+        let _ = std::fs::remove_dir_all(&state_root);
+    }
+
+    /// Finding 5 — true cooperative yield handoff, end-to-end (overcommit-only
+    /// gate).
+    ///
+    /// The pool is token-budgeted at 100. An *older* worker claims one slot at
+    /// 60 context tokens and holds it ~80ms. The session runs as a *younger*
+    /// worker (a 2nd slot) that, after its first turn, records 60 context
+    /// tokens of its own — pushing the pool to 120 > 100 (overcommit). The
+    /// yield gate then fires: the runner releases its slot and re-acquires
+    /// through the standard token-budgeted acquire, which (the pool still
+    /// overcommitted) waits in the FIFO queue until the older lease frees
+    /// capacity, then runs Turn 2. We prove the handoff by asserting the older
+    /// release instant lands strictly between the Turn-1 and Turn-2 engine
+    /// calls.
+    #[tokio::test]
+    async fn cooperative_yield_waits_for_release_before_next_turn() {
         use crate::task::semaphore::TaskSemaphore;
 
         let state = tmp_state();
         let state_root = state.root().to_path_buf();
         let logger = logger_for(&state);
         // Two slots so the older and younger worker can hold one each; the
-        // short poll interval keeps the acquire wait tight.
-        let sem = TaskSemaphore::with_poll_interval(&state, 2, 5);
+        // short poll interval keeps the re-acquire wait tight. The pool is
+        // budgeted at 100 so the yield gate (driven by overcommit) can fire.
+        let sem = TaskSemaphore::with_poll_interval(&state, 2, 5).with_token_budget(100);
 
-        // The older worker: claim a slot, hold it 80ms, then release it.
+        // The older worker: claim a slot at 60 context tokens (under the 100
+        // budget, so admitted freely), hold it ~80ms, then release it.
         let older_release_at: std::sync::Arc<std::sync::Mutex<Option<std::time::Instant>>> =
             std::sync::Arc::new(std::sync::Mutex::new(None));
         let rel = older_release_at.clone();
         let sem_old = sem.clone();
         let older = tokio::spawn(async move {
-            let lease = sem_old.acquire_with_tokens("task_old", 0).await;
+            let lease = sem_old.acquire_with_tokens("task_old", 60).await;
             tokio::time::sleep(std::time::Duration::from_millis(80)).await;
             let _ = sem_old.release(&lease);
             *rel.lock().unwrap() = Some(std::time::Instant::now());
         });
 
-        // Give the older worker a clear head start so its `at` is strictly
-        // earlier (right-of-way ordering by acquisition timestamp).
+        // Give the older worker a clear head start before the younger claims.
         tokio::time::sleep(std::time::Duration::from_millis(50)).await;
 
-        // The younger worker (this session) claims the 2nd slot.
+        // The younger worker (this session) claims the 2nd slot at 0 (pool
+        // committed is 60, under budget, so it is admitted).
         let younger = sem.acquire_with_tokens("task_young", 0).await;
         let ctx = LeaseYieldContext {
             sem: std::sync::Arc::new(sem.clone()),
             lease: std::sync::Arc::new(std::sync::Mutex::new(younger)),
             task_id: "task_young".into(),
-            min_eviction_detect_tokens: 100,
-            cache_hit_yield_ratio: 0.20,
         };
-        let options = SessionOptions::with_state(state).with_lease_context(ctx);
+        let mut options = SessionOptions::with_state(state).with_lease_context(ctx);
+        // A large `max_context` so the 90% in-flight ceiling never trips and
+        // the pool-overcommit yield path is what we exercise here.
+        options.max_context = 100_000;
 
-        // A recording engine that stamps an `Instant` per `chat` call, so we
-        // can order the older release against the two turn calls.
-        let engine = TimedEngine {
+        // Turn 1: a tool call (so the turn is not final). The engine reports
+        // 60 prompt tokens, which the runner records on the younger's lease →
+        // pool committed becomes 60 (old) + 60 (young) = 120 > 100 → overcommit
+        // → yield. Turn 2: a final (tool-free) completion.
+        let engine = ScriptedEngine {
             responses: tokio::sync::Mutex::new(
                 vec![
-                    timed_comp("", vec![tc("c1", "bash", "{\"cmd\":\"ls\"}")]),
-                    timed_comp("All done.", Vec::new()),
+                    comp_metrics("", vec![tc("c1", "bash", "{\"cmd\":\"ls\"}")], 60),
+                    comp_metrics("All done.", Vec::new(), 10),
                 ]
                 .into(),
             ),
-            call_times: tokio::sync::Mutex::new(Vec::new()),
+            calls: tokio::sync::Mutex::new(Vec::new()),
         };
         let executor = MockExecutor::new(vec!["file1\nfile2".into()]);
 
@@ -3726,8 +3962,8 @@ mod tests {
         assert_eq!(res.status, "completed");
         assert_eq!(res.turns, 2);
 
-        // The yield gate fired exactly once (the younger, low-cache worker on
-        // Turn 1) and was logged.
+        // The yield gate fired (the overcommitted younger worker on Turn 1)
+        // and was logged.
         let events = logger.read_all();
         assert!(
             events.iter().any(|e| e["type"] == "cooperative_yield"),
@@ -3735,23 +3971,23 @@ mod tests {
         );
 
         // The older release must land strictly between the Turn-1 and Turn-2
-        // calls — i.e. the younger worker actually waited on the older lease
-        // (it did not just drop and immediately re-claim its own slot).
-        let call_times = engine.call_times.lock().await.clone();
+        // calls — i.e. the younger worker actually waited for capacity (it did
+        // not just drop and immediately re-claim its own slot).
+        let calls = engine.calls.lock().await.clone();
         assert_eq!(
-            call_times.len(),
+            calls.len(),
             2,
-            "expected exactly two engine calls: {call_times:?}"
+            "expected exactly two engine calls: {calls:?}"
         );
         let older_release_at = older_release_at.lock().unwrap();
         let Some(older_release_at) = older_release_at.as_ref() else {
             panic!("older worker never released its lease");
         };
         assert!(
-            call_times[0] < *older_release_at && *older_release_at <= call_times[1],
+            calls[0].0 < *older_release_at && *older_release_at <= calls[1].0,
             "older release must be waited on between turn 1 ({:?}) and turn 2 ({:?})",
-            call_times[0],
-            call_times[1]
+            calls[0].0,
+            calls[1].0
         );
         let _ = std::fs::remove_dir_all(&state_root);
     }

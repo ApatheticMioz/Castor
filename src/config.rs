@@ -110,12 +110,6 @@ pub struct Config {
     pub reasoning_open_tag: String,
     /// Reasoning close tag (the paired `</...>` form of [`Self::reasoning_open_tag`]).
     pub reasoning_close_tag: String,
-    /// Cache-hit yield ratio for the slot-yield gate: a younger worker yields
-    /// when its empirical cache hit ratio falls below this (env-only).
-    pub cache_hit_yield_ratio: f64,
-    /// Minimum prompt-token count before an empirical cache-eviction yield
-    /// check is meaningful (env-only).
-    pub min_eviction_detect_tokens: u32,
     /// Per-turn watchdog: wall-clock ceiling (seconds) for a single engine
     /// chat call. When exceeded, the runner retries once at `"low"`
     /// reasoning effort. Default 600s (10 min). `0` disables the timeout.
@@ -172,8 +166,6 @@ pub struct Sources {
     pub dgi_bypass_warm_session: Source,
     pub reasoning_open_tag: Source,
     pub reasoning_close_tag: Source,
-    pub cache_hit_yield_ratio: Source,
-    pub min_eviction_detect_tokens: Source,
     pub turn_timeout_secs: Source,
     pub max_turn_reasoning_tokens: Source,
     pub tool_spill_bytes: Source,
@@ -524,12 +516,6 @@ pub fn load_with(get_env: impl Fn(&str) -> Option<String>) -> Result<LoadedConfi
         concat!("</th", "ink>").to_string(),
     );
 
-    // Slot-yield tuning knobs: env-only settings (no config.json keys).
-    let (cache_hit_yield_ratio, src_cache_hit_yield_ratio) =
-        pick_f64(env_f64("CASTOR_CACHE_HIT_YIELD_RATIO")?, 0.20);
-    let (min_eviction_detect_tokens, src_min_eviction_detect_tokens) =
-        pick_u32(env_u32("CASTOR_MIN_EVICTION_DETECT_TOKENS")?, None, 13056);
-
     // Per-turn watchdog: env-only settings (no config.json keys).
     let (turn_timeout_secs, src_turn_timeout_secs) =
         pick_u64(env_u64("CASTOR_TURN_TIMEOUT_SECS")?, None, 600);
@@ -581,8 +567,6 @@ pub fn load_with(get_env: impl Fn(&str) -> Option<String>) -> Result<LoadedConfi
             dgi_bypass_warm_session,
             reasoning_open_tag,
             reasoning_close_tag,
-            cache_hit_yield_ratio,
-            min_eviction_detect_tokens,
             turn_timeout_secs,
             max_turn_reasoning_tokens,
             tool_spill_bytes,
@@ -612,8 +596,6 @@ pub fn load_with(get_env: impl Fn(&str) -> Option<String>) -> Result<LoadedConfi
             dgi_bypass_warm_session: src_dgi_bypass_warm_session,
             reasoning_open_tag: src_reasoning_open_tag,
             reasoning_close_tag: src_reasoning_close_tag,
-            cache_hit_yield_ratio: src_cache_hit_yield_ratio,
-            min_eviction_detect_tokens: src_min_eviction_detect_tokens,
             turn_timeout_secs: src_turn_timeout_secs,
             max_turn_reasoning_tokens: src_max_turn_reasoning_tokens,
             tool_spill_bytes: src_tool_spill_bytes,
@@ -802,18 +784,6 @@ pub fn format_loaded(loaded: &LoadedConfig) -> String {
         "reasoning_close_tag",
         &c.reasoning_close_tag,
         s.reasoning_close_tag,
-    );
-    row(
-        &mut out,
-        "cache_hit_yield_ratio",
-        &c.cache_hit_yield_ratio.to_string(),
-        s.cache_hit_yield_ratio,
-    );
-    row(
-        &mut out,
-        "min_eviction_detect_tokens",
-        &c.min_eviction_detect_tokens.to_string(),
-        s.min_eviction_detect_tokens,
     );
     row(
         &mut out,

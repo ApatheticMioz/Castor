@@ -191,8 +191,6 @@ struct Inner {
     /// Total token budget for the pool. `0` means the token-budget check is
     /// disabled (original slot-count-only semantics).
     pool_capacity_tokens: u32,
-    /// Static token overhead charged per slot state entry.
-    per_slot_state_tokens: u32,
 }
 
 impl TaskSemaphore {
@@ -207,7 +205,6 @@ impl TaskSemaphore {
                 waiters: Mutex::new(Waiters::default()),
                 next_id: AtomicU64::new(0),
                 pool_capacity_tokens: 0,
-                per_slot_state_tokens: 0,
             }),
         }
     }
@@ -223,28 +220,21 @@ impl TaskSemaphore {
                 waiters: Mutex::new(Waiters::default()),
                 next_id: AtomicU64::new(0),
                 pool_capacity_tokens: 0,
-                per_slot_state_tokens: 0,
             }),
         }
     }
 
-    /// Set the token-budget parameters on a [`TaskSemaphore`] (builder pattern).
+    /// Set the pool's token budget (builder pattern).
     ///
     /// - `pool_capacity_tokens`: total token budget for the whole pool. When
     ///   `0`, the token-budget gate is disabled (original slot-count-only
     ///   semantics).
-    /// - `per_slot_state_tokens`: static token overhead charged per slot state
-    ///   entry (the metadata / bookkeeping cost of each lease record).
     ///
-    /// The combined per-lease cost model is:
-    /// `per_slot_state_tokens + lease.context_tokens`
-    ///
-    /// See [`Self::acquire_with_tokens`] for the claim-time gate.
-    pub fn with_token_budget(
-        mut self,
-        pool_capacity_tokens: u32,
-        per_slot_state_tokens: u32,
-    ) -> Self {
+    /// The unified admission rule (see [`Self::acquire_with_tokens`]) is:
+    /// `sum over all live leases L of (L.context_tokens) + requested_tokens
+    /// <= pool_capacity_tokens`. There is no separate per-slot state overhead —
+    /// each lease's own `context_tokens` is its full cost.
+    pub fn with_token_budget(mut self, pool_capacity_tokens: u32) -> Self {
         // `inner` is an `Arc<Inner>`; to mutate the fields we need `Arc::get_mut`
         // (which panics if there are other strong refs). In practice this is
         // called immediately after construction (builder pattern), so there is
@@ -252,7 +242,6 @@ impl TaskSemaphore {
         let inner = Arc::get_mut(&mut self.inner)
             .expect("with_token_budget must be called before any clone is made");
         inner.pool_capacity_tokens = pool_capacity_tokens;
-        inner.per_slot_state_tokens = per_slot_state_tokens;
         self
     }
 
@@ -452,14 +441,19 @@ impl TaskSemaphore {
     /// Acquire a slot lease with an explicit initial context-token value,
     /// enforcing the token-budget constraint when one is configured.
     ///
-    /// When `pool_capacity_tokens > 0` and at least one live lease exists,
-    /// the claim is refused (and the caller re-queues / polls) unless:
+    /// **Unified admission rule**: a claim is admitted (and an available slot
+    /// `0..max_slots` claimed) when
     ///
     /// ```text
-    ///   sum over all live leases L of (per_slot_state_tokens + L.context_tokens)
-    ///   + per_slot_state_tokens + initial_tokens
+    ///   sum over all live leases L of L.context_tokens  +  requested_tokens
     ///   <= pool_capacity_tokens
     /// ```
+    ///
+    /// When the pool is full or over budget, the caller is **never rejected**:
+    /// it is enqueued in the FIFO wait-queue (`Waiters`, a tokio `oneshot` per
+    /// waiter) and woken by a release or the 1s cross-process poll, then
+    /// re-checked against the same rule — so a woken waiter can never
+    /// overcommit either.
     ///
     /// When `pool_capacity_tokens == 0` the token-budget check is bypassed
     /// entirely (original slot-count-only semantics).
@@ -481,10 +475,9 @@ impl TaskSemaphore {
         let committed: u64 = self
             .list_slots()
             .iter()
-            .map(|l| (self.inner.per_slot_state_tokens as u64) + (l.context_tokens as u64))
+            .map(|l| l.context_tokens as u64)
             .sum();
-        let new_total =
-            committed + (self.inner.per_slot_state_tokens as u64) + (initial_tokens as u64);
+        let new_total = committed + initial_tokens as u64;
         new_total <= (capacity as u64)
     }
 
@@ -623,127 +616,42 @@ impl TaskSemaphore {
     }
 
     /// Decide whether a held [`SlotLease`] should yield its slot back to the
-    /// pool so a newer / more cache-efficient worker can proceed.
+    /// pool so the pool's committed token total can come back within budget.
     ///
-    /// This is the DRY core of the slot-yield gate (Issues #23 / #28).
-    /// `cache_hit_yield_ratio` and `min_eviction_tokens` are injected by the
-    /// caller from [`crate::config::Config`] so this method stays free of any
-    /// config dependency (and trivially unit-testable).
+    /// The gate is self-contained in the pool (no per-turn threshold knobs are
+    /// injected by the caller):
     ///
-    /// Rules:
-    /// - A solo worker (`slots.len() <= 1`) never yields.
-    /// - The **oldest** active lease has right-of-way to finish and never
-    ///   yields (right-of-way by acquisition timestamp, tie-broken by
-    ///   `task_id`).
-    /// - Otherwise a younger worker yields when **either** condition holds:
-    ///   - **A (empirical cache eviction)**: `cached`/`prompt` are both known,
-    ///     `prompt >= min_eviction_tokens` (> 0), and the cache hit ratio
-    ///     `cached / prompt < cache_hit_yield_ratio`.
-    ///   - **B (physical pool overcommit)**: the pool token budget is enabled
-    ///     (`pool_capacity_tokens > 0`) and the committed total
-    ///     `sum(per_slot_state_tokens + lease.context_tokens)` exceeds it.
-    pub fn should_yield(
-        &self,
-        lease: &SlotLease,
-        _context_tokens: u32,
-        cached_tokens: Option<u32>,
-        prompt_tokens: Option<u32>,
-        min_eviction_tokens: u32,
-        cache_hit_yield_ratio: f64,
-    ) -> bool {
+    /// - **Solo** (`slots.len() <= 1`): no one to yield to — never yields.
+    /// - **Pool overcommit**: when the pool's token budget is enabled
+    ///   (`pool_capacity_tokens > 0`) and the committed total
+    ///   `sum(lease.context_tokens)` exceeds it, the lease yields. There is no
+    ///   "oldest never yields" immunity — under overcommit the heaviest /
+    ///   oldest sessions yield too, because a growing in-flight context is
+    ///   exactly what must give way for the pool to come back within budget.
+    ///
+    /// A yielding worker is expected to release the slot and re-enter the
+    /// standard [`Self::acquire_with_tokens`] (unified admission rule + FIFO
+    /// queue): with the pool overcommitted the re-acquire waits for capacity
+    /// rather than winning its own slot back immediately.
+    ///
+    /// The held [`SlotLease`] is passed for call-site symmetry (the runner
+    /// consults the gate against its own lease); the decision itself is a
+    /// pool-level property, so the argument is intentionally unused.
+    pub fn should_yield(&self, _lease: &SlotLease) -> bool {
         let slots = self.list_slots();
         if slots.len() <= 1 {
             // Solo worker: no one to yield to, and no contention.
             return false;
         }
 
-        // This lease's acquisition timestamp (from its persisted record).
-        let my_at = self
-            .read_lease(lease.index)
-            .map(|l| l.at)
-            .unwrap_or(u64::MAX);
-
-        // Right-of-way: yield only if at least one other active lease is
-        // *older* than this one. If this is the oldest, it gets to finish.
-        let is_younger = slots.iter().any(|other| {
-            other.task_id != lease.task_id
-                && (other.at < my_at || (other.at == my_at && other.task_id < lease.task_id))
-        });
-        if !is_younger {
+        // Pool overcommit is the only yield trigger: when the pool's token
+        // budget is enabled and the committed total exceeds it, any held lease
+        // (including the heaviest / oldest) yields so the pool can recover.
+        if self.inner.pool_capacity_tokens == 0 {
             return false;
         }
-
-        // Condition A: empirical cache eviction.
-        if let (Some(cached), Some(prompt)) = (cached_tokens, prompt_tokens)
-            && prompt >= min_eviction_tokens
-            && min_eviction_tokens > 0
-        {
-            let hit_ratio = (cached as f64) / (prompt as f64);
-            if hit_ratio < cache_hit_yield_ratio {
-                return true;
-            }
-        }
-
-        // Condition B: physical token pool overcommit.
-        if self.inner.pool_capacity_tokens > 0 {
-            let committed: u32 = slots
-                .iter()
-                .map(|l| {
-                    self.inner
-                        .per_slot_state_tokens
-                        .saturating_add(l.context_tokens)
-                })
-                .sum();
-            if committed > self.inner.pool_capacity_tokens {
-                return true;
-            }
-        }
-
-        false
-    }
-
-    /// Release this worker's held slot, wait (up to `max_wait`) until no
-    /// *older* lease remains in the pool, then re-acquire the slot.
-    ///
-    /// This is the **true cooperative yield handoff** (Issues #23 / #28): a
-    /// younger worker that triggered the yield gate does not merely drop its
-    /// lease and immediately re-claim it (that would let it win its own slot
-    /// back in the very next FIFO turn). Instead it parks in a short polling
-    /// loop until every strictly-older lease has been released, guaranteeing
-    /// the older worker makes real progress before this one resumes.
-    ///
-    /// `old_lease` is the currently-held lease. Its `at` timestamp (`old_at`)
-    /// is read *before* releasing it (defaulting to `u64::MAX` if the record is
-    /// already gone) so the wait condition can compare against it.
-    pub async fn yield_to_older_and_reacquire(
-        &self,
-        old_lease: &SlotLease,
-        task_id: &str,
-        context_tokens: u32,
-        max_wait: Duration,
-    ) -> SlotLease {
-        let old_at = self
-            .read_lease(old_lease.index)
-            .map(|l| l.at)
-            .unwrap_or(u64::MAX);
-        let _ = self.release(old_lease);
-
-        // Cooperatively wait until no strictly-older lease is still held, so
-        // the older worker gets to make progress before we re-acquire.
-        let start = std::time::Instant::now();
-        loop {
-            let older = self.list_slots().iter().any(|other| {
-                other.task_id != task_id
-                    && (other.at < old_at
-                        || (other.at == old_at && other.task_id.as_str() < task_id))
-            });
-            if !older || start.elapsed() >= max_wait {
-                break;
-            }
-            tokio::time::sleep(Duration::from_millis(25)).await;
-        }
-
-        self.acquire_with_tokens(task_id, context_tokens).await
+        let committed: u64 = slots.iter().map(|l| l.context_tokens as u64).sum();
+        committed > (self.inner.pool_capacity_tokens as u64)
     }
 
     /// Deterministic slot status distinguishing same-tenant vs alien-tenant
@@ -1487,15 +1395,16 @@ mod tests {
         let _ = sem.release(&lease);
     }
 
-    /// With `pool_capacity_tokens = 100` and `per_slot_state_tokens = 10`:
+    /// With `pool_capacity_tokens = 100`:
     /// - First acquire (no live lease) → gate bypassed, claim succeeds.
     /// - Second acquire with `initial_tokens = 50`:
-    ///   committed = 10 + 50 = 60; new_total = 60 + 10 + 50 = 120 > 100
+    ///   committed = 50; new_total = 50 + 50 = 100 <= 100 → admitted.
+    ///   Bump it to 80: committed = 80; new_total = 80 + 50 = 130 > 100
     ///   → must be BLOCKED (times out).
     #[test]
     fn with_token_budget_blocks_when_over_capacity() {
         let state = tmp_state();
-        let sem = TaskSemaphore::with_poll_interval(&state, 4, 50).with_token_budget(100, 10);
+        let sem = TaskSemaphore::with_poll_interval(&state, 4, 50).with_token_budget(100);
         let rt = rt();
 
         // First acquire: no live leases → gate bypassed.
@@ -1511,34 +1420,48 @@ mod tests {
         assert_eq!(sem.list_slots().len(), 1);
 
         // Second acquire: 1 live lease (context_tokens=50).
-        // committed = 10 + 50 = 60
-        // new_total = 60 + 10 + 50 = 120 > 100 → BLOCKED
+        // committed = 50
+        // new_total = 50 + 50 = 100 <= 100 → admitted
         let sem_c2 = sem.clone();
+        let l2 = rt.block_on(async move {
+            tokio::time::timeout(
+                Duration::from_millis(500),
+                sem_c2.acquire_with_tokens("task_b", 50),
+            )
+            .await
+            .expect("second acquire should be admitted: 100 <= 100")
+        });
+        assert_eq!(sem.list_slots().len(), 2);
+
+        // Grow `a` to 80: committed = 80 + 50 = 130, so a third claim of even
+        // 1 token overcommits (130 + 1 > 100) → BLOCKED.
+        sem.update_context_tokens("task_a", 80);
+        let sem_c3 = sem.clone();
         let blocked = rt.block_on(async move {
             tokio::time::timeout(
                 Duration::from_millis(200),
-                sem_c2.acquire_with_tokens("task_b", 50),
+                sem_c3.acquire_with_tokens("task_c", 1),
             )
             .await
         });
         assert!(
             blocked.is_err(),
-            "second acquire must be blocked: 120 > 100 (pool_capacity)"
+            "third acquire must be blocked: 130 + 1 > 100 (pool_capacity)"
         );
 
         let _ = sem.release(&l1);
+        let _ = sem.release(&l2);
         assert_eq!(sem.list_slots().len(), 0);
     }
 
-    /// With `pool_capacity_tokens = 100` and `per_slot_state_tokens = 10`:
-    /// - First acquire with `initial_tokens = 50` → 60 committed.
+    /// With `pool_capacity_tokens = 100`:
+    /// - First acquire with `initial_tokens = 50` → 50 committed.
     /// - Second acquire with `initial_tokens = 20`:
-    ///   committed = 10 + 50 = 60; new_total = 60 + 10 + 20 = 90 <= 100
-    ///   → must SUCCEED.
+    ///   committed = 50; new_total = 50 + 20 = 70 <= 100 → must SUCCEED.
     #[test]
     fn with_token_budget_allows_when_under_capacity() {
         let state = tmp_state();
-        let sem = TaskSemaphore::with_poll_interval(&state, 4, 50).with_token_budget(100, 10);
+        let sem = TaskSemaphore::with_poll_interval(&state, 4, 50).with_token_budget(100);
         let rt = rt();
 
         let sem_c1 = sem.clone();
@@ -1552,7 +1475,7 @@ mod tests {
         });
         assert_eq!(sem.list_slots().len(), 1);
 
-        // 60 committed + 10 (per_slot) + 20 (initial) = 90 <= 100 → OK
+        // 50 committed + 20 (initial) = 70 <= 100 → OK
         let sem_c2 = sem.clone();
         let l2 = rt.block_on(async move {
             tokio::time::timeout(
@@ -1560,7 +1483,7 @@ mod tests {
                 sem_c2.acquire_with_tokens("task_b", 20),
             )
             .await
-            .expect("second acquire should succeed: 90 <= 100")
+            .expect("second acquire should succeed: 70 <= 100")
         });
         assert_eq!(sem.list_slots().len(), 2);
 
@@ -1615,10 +1538,10 @@ mod tests {
     #[test]
     fn update_context_tokens_affects_budget_gate() {
         let state = tmp_state();
-        let sem = TaskSemaphore::with_poll_interval(&state, 4, 50).with_token_budget(100, 10);
+        let sem = TaskSemaphore::with_poll_interval(&state, 4, 50).with_token_budget(100);
         let rt = rt();
 
-        // First acquire with 20 initial tokens → committed = 10+20 = 30.
+        // First acquire with 20 initial tokens → committed = 20.
         let sem_c1 = sem.clone();
         let l1 = rt.block_on(async move {
             tokio::time::timeout(
@@ -1629,11 +1552,12 @@ mod tests {
             .expect("first acquire")
         });
 
-        // Bump context_tokens to 80 → committed = 10+80 = 90.
-        sem.update_context_tokens("task_a", 80);
+        // Bump context_tokens to 90: a new claim of 20 would overcommit
+        // (90 + 20 = 110 > 100), but 10 still fits (90 + 10 = 100 <= 100).
+        sem.update_context_tokens("task_a", 90);
 
         // Second acquire with 20 initial tokens:
-        // new_total = 90 + 10 + 20 = 120 > 100 → BLOCKED.
+        // new_total = 90 + 20 = 110 > 100 → BLOCKED.
         let sem_c2 = sem.clone();
         let blocked = rt.block_on(async move {
             tokio::time::timeout(
@@ -1644,74 +1568,97 @@ mod tests {
         });
         assert!(
             blocked.is_err(),
-            "second acquire must be blocked after context_tokens update: 120 > 100"
+            "second acquire must be blocked after context_tokens update: 110 > 100"
         );
 
+        // A claim that still fits under the (updated) committed total is
+        // admitted — proving the gate reflects the new footprint.
+        let sem_c3 = sem.clone();
+        let ok = rt.block_on(async move {
+            tokio::time::timeout(
+                Duration::from_millis(500),
+                sem_c3.acquire_with_tokens("task_c", 10),
+            )
+            .await
+        });
+        assert!(ok.is_ok(), "10-token claim must fit under the 90 committed (100 <= 100)");
+
         let _ = sem.release(&l1);
+        if let Ok(c) = ok {
+            let _ = sem.release(&c);
+        }
     }
 
     // ------------------------------------------------------------------
-    // `should_yield` (slot-yield gate, Issues #23 / #28)
+    // `should_yield` (pool-overcommit yield gate)
     // ------------------------------------------------------------------
 
-    /// A solo worker (only one active lease) never yields.
+    /// A solo worker (only one active lease) never yields, even when its own
+    /// context overcommits an otherwise-empty budget.
     #[test]
     fn should_yield_solo_never_yields() {
         let state = tmp_state();
-        let sem = TaskSemaphore::with_poll_interval(&state, 1, 50);
-        let a = rt().block_on(sem.acquire_with_tokens("a", 0));
-        // Even with a pathological cache ratio, a solo worker keeps its slot.
-        assert!(!sem.should_yield(&a, 0, Some(0), Some(1000), 100, 0.20));
+        let sem = TaskSemaphore::with_poll_interval(&state, 1, 50).with_token_budget(50);
+        // Admitted (empty pool, 10 <= 50); then grown past the budget.
+        let a = rt().block_on(sem.acquire_with_tokens("a", 10));
+        sem.update_context_tokens("a", 100);
+        // Over budget (100 > 50) but a solo holder keeps its slot.
+        assert!(!sem.should_yield(&a));
     }
 
-    /// The oldest active lease has right-of-way and never yields, even when
-    /// its cache ratio is poor.
+    /// Under pool overcommit there is no "oldest never yields" immunity: the
+    /// oldest active lease yields too when its (heaviest) context pushes the
+    /// pool over the budget, so a growing session can give way and let the pool
+    /// recover.
     #[test]
-    fn should_yield_oldest_never_yields() {
+    fn should_yield_oldest_yields_when_overcommitted() {
         let state = tmp_state();
-        let sem = TaskSemaphore::with_poll_interval(&state, 2, 50);
-        let a = rt().block_on(sem.acquire_with_tokens("a", 0)); // oldest
-        let _b = rt().block_on(sem.acquire_with_tokens("b", 0));
-        // `a` is the oldest active lease → right-of-way → no yield.
-        assert!(!sem.should_yield(&a, 0, Some(0), Some(1000), 100, 0.20));
+        let sem = TaskSemaphore::with_poll_interval(&state, 2, 50).with_token_budget(100);
+        // Both admitted up front (40 + 40 = 80 <= 100).
+        let a = rt().block_on(sem.acquire_with_tokens("a", 40)); // oldest
+        let _b = rt().block_on(sem.acquire_with_tokens("b", 40));
+        // Grow the *oldest* lease to 80 → committed = 80 + 40 = 120 > 100.
+        sem.update_context_tokens("a", 80);
+        // The oldest (heaviest) lease yields — no right-of-way immunity.
+        assert!(sem.should_yield(&a));
     }
 
-    /// A younger lease with a low empirical cache-hit ratio yields (Condition A).
+    /// A younger lease with a low cache-hit ratio but a pool that is NOT
+    /// overcommitted does NOT yield: overcommit is the only trigger, so the
+    /// pool's own budget — not the empirical cache ratio — drives the decision.
     #[test]
-    fn should_yield_younger_low_cache_hit_ratio_yields() {
+    fn should_yield_younger_healthy_pool_does_not_yield() {
         let state = tmp_state();
-        let sem = TaskSemaphore::with_poll_interval(&state, 2, 50);
-        let _a = rt().block_on(sem.acquire_with_tokens("a", 0));
-        let b = rt().block_on(sem.acquire_with_tokens("b", 0)); // younger
-        // pool disabled (no with_token_budget) → Condition A drives the result.
-        // hit_ratio = 100/1000 = 0.10 < 0.20 → yield.
-        assert!(sem.should_yield(&b, 0, Some(100), Some(1000), 100, 0.20));
+        let sem = TaskSemaphore::with_poll_interval(&state, 2, 50).with_token_budget(1000);
+        let _a = rt().block_on(sem.acquire_with_tokens("a", 10));
+        let b = rt().block_on(sem.acquire_with_tokens("b", 50)); // younger
+        // committed = 60 <= 1000 → no overcommit → no yield.
+        assert!(!sem.should_yield(&b));
     }
 
-    /// A younger lease with a healthy cache-hit ratio and no pool overcommit
-    /// does NOT yield.
-    #[test]
-    fn should_yield_younger_healthy_cache_does_not_yield() {
-        let state = tmp_state();
-        let sem = TaskSemaphore::with_poll_interval(&state, 2, 50);
-        let _a = rt().block_on(sem.acquire_with_tokens("a", 0));
-        let b = rt().block_on(sem.acquire_with_tokens("b", 0)); // younger
-        // hit_ratio = 500/1000 = 0.50 >= 0.20 → no Condition A;
-        // pool disabled → no Condition B → no yield.
-        assert!(!sem.should_yield(&b, 0, Some(500), Some(1000), 100, 0.20));
-    }
-
-    /// A younger lease that overcommits the physical token pool yields
-    /// (Condition B).
+    /// A younger lease that overcommits the physical token pool yields.
     #[test]
     fn should_yield_younger_pool_overcommit_yields() {
         let state = tmp_state();
-        let sem = TaskSemaphore::with_poll_interval(&state, 2, 50).with_token_budget(50, 10);
-        let _a = rt().block_on(sem.acquire_with_tokens("a", 0));
-        let b = rt().block_on(sem.acquire_with_tokens("b", 0)); // younger
-        // Grow `b`'s context so committed = (10+0) + (10+100) = 120 > 50.
+        let sem = TaskSemaphore::with_poll_interval(&state, 2, 50).with_token_budget(50);
+        let _a = rt().block_on(sem.acquire_with_tokens("a", 5));
+        let b = rt().block_on(sem.acquire_with_tokens("b", 5)); // younger
+        // Grow `b`'s context so committed = 5 + 100 = 105 > 50.
         sem.update_context_tokens("b", 100);
-        // No cached/prompt → Condition A skipped; Condition B (120 > 50) → yield.
-        assert!(sem.should_yield(&b, 0, None, None, 0, 0.20));
+        // committed = 105 > 50 → yield.
+        assert!(sem.should_yield(&b));
+    }
+
+    /// With the pool budget disabled (`pool_capacity_tokens == 0`) the yield
+    /// gate never fires, regardless of the leases' contexts.
+    #[test]
+    fn should_yield_disabled_when_no_budget() {
+        let state = tmp_state();
+        let sem = TaskSemaphore::with_poll_interval(&state, 2, 50);
+        let _a = rt().block_on(sem.acquire_with_tokens("a", 1_000));
+        let b = rt().block_on(sem.acquire_with_tokens("b", 1_000)); // younger
+        // No budget configured → the gate is disabled even though the
+        // contexts are large.
+        assert!(!sem.should_yield(&b));
     }
 }
