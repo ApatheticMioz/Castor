@@ -3,11 +3,12 @@
 //! Provides an embedded, zero-dependency visualizer workbench for Castor task
 //! executions and session event streams. Embedded at compile-time via `include_str!`.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::fs::{self, File};
 use std::io::{BufRead, BufReader};
 use std::net::SocketAddr;
 use std::path::PathBuf;
+use std::sync::{LazyLock, RwLock};
 
 use axum::Router;
 use axum::extract::{Path as AxumPath, Query, State};
@@ -143,29 +144,42 @@ fn is_orphaned(status: &str, pid: Option<u32>) -> bool {
     matches!(pid, Some(p) if !pid_alive(p))
 }
 
+#[derive(Debug, Clone)]
+struct CachedTaskRecord {
+    mtime: u64,
+    size: u64,
+    created_at: u64,
+    raw_status: String,
+    pid: Option<u32>,
+    summary: TaskSummary,
+}
+
+#[derive(Default)]
+struct DirectoryTaskCache {
+    records: HashMap<PathBuf, CachedTaskRecord>,
+    sorted_summaries: Vec<TaskSummary>,
+    total_count: usize,
+}
+
+static TASK_CACHE: LazyLock<RwLock<HashMap<PathBuf, DirectoryTaskCache>>> =
+    LazyLock::new(|| RwLock::new(HashMap::new()));
+
 /// Scan `<state>/tasks` for task JSON records, sorted by `created_at`
 /// descending (newest dispatched first). Returns a tuple of (summaries,
 /// total_count).
 ///
-/// Ordering uses each task's own `created_at` dispatch timestamp, not the file
-/// `mtime`: reaping or updating a record rewrites it and bumps its mtime to
-/// "now", which would otherwise bubble a stale task to the top of the sidebar
-/// above genuinely newer dispatches. `created_at` is stable per task, so the
-/// list stays strictly chronological by dispatch time. Records without a
-/// `created_at` field fall back to their mtime.
-///
-/// The `created_at` of *every* eligible record is resolved before applying
-/// `limit`; the prior implementation read only `limit` files after the mtime
-/// sort, which could drop a newer dispatch in favour of a stale-but-recently
-/// touched one.
+/// Employs an in-memory mtime/size cache with terminal-record short-circuiting
+/// to eliminate disk thrashing and cross-filesystem 9P IPC latency on high-frequency polls.
 pub fn read_recent_tasks(state: &StateDir, limit: usize) -> (Vec<TaskSummary>, usize) {
     let dir = state.tasks();
     let Ok(entries) = fs::read_dir(&dir) else {
         return (Vec::new(), 0);
     };
 
-    // Each eligible record: (path, mtime, created_at, parsed_value).
-    let mut keyed: Vec<(PathBuf, u64, u64, Option<Value>)> = Vec::new();
+    let mut cache_map = TASK_CACHE.write().unwrap();
+    let dir_cache = cache_map.entry(dir.clone()).or_default();
+    let mut current_paths = HashSet::new();
+    let mut eligible: Vec<(u64, PathBuf)> = Vec::new();
     let mut total_count = 0usize;
 
     for entry in entries.flatten() {
@@ -183,38 +197,45 @@ pub fn read_recent_tasks(state: &StateDir, limit: usize) -> (Vec<TaskSummary>, u
         {
             continue;
         }
-        // Count every eligible record for the total, parseable or not.
         total_count += 1;
+        current_paths.insert(path.clone());
 
-        let mtime = entry
-            .metadata()
-            .and_then(|m| m.modified())
+        // Fast path for terminal records: once a task finishes (completed, failed, etc.),
+        // its record is immutable. Skip expensive filesystem stat/metadata RPCs.
+        if let Some(cached) = dir_cache.records.get(&path) {
+            let is_terminal = cached.raw_status != "executing" && cached.raw_status != "pending";
+            if is_terminal {
+                eligible.push((cached.created_at, path.clone()));
+                continue;
+            }
+        }
+
+        let meta = entry.metadata().ok();
+        let mtime = meta
+            .as_ref()
+            .and_then(|m| m.modified().ok())
             .and_then(|t| {
                 t.duration_since(std::time::UNIX_EPOCH)
                     .map_err(std::io::Error::other)
+                    .ok()
             })
             .map(|d| d.as_millis() as u64)
             .unwrap_or(0);
+        let size = meta.as_ref().map(|m| m.len()).unwrap_or(0);
 
-        let val = fs::read_to_string(&path)
-            .ok()
-            .and_then(|raw| serde_json::from_str::<Value>(&raw).ok());
-        let created_at = val
-            .as_ref()
-            .and_then(|v| v.get("created_at"))
-            .and_then(|c| c.as_u64())
-            .unwrap_or(mtime);
+        if let Some(cached) = dir_cache.records.get(&path)
+            && cached.mtime == mtime
+            && cached.size == size
+        {
+            eligible.push((cached.created_at, path.clone()));
+            continue;
+        }
 
-        keyed.push((path, mtime, created_at, val));
-    }
-
-    // Newest dispatched first. `sort_by_key` is stable, so a burst of dispatches
-    // sharing a `created_at` keeps a deterministic order.
-    keyed.sort_by_key(|k| std::cmp::Reverse(k.2));
-
-    let mut summaries = Vec::new();
-    for (path, mtime, created_at, val) in keyed.into_iter().take(limit) {
-        let Some(val) = val else {
+        // Cache miss or modified file: read and parse once
+        let Ok(raw) = fs::read_to_string(&path) else {
+            continue;
+        };
+        let Ok(val) = serde_json::from_str::<Value>(&raw) else {
             continue;
         };
 
@@ -231,22 +252,11 @@ pub fn read_recent_tasks(state: &StateDir, limit: usize) -> (Vec<TaskSummary>, u
             .unwrap_or(file_stem);
 
         let pid = val.get("pid").and_then(|v| v.as_u64()).map(|p| p as u32);
-
-        // Honest display: an `executing` task whose worker pid is dead is an
-        // orphan (reboot / crash). Show it as `orphaned` rather than a ghost
-        // "LIVE"; the boot-time reaper converges it to a terminal `failed`.
-        let status = {
-            let raw = val
-                .get("status")
-                .and_then(|v| v.as_str())
-                .unwrap_or("unknown")
-                .to_string();
-            if is_orphaned(&raw, pid) {
-                "orphaned".to_string()
-            } else {
-                raw
-            }
-        };
+        let raw_status = val
+            .get("status")
+            .and_then(|v| v.as_str())
+            .unwrap_or("unknown")
+            .to_string();
 
         let session_id = val
             .get("session_id")
@@ -261,6 +271,11 @@ pub fn read_recent_tasks(state: &StateDir, limit: usize) -> (Vec<TaskSummary>, u
             .unwrap_or_default()
             .to_string();
 
+        let created_at = val
+            .get("created_at")
+            .and_then(|c| c.as_u64())
+            .unwrap_or(mtime);
+
         let started_at = val.get("started_at").and_then(|v| v.as_u64());
         let ended_at = val.get("ended_at").and_then(|v| v.as_u64());
         let turns_budget = val
@@ -268,9 +283,9 @@ pub fn read_recent_tasks(state: &StateDir, limit: usize) -> (Vec<TaskSummary>, u
             .and_then(|v| v.as_u64())
             .unwrap_or(0) as u32;
 
-        summaries.push(TaskSummary {
+        let summary = TaskSummary {
             id,
-            status,
+            status: raw_status.clone(),
             session_id,
             cwd,
             prompt,
@@ -280,7 +295,55 @@ pub fn read_recent_tasks(state: &StateDir, limit: usize) -> (Vec<TaskSummary>, u
             mtime,
             turns_budget,
             pid,
-        });
+        };
+
+        dir_cache.records.insert(
+            path.clone(),
+            CachedTaskRecord {
+                mtime,
+                size,
+                created_at,
+                raw_status,
+                pid,
+                summary,
+            },
+        );
+
+        eligible.push((created_at, path));
+    }
+
+    // Prune stale cache entries if files were removed
+    if dir_cache.records.len() > total_count + 32 {
+        dir_cache.records.retain(|p, _| current_paths.contains(p));
+    }
+
+    // Sort descending by created_at
+    eligible.sort_by_key(|k| std::cmp::Reverse(k.0));
+
+    let mut all_summaries = Vec::with_capacity(eligible.len().min(100));
+    for (_, path) in eligible.into_iter().take(100) {
+        if let Some(cached) = dir_cache.records.get(&path) {
+            all_summaries.push(cached.summary.clone());
+        }
+    }
+
+    dir_cache.sorted_summaries = all_summaries;
+    dir_cache.total_count = total_count;
+
+    let mut summaries = Vec::with_capacity(limit.min(dir_cache.sorted_summaries.len()));
+    for s in dir_cache.sorted_summaries.iter().take(limit) {
+        let mut summary = s.clone();
+        if let Some(cached) = dir_cache
+            .records
+            .get(&state.tasks().join(format!("{}.json", s.id)))
+        {
+            if is_orphaned(&cached.raw_status, cached.pid) {
+                summary.status = "orphaned".to_string();
+            } else {
+                summary.status = cached.raw_status.clone();
+            }
+        }
+        summaries.push(summary);
     }
 
     (summaries, total_count)
@@ -291,6 +354,21 @@ fn find_task_file(state: &StateDir, id: &str) -> Option<PathBuf> {
     let direct = state.tasks().join(format!("{id}.json"));
     if direct.is_file() {
         return Some(direct);
+    }
+
+    // Check in-memory cache first before disk walk
+    if let Ok(cache_map) = TASK_CACHE.read()
+        && let Some(dir_cache) = cache_map.get(&state.tasks())
+    {
+        for (path, record) in dir_cache.records.iter() {
+            if record.summary.id == id {
+                return Some(path.clone());
+            }
+            let stem = path.file_stem().and_then(|s| s.to_str()).unwrap_or("");
+            if stem == id || stem.contains(id) {
+                return Some(path.clone());
+            }
+        }
     }
 
     let Ok(entries) = fs::read_dir(state.tasks()) else {
@@ -707,10 +785,22 @@ mod tests {
             "raw log / telemetry must label the engine-reported effective rate"
         );
         // High-density visualizations: context gauge, token waterfall, sparklines.
-        assert!(TRACE_HTML.contains("ctxGauge"), "context saturation gauge missing");
-        assert!(TRACE_HTML.contains("tokenWaterfall"), "token distribution waterfall missing");
-        assert!(TRACE_HTML.contains("sparkLatency"), "latency sparkline missing");
-        assert!(TRACE_HTML.contains("sparkTps"), "decode throughput sparkline missing");
+        assert!(
+            TRACE_HTML.contains("ctxGauge"),
+            "context saturation gauge missing"
+        );
+        assert!(
+            TRACE_HTML.contains("tokenWaterfall"),
+            "token distribution waterfall missing"
+        );
+        assert!(
+            TRACE_HTML.contains("sparkLatency"),
+            "latency sparkline missing"
+        );
+        assert!(
+            TRACE_HTML.contains("sparkTps"),
+            "decode throughput sparkline missing"
+        );
     }
 
     /// Write a minimal task record file into a state dir for tests.
@@ -764,7 +854,10 @@ mod tests {
         let state = StateDir::new(&root);
 
         let pid = dead_pid();
-        assert!(!pid_alive(pid), "test precondition: reaped pid must be dead");
+        assert!(
+            !pid_alive(pid),
+            "test precondition: reaped pid must be dead"
+        );
 
         write_task(&state, "orphan", "executing", Some(pid));
         write_task(&state, "done", "completed", None);
@@ -772,7 +865,10 @@ mod tests {
         let (tasks, total) = read_recent_tasks(&state, 10);
         assert_eq!(total, 2);
 
-        let orphan = tasks.iter().find(|t| t.id == "orphan").expect("orphan present");
+        let orphan = tasks
+            .iter()
+            .find(|t| t.id == "orphan")
+            .expect("orphan present");
         assert_eq!(
             orphan.status, "orphaned",
             "dead-pid executing task must display as orphaned, not LIVE"
@@ -791,8 +887,7 @@ mod tests {
     /// stable, so the newer dispatch must stay on top.
     #[test]
     fn test_read_recent_tasks_orders_by_created_at_not_mtime() {
-        let root =
-            std::env::temp_dir().join(format!("castor_trace_order_{}", std::process::id()));
+        let root = std::env::temp_dir().join(format!("castor_trace_order_{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&root);
         let state = StateDir::new(&root);
 
@@ -882,7 +977,11 @@ mod tests {
         assert_eq!(read_context_config(&state), None);
 
         // Top-level max_context.
-        std::fs::write(state.root().join("config.json"), r#"{"max_context": 32768}"#).unwrap();
+        std::fs::write(
+            state.root().join("config.json"),
+            r#"{"max_context": 32768}"#,
+        )
+        .unwrap();
         assert_eq!(read_context_config(&state), Some(32768));
 
         // Active profile overrides top-level.

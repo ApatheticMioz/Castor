@@ -69,73 +69,26 @@
 </head>
 <body class="bg-black text-zinc-100 font-sans h-screen w-screen flex flex-col overflow-hidden select-none antialiased">
 
-  <!-- WORKBENCH HEADER -->
-  <header class="h-12 bg-black border-b border-border px-4 flex items-center justify-between shrink-0 z-20">
-    <div class="flex items-center gap-3">
-      <div class="flex items-center gap-2">
+  <!-- WORKBENCH HEADER: Purely Global Scope & Controls (No Session Slop) -->
+  <header class="h-11 bg-black border-b border-border px-4 flex items-center justify-between shrink-0 z-20">
+    <div class="flex items-center gap-3 min-w-0">
+      <div class="flex items-center gap-2 shrink-0">
         <span class="font-bold text-sm tracking-tight text-white font-mono">CASTOR TRACE</span>
         <span class="px-1.5 py-0.5 rounded text-[10px] font-mono font-medium bg-zinc-900 text-zinc-400 border border-zinc-800">
           v1.4.1
         </span>
       </div>
-      <div class="h-3 w-px bg-border"></div>
-      <span class="text-xs font-mono text-zinc-400 truncate max-w-xs md:max-w-md" id="headerCwd">cwd: --</span>
+      <div class="h-3 w-px bg-border shrink-0"></div>
+      <span class="text-xs font-mono text-zinc-400 truncate max-w-sm lg:max-w-xl" id="headerCwd" title="Workspace working directory">cwd: --</span>
     </div>
 
-    <!-- Active Task Meta -->
-    <div class="hidden lg:flex items-center gap-4 text-xs font-mono">
-      <div class="flex items-center gap-1.5">
-        <span class="text-zinc-500">TASK</span>
-        <span class="text-zinc-200 font-medium truncate max-w-[260px]" id="headerTaskId">--</span>
-      </div>
-      <div class="flex items-center gap-1.5">
-        <span class="text-zinc-500">STATE</span>
-        <span id="headerStatusBadge" class="px-1.5 py-0.5 rounded text-[10px] font-semibold uppercase bg-zinc-900 text-zinc-300 border border-zinc-800">IDLE</span>
-      </div>
-      <div class="flex items-center gap-1.5">
-        <span class="text-zinc-500">TURNS</span>
-        <span class="text-white font-semibold" id="headerTurnsCount">0 turns</span>
-      </div>
-      <div class="flex items-center gap-1.5" title="Aggregate duration across all turns">
-        <span class="text-zinc-500">DURATION</span>
-        <span class="text-white font-semibold" id="headerDuration">--</span>
-      </div>
-      <div class="flex items-center gap-1.5" title="Total tokens (prompt + completion + reasoning)">
-        <span class="text-zinc-500">TOKENS</span>
-        <span class="text-white font-semibold" id="headerTokens">0</span>
-      </div>
-      <div class="flex items-center gap-1.5" title="Aggregate decode throughput: Σ completion tokens / Σ decode time (all turns)">
-        <span class="text-zinc-500">AGG DECODE</span>
-        <span class="text-emerald-400 font-semibold" id="headerDecodeSpeed">-- tok/s</span>
-      </div>
-      <div class="flex items-center gap-1.5">
-        <span class="text-zinc-500">PREFILL</span>
-        <span class="text-cyan-400 font-semibold" id="headerPrefillSpeed">-- tok/s</span>
-      </div>
-      <div class="flex items-center gap-1.5">
-        <span class="text-zinc-500">COST</span>
-        <span class="text-emerald-400 font-semibold">$0.00</span>
-      </div>
-    </div>
-
-    <!-- Controls -->
-    <div class="flex items-center gap-2">
-      <button id="btnPrevTurn" class="px-2 py-1 rounded bg-zinc-900 hover:bg-zinc-800 text-zinc-300 text-xs font-mono border border-zinc-800 transition flex items-center gap-1" title="Previous Turn (Up Arrow / k)">
-        <i data-lucide="arrow-up" class="w-3.5 h-3.5"></i>
-        <span class="hidden sm:inline">Prev</span>
-      </button>
-      <button id="btnNextTurn" class="px-2 py-1 rounded bg-zinc-900 hover:bg-zinc-800 text-zinc-300 text-xs font-mono border border-zinc-800 transition flex items-center gap-1" title="Next Turn (Down Arrow / j)">
-        <span class="hidden sm:inline">Next</span>
-        <i data-lucide="arrow-down" class="w-3.5 h-3.5"></i>
-      </button>
-
-      <div class="h-4 w-px bg-border mx-1"></div>
-
+    <!-- Global Controls -->
+    <div class="flex items-center gap-2 shrink-0">
       <!-- Context Window Saturation Bullet Gauge (populated from /api/context) -->
-      <div class="flex items-center gap-2 shrink-0 whitespace-nowrap" title="Context Window Saturation: max prompt tokens observed in the active task vs. the engine's max context window">
-        <span class="text-zinc-500">CTX</span>
-        <svg id="ctxGauge" width="96" height="14" viewBox="0 0 96 14" class="shrink-0"></svg>
-        <span class="text-[11px] font-mono text-zinc-400 whitespace-nowrap shrink-0" id="ctxGaugeLabel">-- / --</span>
+      <div class="flex items-center gap-2 shrink-0 whitespace-nowrap bg-panel px-2.5 py-1 rounded border border-border" title="Context Window Saturation: max prompt tokens observed vs engine max context window">
+        <span class="text-[11px] font-mono text-zinc-500 font-semibold">CTX</span>
+        <svg id="ctxGauge" width="80" height="12" viewBox="0 0 80 12" class="shrink-0"></svg>
+        <span class="text-[11px] font-mono text-zinc-300 whitespace-nowrap shrink-0" id="ctxGaugeLabel">-- / --</span>
       </div>
 
       <div class="h-4 w-px bg-border mx-1"></div>
@@ -171,6 +124,17 @@
           <input type="text" id="taskSearchInput" placeholder="Filter tasks... (/)" class="w-full pl-8 pr-7 py-1 text-xs bg-panel border border-border rounded focus:outline-none focus:border-zinc-500 text-zinc-200 placeholder-zinc-600 font-mono">
           <button id="taskSearchClearBtn" class="absolute right-2 text-zinc-500 hover:text-zinc-200 hidden text-xs font-mono" title="Clear Search (Esc)">✕</button>
         </div>
+      </div>
+
+      <!-- Live Task Notice Banner (Shown when a live task is executing and user is inspecting an older task) -->
+      <div id="liveTaskNotice" class="hidden px-2.5 py-1.5 bg-emerald-950/80 border-b border-emerald-800/80 flex items-center justify-between text-[11px] font-mono text-emerald-300 shrink-0">
+        <div class="flex items-center gap-1.5 truncate">
+          <span class="w-2 h-2 rounded-full bg-emerald-400 animate-pulse"></span>
+          <span class="truncate" id="liveTaskNoticeLabel">Live task running...</span>
+        </div>
+        <button id="btnJumpLive" class="px-2 py-0.5 rounded bg-emerald-800 hover:bg-emerald-700 text-white font-bold text-[10px] shrink-0 transition">
+          Jump
+        </button>
       </div>
 
       <div class="flex-1 overflow-y-auto p-1.5 flex flex-col gap-1" id="tasksListContainer">
@@ -242,6 +206,65 @@
 
     <!-- PANE 3: DETAIL INSPECTOR (Right) -->
     <main class="flex-1 flex flex-col bg-black overflow-hidden">
+      <!-- Active Task Header & Dispatch Aggregates Banner -->
+      <div class="bg-card border-b border-border px-4 py-2 flex flex-col gap-2 shrink-0" id="activeTaskHeader">
+        <!-- Row 1: Status Badge, Task ID, Copy, and Turn Navigation -->
+        <div class="flex items-center justify-between gap-3">
+          <div class="flex items-center gap-2 min-w-0">
+            <span id="headerStatusBadge" class="px-2 py-0.5 rounded text-[10px] font-bold uppercase tracking-wider bg-zinc-900 text-zinc-300 border border-zinc-800 shrink-0">
+              IDLE
+            </span>
+            <span class="text-xs font-bold text-white font-mono truncate max-w-sm md:max-w-md lg:max-w-xl" id="headerTaskId">
+              --
+            </span>
+            <button id="btnCopyTaskId" class="p-1 text-zinc-500 hover:text-zinc-200 transition shrink-0" title="Copy Task ID">
+              <i data-lucide="copy" class="w-3.5 h-3.5"></i>
+            </button>
+          </div>
+
+          <!-- Turn Navigation Controls -->
+          <div class="flex items-center gap-1.5 shrink-0 text-xs font-mono">
+            <button id="btnPrevTurn" class="px-2 py-0.5 rounded bg-zinc-900 hover:bg-zinc-800 text-zinc-300 border border-zinc-800 transition flex items-center gap-1" title="Previous Turn (Up Arrow / k)">
+              <i data-lucide="arrow-up" class="w-3 h-3"></i>
+              <span class="hidden sm:inline">Prev</span>
+            </button>
+            <span class="text-zinc-400 font-semibold px-1 text-[11px]" id="inspectorTurnIndicator">Turn --</span>
+            <button id="btnNextTurn" class="px-2 py-0.5 rounded bg-zinc-900 hover:bg-zinc-800 text-zinc-300 border border-zinc-800 transition flex items-center gap-1" title="Next Turn (Down Arrow / j)">
+              <span class="hidden sm:inline">Next</span>
+              <i data-lucide="arrow-down" class="w-3 h-3"></i>
+            </button>
+          </div>
+        </div>
+
+        <!-- Row 2: Dispatch Metrics Strip (The 6 core task aggregate metrics) -->
+        <div class="grid grid-cols-3 sm:grid-cols-6 gap-2 text-xs font-mono bg-panel/80 p-1.5 rounded border border-border/80">
+          <div class="flex flex-col">
+            <span class="text-[9px] uppercase font-bold text-zinc-500 tracking-wider">Turns</span>
+            <span class="text-zinc-100 font-semibold text-xs" id="headerTurnsCount">0 turns</span>
+          </div>
+          <div class="flex flex-col" title="Aggregate duration across all turns">
+            <span class="text-[9px] uppercase font-bold text-zinc-500 tracking-wider">Duration</span>
+            <span class="text-zinc-100 font-semibold text-xs" id="headerDuration">--</span>
+          </div>
+          <div class="flex flex-col" title="Total tokens (prompt + completion + reasoning)">
+            <span class="text-[9px] uppercase font-bold text-zinc-500 tracking-wider">Tokens</span>
+            <span class="text-zinc-100 font-semibold text-xs" id="headerTokens">0</span>
+          </div>
+          <div class="flex flex-col" title="Aggregate decode throughput: Σ completion tokens / Σ decode time">
+            <span class="text-[9px] uppercase font-bold text-zinc-500 tracking-wider">AGG DECODE</span>
+            <span class="text-emerald-400 font-semibold text-xs" id="headerDecodeSpeed">-- tok/s</span>
+          </div>
+          <div class="flex flex-col" title="Aggregate prefill speed: Σ prompt tokens / Σ TTFT">
+            <span class="text-[9px] uppercase font-bold text-zinc-500 tracking-wider">PREFILL</span>
+            <span class="text-cyan-400 font-semibold text-xs" id="headerPrefillSpeed">-- tok/s</span>
+          </div>
+          <div class="flex flex-col">
+            <span class="text-[9px] uppercase font-bold text-zinc-500 tracking-wider">Cost</span>
+            <span class="text-emerald-400 font-semibold text-xs">$0.00</span>
+          </div>
+        </div>
+      </div>
+
       <!-- Consolidated 4 Tabs Bar -->
       <div class="h-9 bg-panel border-b border-border px-3 flex items-center justify-between shrink-0">
         <div class="flex items-center gap-1 h-full text-xs font-mono" id="inspectorTabs">
@@ -268,7 +291,6 @@
         </div>
 
         <div class="flex items-center gap-3 text-xs font-mono">
-          <span class="text-zinc-500" id="inspectorTurnIndicator">Turn --</span>
           <button id="btnCopyInspector" class="px-2 py-0.5 rounded bg-zinc-900 hover:bg-zinc-800 text-zinc-300 border border-zinc-800 transition flex items-center gap-1" title="Copy Active View Content (c)">
             <i data-lucide="copy" class="w-3 h-3"></i>
             <span id="copyBtnLabel">Copy</span>
@@ -490,6 +512,7 @@
       lastActiveStatus: null,
       autoSync: true,
       followLive: localStorage.getItem('castor_trace_follow_live') !== 'false',
+      userPinned: false,
     };
 
     // Semantic tool-pill colors (shared by the timeline pills and the legend).
@@ -515,6 +538,7 @@
     const headerCwd = document.getElementById('headerCwd');
     const headerTaskId = document.getElementById('headerTaskId');
     const headerStatusBadge = document.getElementById('headerStatusBadge');
+    const btnCopyTaskId = document.getElementById('btnCopyTaskId');
     const headerTurnsCount = document.getElementById('headerTurnsCount');
     const headerDuration = document.getElementById('headerDuration');
     const headerTokens = document.getElementById('headerTokens');
@@ -526,6 +550,9 @@
     const taskCountBadge = document.getElementById('taskCountBadge');
     const taskSearchInput = document.getElementById('taskSearchInput');
     const taskSearchClearBtn = document.getElementById('taskSearchClearBtn');
+    const liveTaskNotice = document.getElementById('liveTaskNotice');
+    const liveTaskNoticeLabel = document.getElementById('liveTaskNoticeLabel');
+    const btnJumpLive = document.getElementById('btnJumpLive');
     const btnRefresh = document.getElementById('btnRefresh');
     const btnLiveSync = document.getElementById('btnLiveSync');
     const syncDot = document.getElementById('syncDot');
@@ -553,15 +580,62 @@
         followText.textContent = 'Follow Live';
       } else {
         followDot.className = 'w-2 h-2 rounded-full bg-zinc-600';
-        followText.textContent = 'Follow Off';
+        followText.textContent = state.userPinned ? 'Follow Paused' : 'Follow Off';
       }
     }
 
-    btnFollowLive.addEventListener('click', () => {
+    btnFollowLive.addEventListener('click', async () => {
       state.followLive = !state.followLive;
+      state.userPinned = !state.followLive;
       localStorage.setItem('castor_trace_follow_live', String(state.followLive));
       applyFollowLiveUI();
+      if (state.followLive && state.tasks.length > 0 && state.tasks[0].id !== state.activeTaskId) {
+        await selectTask(state.tasks[0].id, false);
+      }
+      updateLiveNotice();
     });
+
+    if (btnJumpLive) {
+      btnJumpLive.addEventListener('click', async () => {
+        state.userPinned = false;
+        state.followLive = true;
+        localStorage.setItem('castor_trace_follow_live', 'true');
+        applyFollowLiveUI();
+        if (state.tasks.length > 0) {
+          await selectTask(state.tasks[0].id, false);
+        }
+        updateLiveNotice();
+      });
+    }
+
+    if (btnCopyTaskId) {
+      btnCopyTaskId.addEventListener('click', async () => {
+        if (!state.activeTaskId) return;
+        try {
+          await navigator.clipboard.writeText(state.activeTaskId);
+          btnCopyTaskId.innerHTML = '<span class="text-[9px] text-emerald-400 font-mono font-bold">COPIED</span>';
+          setTimeout(() => {
+            btnCopyTaskId.innerHTML = '<i data-lucide="copy" class="w-3.5 h-3.5"></i>';
+            if (window.lucide) lucide.createIcons();
+          }, 1400);
+        } catch {}
+      });
+    }
+
+    function updateLiveNotice() {
+      if (!liveTaskNotice) return;
+      const latest = state.tasks[0];
+      const isLatestLive = latest && (latest.status === 'executing' || latest.status === 'queued');
+      const isViewingOlder = state.activeTaskId && latest && state.activeTaskId !== latest.id;
+      if (isLatestLive && isViewingOlder) {
+        liveTaskNotice.classList.remove('hidden');
+        if (liveTaskNoticeLabel) {
+          liveTaskNoticeLabel.textContent = `Live: ${latest.id}`;
+        }
+      } else {
+        liveTaskNotice.classList.add('hidden');
+      }
+    }
 
     // -----------------------------------------------------------------------
     // Context Window Saturation Bullet Gauge (/api/context vs. the active
@@ -673,8 +747,11 @@
         renderTasksList();
 
         if (state.tasks.length > 0 && !state.activeTaskId) {
-          selectTask(state.tasks[0].id);
+          await selectTask(state.tasks[0].id, false);
+        } else if (state.followLive && !state.userPinned && state.tasks.length > 0 && state.tasks[0].id !== state.activeTaskId) {
+          await selectTask(state.tasks[0].id, false);
         }
+        updateLiveNotice();
       } catch (err) {
         console.error('Failed to load tasks', err);
       }
@@ -694,11 +771,11 @@
           await loadTasksInitial();
         }
 
-        // 2. Follow Live: jump to a newly-dispatched live task.
-        if (state.followLive && data.latestTaskId
+        // 2. Follow Live: jump to newly-dispatched live task ONLY if user has not pinned an older task!
+        if (state.followLive && !state.userPinned && data.latestTaskId
           && data.latestTaskId !== state.activeTaskId
-          && (data.latestStatus === 'executing' || data.latestStatus === 'queued')) {
-          await selectTask(data.latestTaskId);
+          && (data.latestStatus === 'executing' || data.latestStatus === 'queued' || !state.activeTaskId)) {
+          await selectTask(data.latestTaskId, false);
           return;
         }
 
@@ -707,11 +784,11 @@
         if (data.activeTaskId && data.activeTaskId === state.activeTaskId) {
           state.lastActiveStatus = data.status;
         }
-        // Executing → terminal: refresh so the terminal state renders without a
-        // manual refresh.
+        // Executing → terminal: refresh so the terminal state renders without a manual refresh.
         if (prevStatus === 'executing' && data.status && isTerminalStatus(data.status)
           && (data.activeTaskId === state.activeTaskId || data.activeTaskId === data.latestTaskId)) {
           if (state.activeTaskId) await reloadActiveTaskData();
+          updateLiveNotice();
           return;
         }
 
@@ -722,16 +799,33 @@
             await reloadActiveTaskData();
           }
         }
+        updateLiveNotice();
       } catch {}
     }
 
-    async function selectTask(taskId) {
+    async function selectTask(taskId, isUserAction = false) {
+      if (isUserAction) {
+        if (state.tasks.length > 0 && taskId !== state.tasks[0].id) {
+          // User intentionally chose an older task: pin it so pollCheck doesn't yank them away!
+          state.userPinned = true;
+          state.followLive = false;
+          localStorage.setItem('castor_trace_follow_live', 'false');
+          applyFollowLiveUI();
+        } else if (state.tasks.length > 0 && taskId === state.tasks[0].id) {
+          // User explicitly clicked the freshest task: unpin and follow live
+          state.userPinned = false;
+          state.followLive = true;
+          localStorage.setItem('castor_trace_follow_live', 'true');
+          applyFollowLiveUI();
+        }
+      }
       state.activeTaskId = taskId;
       state.activeTurnIndex = 0;
       state.activeToolIndex = 0;
       state.lastActiveStatus = state.tasks.find(t => t.id === taskId)?.status ?? null;
       renderTasksList();
       await reloadActiveTaskData();
+      updateLiveNotice();
     }
 
     async function reloadActiveTaskData() {
@@ -931,7 +1025,7 @@
           <p class="text-[11px] text-zinc-500 font-sans line-clamp-1">${escapeHtml(cleanPrompt)}</p>
         `;
 
-        card.addEventListener('click', () => selectTask(task.id));
+        card.addEventListener('click', () => selectTask(task.id, true));
         tasksListContainer.appendChild(card);
       });
     }
