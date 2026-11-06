@@ -120,7 +120,7 @@ Peer Engineering Invariants:\n\
     routing.push(if cfg!(feature = "ast") {
         "  * Code Discovery & Refactoring: Use `ast_search` and `ast_replace` for structural syntax queries and multi-file rewrites (prefer over regex); use `search_code`, `list_dir`, `read_file`, `edit_file`, and `write_file` for file operations.\n"
     } else {
-        "  * File Operations & Code Discovery: Use `search_code` for literal/regex search, `read_file` for exact regions, and `list_dir`, `edit_file`, and `write_file` for file authoring.\n"
+        "  * File Operations & Code Discovery: Use `search_code` for literal pattern search, `read_file` for exact regions, and `list_dir`, `edit_file`, and `write_file` for file authoring.\n"
     });
     routing.push(
         "  * Version Control: Use `bash` for git operations (`git status`, `git diff`, `git log`, `git commit`).\n",

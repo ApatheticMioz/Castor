@@ -139,7 +139,7 @@ pub fn builtin_tool_schemas() -> Vec<ToolSchema> {
     let mut schemas = vec![
         ToolSchema {
             name: "read_file".to_string(),
-            description: "Read a file from disk (whole file or 1-based line range). Natively extracts text from PDFs and loads images (.png, .jpg, .webp, .gif, .bmp) for visual inspection. Prefer a single encompassing line range over repeated small reads on the same file.".to_string(),
+            description: "Read a file from disk (whole file or 1-based line range; omitting end_line reads up to the default ceiling of 800 lines). Natively extracts text from PDFs and loads images (.png, .jpg, .webp, .gif, .bmp) for visual inspection. Prefer a single encompassing line range over repeated small reads on the same file.".to_string(),
             parameters: json!({
                 "type": "object",
                 "properties": {
@@ -179,7 +179,7 @@ pub fn builtin_tool_schemas() -> Vec<ToolSchema> {
         },
         ToolSchema {
             name: "list_dir".to_string(),
-            description: "List entries in a directory (sorted alphabetically, directories suffixed with /).".to_string(),
+            description: "List entries in a directory (sorted alphabetically, categorized by [dir]/[file]).".to_string(),
             parameters: json!({
                 "type": "object",
                 "properties": {
@@ -190,7 +190,7 @@ pub fn builtin_tool_schemas() -> Vec<ToolSchema> {
         },
         ToolSchema {
             name: "search_code".to_string(),
-            description: "Search for literal or regex patterns across workspace files with deterministic sorted output. Prefer over bash grep/rg.".to_string(),
+            description: "Search for literal patterns across workspace files with deterministic sorted output. Prefer over bash grep/rg.".to_string(),
             parameters: json!({
                 "type": "object",
                 "properties": {
