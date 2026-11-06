@@ -589,8 +589,14 @@
       state.userPinned = !state.followLive;
       localStorage.setItem('castor_trace_follow_live', String(state.followLive));
       applyFollowLiveUI();
-      if (state.followLive && state.tasks.length > 0 && state.tasks[0].id !== state.activeTaskId) {
-        await selectTask(state.tasks[0].id, false);
+      if (state.followLive) {
+        // Resuming live: jump to the freshest task and immediately stick the
+        // inspector to its latest turn and freshest tool call.
+        if (state.tasks.length > 0 && state.tasks[0].id !== state.activeTaskId) {
+          await selectTask(state.tasks[0].id, false);
+        } else if (state.activeTaskId) {
+          await reloadActiveTaskData();
+        }
       }
       updateLiveNotice();
     });
@@ -738,6 +744,47 @@
       return indices;
     }
 
+    // Index of the latest turn that matches the active filter (null if none).
+    function lastVisibleTurn() {
+      const visible = getVisibleTurnIndices();
+      return visible.length > 0 ? visible[visible.length - 1] : null;
+    }
+
+    // Index of the freshest tool call within a turn (0 when it has no tool calls).
+    function freshestToolIndexForTurn(turnIdx) {
+      const toolCalls = (state.activeTaskData?.turns[turnIdx]?.dispatch?.tool_calls || []);
+      return toolCalls.length > 0 ? toolCalls.length - 1 : 0;
+    }
+
+    // True when (turnIdx, toolIdx) is the freshest inspector position under the
+    // active filter -- the latest visible turn and its most recent tool call.
+    function isAtFreshestPosition(turnIdx, toolIdx) {
+      return turnIdx !== null && turnIdx === lastVisibleTurn()
+        && toolIdx === freshestToolIndexForTurn(turnIdx);
+    }
+
+    // Pin follow-live when the user manually navigates away from the freshest
+    // position (older turn, older tool pill, prev-turn nav). Persisted so the
+    // pin survives a reload; pollCheck then leaves the user exactly where they
+    // left off instead of yanking them back to the latest dispatch.
+    function pinFollowLive() {
+      state.followLive = false;
+      state.userPinned = true;
+      localStorage.setItem('castor_trace_follow_live', 'false');
+      applyFollowLiveUI();
+      updateLiveNotice();
+    }
+
+    // Re-engage follow-live when the user explicitly returns to the live stream
+    // (Follow Live / Jump Live / navigating to the latest turn or freshest tool).
+    function resumeFollowLive() {
+      state.followLive = true;
+      state.userPinned = false;
+      localStorage.setItem('castor_trace_follow_live', 'true');
+      applyFollowLiveUI();
+      updateLiveNotice();
+    }
+
     async function loadTasksInitial() {
       try {
         const res = await fetch('/api/tasks?limit=40');
@@ -820,8 +867,15 @@
         }
       }
       state.activeTaskId = taskId;
-      state.activeTurnIndex = 0;
-      state.activeToolIndex = 0;
+      // Follow-live (and not pinned): let reloadActiveTaskData() stick the
+      // inspector to the latest turn and its freshest tool call. A manual
+      // selection resets to the first turn of the newly selected task.
+      if (state.followLive && !state.userPinned) {
+        state.activeToolIndex = 0;
+      } else {
+        state.activeTurnIndex = 0;
+        state.activeToolIndex = 0;
+      }
       state.lastActiveStatus = state.tasks.find(t => t.id === taskId)?.status ?? null;
       renderTasksList();
       await reloadActiveTaskData();
@@ -843,11 +897,22 @@
 
         const visibleIndices = getVisibleTurnIndices();
         if (visibleIndices.length > 0) {
-          if (!visibleIndices.includes(state.activeTurnIndex)) {
+          if (state.followLive && !state.userPinned) {
+            // Follow-live stickiness: lock the inspector to the latest turn and,
+            // within it, the freshest tool call, so live streaming/polling always
+            // surfaces the newest execution without a manual click.
+            state.activeTurnIndex = visibleIndices[visibleIndices.length - 1];
+            const currentTurn = turns[state.activeTurnIndex];
+            const toolCalls = currentTurn?.dispatch?.tool_calls || [];
+            state.activeToolIndex = toolCalls.length > 0 ? toolCalls.length - 1 : 0;
+          } else if (!visibleIndices.includes(state.activeTurnIndex)) {
+            // Pinned: keep the user's selection unless it fell out of the active filter.
             state.activeTurnIndex = visibleIndices[0];
+            state.activeToolIndex = 0;
           }
         } else {
           state.activeTurnIndex = 0;
+          state.activeToolIndex = 0;
         }
 
         renderTimeline();
@@ -1137,6 +1202,13 @@
             e.stopPropagation();
             state.activeTurnIndex = idx;
             state.activeToolIndex = parseInt(btn.dataset.tidx, 10) || 0;
+            // Picking a tool pins follow-live unless it's the freshest tool call
+            // of the latest turn (which is where follow-live lives).
+            if (isAtFreshestPosition(idx, state.activeToolIndex)) {
+              resumeFollowLive();
+            } else {
+              pinFollowLive();
+            }
             renderTimeline();
             renderInspector();
           });
@@ -1144,7 +1216,15 @@
 
         row.addEventListener('click', () => {
           state.activeTurnIndex = idx;
-          state.activeToolIndex = 0;
+          // Landing on the latest turn resumes follow-live and sticks to the
+          // freshest tool call; selecting any older turn pins the user in place.
+          if (idx === lastVisibleTurn()) {
+            state.activeToolIndex = freshestToolIndexForTurn(idx);
+            resumeFollowLive();
+          } else {
+            state.activeToolIndex = 0;
+            pinFollowLive();
+          }
           renderTimeline();
           renderInspector();
         });
@@ -1511,6 +1591,13 @@
           btn.textContent = `${idx + 1}. ${tc.name}`;
           btn.addEventListener('click', () => {
             state.activeToolIndex = idx;
+            // Selecting a tool pins follow-live unless it's the freshest tool call
+            // of the latest turn (which is where follow-live lives).
+            if (isAtFreshestPosition(state.activeTurnIndex, idx)) {
+              resumeFollowLive();
+            } else {
+              pinFollowLive();
+            }
             renderTimeline();
             renderInspector();
           });
@@ -1699,6 +1786,9 @@
       if (currentPos > 0) {
         state.activeTurnIndex = visibleIndices[currentPos - 1];
         state.activeToolIndex = 0;
+        // Navigating up to an older turn pauses follow-live so polling doesn't
+        // yank the user back to the latest dispatch while they read.
+        pinFollowLive();
         renderTimeline();
         renderInspector();
       }
@@ -1708,8 +1798,17 @@
       const visibleIndices = getVisibleTurnIndices();
       const currentPos = visibleIndices.indexOf(state.activeTurnIndex);
       if (currentPos >= 0 && currentPos < visibleIndices.length - 1) {
-        state.activeTurnIndex = visibleIndices[currentPos + 1];
-        state.activeToolIndex = 0;
+        const targetTurn = visibleIndices[currentPos + 1];
+        state.activeTurnIndex = targetTurn;
+        // Reaching the latest turn re-engages follow-live and sticks to the
+        // freshest tool call; stepping to a non-latest (older) turn pins.
+        if (targetTurn === lastVisibleTurn()) {
+          state.activeToolIndex = freshestToolIndexForTurn(targetTurn);
+          resumeFollowLive();
+        } else {
+          state.activeToolIndex = 0;
+          pinFollowLive();
+        }
         renderTimeline();
         renderInspector();
       }
@@ -1742,6 +1841,8 @@
         const toolCalls = turn?.dispatch?.tool_calls || [];
         if (toolCalls.length > 1 && state.activeToolIndex > 0) {
           state.activeToolIndex--;
+          if (isAtFreshestPosition(state.activeTurnIndex, state.activeToolIndex)) resumeFollowLive();
+          else pinFollowLive();
           renderTimeline();
           renderInspector();
         }
@@ -1751,6 +1852,8 @@
         const toolCalls = turn?.dispatch?.tool_calls || [];
         if (toolCalls.length > 1 && state.activeToolIndex < toolCalls.length - 1) {
           state.activeToolIndex++;
+          if (isAtFreshestPosition(state.activeTurnIndex, state.activeToolIndex)) resumeFollowLive();
+          else pinFollowLive();
           renderTimeline();
           renderInspector();
         }
