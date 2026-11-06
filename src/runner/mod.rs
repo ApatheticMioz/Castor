@@ -879,11 +879,17 @@ fn should_resume(
 ///   rather than acting).
 ///
 /// When either trigger fires, a `"turn_stall_retry"` event is appended to
-/// `logger` and the chat is retried **once** at `"low"` reasoning effort — a
-/// cheap, deterministic nudge that breaks the deliberation loop without
-/// changing the session's effective tier. If the retry itself errors, that
-/// error is returned. When no trigger fires, the original completion is
-/// returned untouched.
+/// `logger` and the chat is retried **once**. The retry is a **zero-invalidation
+/// retry**: it re-sends the *unchanged* message prefix and passes the original
+/// `effort` through untouched, so the request's prompt bytes are identical to
+/// the stalling primary call (the nudge is a message *appended at the tail*,
+/// after the shared prefix). Deliberately mutating `effort` (e.g. to `"low"`)
+/// is forbidden on the retry path: the engine rewrites `chat_template_kwargs`
+/// with the effort knob, which changes the Turn-0 serialization of the system
+/// prompt and invalidates the KV prefix cache from token 0 (a cold chunked
+/// prefill on every retry). If the retry itself errors, that error is
+/// returned. When no trigger fires, the original completion is returned
+/// untouched.
 #[allow(clippy::too_many_arguments)] // each argument is a distinct watchdog input
 async fn chat_with_watchdog(
     engine: &dyn ChatEngine,
@@ -911,14 +917,25 @@ async fn chat_with_watchdog(
                     "turn": turn,
                     "reason": "timeout",
                     "turn_timeout_secs": turn_timeout_secs,
-                    "retry_reasoning_effort": "low",
+                    "retry_effort": effort,
                 }));
                 tracing::warn!(
                     turn = turn,
-                    "turn stalled on wall-clock timeout ({}s); retrying once at 'low' effort",
+                    "turn stalled on wall-clock timeout ({}s); retrying once (prefix preserved, effort = {effort:?})",
                     turn_timeout_secs
                 );
-                return engine.chat(messages, tools, true, Some("low")).await;
+                // Zero-invalidation retry: re-send the *same* message prefix
+                // with the *same* effort, appending the stall nudge as the
+                // final message (after the shared prefix) so the KV prefix
+                // cache stays warm. Mutating the effort here would rewrite
+                // `chat_template_kwargs` and invalidate the system-prompt
+                // prefix from token 0.
+                let mut retry_messages = messages.to_vec();
+                retry_messages.push(msg(
+                    "user",
+                    "[System: Previous turn timed out. Do not deliberate; emit your next tool call or final response immediately.]",
+                ));
+                return engine.chat(&retry_messages, tools, true, effort).await;
             }
         }
     } else {
@@ -944,18 +961,20 @@ async fn chat_with_watchdog(
             "reason": "reasoning_token_budget",
             "reasoning_tokens": completion.metrics.reasoning_tokens,
             "max_turn_reasoning_tokens": max_turn_reasoning_tokens,
-            "retry_reasoning_effort": "low",
+            "retry_effort": effort,
         }));
         tracing::warn!(
             turn = turn,
             reasoning_tokens = completion.metrics.reasoning_tokens,
-            "turn stalled at reasoning-token budget ({}); retrying once at 'low' effort",
+            "turn stalled at reasoning-token budget ({}); retrying once (prefix preserved, effort = {effort:?})",
             max_turn_reasoning_tokens
         );
         // The stalling completion never emitted an assistant message (no tool
         // calls and empty content), so its deliberation is not in `messages`.
-        // Re-ask with an explicit nudge so the retry model knows *why* it is
-        // being re-prompted and lands concisely on the next action.
+        // Re-ask with an explicit nudge appended at the tail (after the shared
+        // prefix) so the retry model knows *why* it is being re-prompted and
+        // lands concisely on the next action — without disturbing any cached
+        // prompt bytes.
         let mut retry_messages = messages.to_vec();
         retry_messages.push(msg(
             "user",
@@ -963,7 +982,7 @@ async fn chat_with_watchdog(
              budget. Be concise and emit your next tool call or final response \
              immediately.]",
         ));
-        return engine.chat(&retry_messages, tools, true, Some("low")).await;
+        return engine.chat(&retry_messages, tools, true, effort).await;
     }
 
     Ok(completion)
@@ -3353,24 +3372,30 @@ mod tests {
         assert!(!is_severed_stop("no close tag", close));
     }
 
-    /// An engine that records the `reasoning_effort` passed to each `chat`
-    /// call so tests can verify the watchdog retried at `"low"` (the existing
-    /// `RecordingEngine` ignores the effort).
+    /// An engine that records the `reasoning_effort` and the full message
+    /// vector passed to each `chat` call so tests can verify the watchdog
+    /// retry preserved the original effort and only appended a nudge at the
+    /// tail (the existing `RecordingEngine` records calls but not effort).
     struct EffortRecordingEngine {
         responses: tokio::sync::Mutex<VecDeque<Completion>>,
         efforts: tokio::sync::Mutex<Vec<Option<String>>>,
+        messages: tokio::sync::Mutex<Vec<Vec<Message>>>,
     }
 
     #[async_trait]
     impl ChatEngine for EffortRecordingEngine {
         async fn chat(
             &self,
-            _messages: &[Message],
+            messages: &[Message],
             _tools: &[ToolSchema],
             _stream: bool,
             effort: Option<&str>,
         ) -> Result<Completion, EngineError> {
             self.efforts.lock().await.push(effort.map(str::to_string));
+            self.messages
+                .lock()
+                .await
+                .push(messages.to_vec());
             self.responses
                 .lock()
                 .await
@@ -3408,6 +3433,19 @@ mod tests {
         }
     }
 
+    /// The trailing user-message nudge the watchdog appends on a wall-clock
+    /// timeout stall (appended *after* the shared prefix, so the KV prefix
+    /// cache stays warm).
+    const TIMEOUT_RETRY_NUDGE: &str = "[System: Previous turn timed out. Do not deliberate; emit your next tool call or final response immediately.]";
+
+    /// The trailing user-message nudge the watchdog appends on a
+    /// reasoning-token-budget stall.
+    const BUDGET_RETRY_NUDGE: &str = "[System: Previous deliberation exceeded the single-turn reasoning budget. Be concise and emit your next tool call or final response immediately.]";
+
+    fn last_msg(messages: &[Message]) -> &str {
+        messages.last().map(|m| m.content.as_str()).unwrap_or_default()
+    }
+
     /// No token-budget trigger when the budget is disabled (`0`): the primary
     /// `length`/empty-tool-call completion is returned untouched and the engine
     /// is called exactly once.
@@ -3418,6 +3456,7 @@ mod tests {
         let engine = EffortRecordingEngine {
             responses: tokio::sync::Mutex::new(vec![stall_comp(999_999), ok_comp()].into()),
             efforts: tokio::sync::Mutex::new(Vec::new()),
+            messages: tokio::sync::Mutex::new(Vec::new()),
         };
         // `turn_timeout_secs = 0` disables the timeout; `max = 0` disables the
         // token-budget trigger.
@@ -3431,20 +3470,28 @@ mod tests {
         assert_eq!(
             *efforts,
             Vec::from([None]),
-            "exactly one call, no 'low' retry"
+            "exactly one call, no retry"
+        );
+        drop(efforts);
+        let messages = engine.messages.lock().await;
+        assert_eq!(
+            messages.len(),
+            1,
+            "exactly one call: no nudge was appended"
         );
     }
 
     /// Token-budget trigger: a `length`/empty-tool-call turn that burned at
-    /// least the budget is retried once at `"low"` effort, and the retry's
-    /// completion is returned.
+    /// least the budget is retried once at the *original* effort with the
+    /// budget nudge appended at the tail — preserving the KV prefix cache.
     #[tokio::test]
-    async fn watchdog_reasoning_budget_retries_at_low_effort() {
+    async fn watchdog_reasoning_budget_retry_preserves_prefix_and_effort() {
         let state = tmp_state();
         let logger = logger_for(&state);
         let engine = EffortRecordingEngine {
             responses: tokio::sync::Mutex::new(vec![stall_comp(20_000), ok_comp()].into()),
             efforts: tokio::sync::Mutex::new(Vec::new()),
+            messages: tokio::sync::Mutex::new(Vec::new()),
         };
         let res = chat_with_watchdog(&engine, &[], &[], Some("high"), 0, 16_384, &logger, 1)
             .await
@@ -3454,7 +3501,8 @@ mod tests {
         let efforts = engine.efforts.lock().await;
         assert_eq!(
             *efforts,
-            Vec::from([Some("high".into()), Some("low".into())])
+            Vec::from([Some("high".into()), Some("high".into())]),
+            "the retry must reuse the original effort (never 'low')"
         );
         // The stall was logged as a `turn_stall_retry` event.
         let events = logger.read_all();
@@ -3463,6 +3511,20 @@ mod tests {
                 .iter()
                 .any(|e| e["type"] == "turn_stall_retry" && e["reason"] == "reasoning_token_budget"),
             "expected a reasoning_token_budget stall event: {events:?}"
+        );
+        // The retry appended the budget nudge as the final message, leaving the
+        // shared prefix (here: empty) untouched.
+        let messages = engine.messages.lock().await;
+        assert_eq!(
+            messages.len(),
+            2,
+            "primary + one retry"
+        );
+        assert_eq!(last_msg(&messages[0]), "", "primary call sent the original (empty) prefix");
+        assert_eq!(
+            last_msg(&messages[1]),
+            BUDGET_RETRY_NUDGE,
+            "the retry must append the budget nudge at the tail"
         );
     }
 
@@ -3476,6 +3538,7 @@ mod tests {
         let engine = EffortRecordingEngine {
             responses: tokio::sync::Mutex::new(vec![stall_comp(100)].into()),
             efforts: tokio::sync::Mutex::new(Vec::new()),
+            messages: tokio::sync::Mutex::new(Vec::new()),
         };
         let res = chat_with_watchdog(&engine, &[], &[], Some("high"), 0, 16_384, &logger, 1)
             .await
@@ -3490,9 +3553,11 @@ mod tests {
     }
 
     /// The wall-clock timeout trigger: when the primary chat overruns the
-    /// configured ceiling, the watchdog retries once at `"low"` effort.
+    /// configured ceiling, the watchdog retries once at the *original* effort
+    /// with the timeout nudge appended at the tail — preserving the KV prefix
+    /// cache.
     #[tokio::test]
-    async fn watchdog_timeout_retries_at_low_effort() {
+    async fn watchdog_timeout_retry_preserves_prefix_and_effort() {
         let state = tmp_state();
         let logger = logger_for(&state);
         // First call hangs longer than the 1s ceiling; the retry returns
@@ -3504,7 +3569,7 @@ mod tests {
         impl ChatEngine for SlowThenOkEngine {
             async fn chat(
                 &self,
-                _messages: &[Message],
+                messages: &[Message],
                 _tools: &[ToolSchema],
                 _stream: bool,
                 effort: Option<&str>,
@@ -3518,6 +3583,11 @@ mod tests {
                     .lock()
                     .await
                     .push(effort.map(str::to_string));
+                self.inner
+                    .messages
+                    .lock()
+                    .await
+                    .push(messages.to_vec());
                 if first {
                     // Primary call: overruns the 1s ceiling.
                     tokio::time::sleep(std::time::Duration::from_secs(3)).await;
@@ -3533,20 +3603,45 @@ mod tests {
         let inner = EffortRecordingEngine {
             responses: tokio::sync::Mutex::new(vec![ok_comp()].into()),
             efforts: tokio::sync::Mutex::new(Vec::new()),
+            messages: tokio::sync::Mutex::new(Vec::new()),
         };
         let engine = SlowThenOkEngine { inner };
         let res = chat_with_watchdog(&engine, &[], &[], Some("high"), 1, 0, &logger, 1)
             .await
             .unwrap();
         assert_eq!(res.finish_reason.as_deref(), Some("stop"));
-        // Only the retry recorded an effort (the timed-out primary was dropped
-        // before it recorded).
+        // The timed-out primary recorded its effort up-front before being
+        // dropped, and the retry reuses the *same* effort (never "low").
         let events = logger.read_all();
         assert!(
             events
                 .iter()
                 .any(|e| e["type"] == "turn_stall_retry" && e["reason"] == "timeout"),
             "expected a timeout stall event: {events:?}"
+        );
+        let efforts = engine.inner.efforts.lock().await;
+        assert_eq!(
+            *efforts,
+            Vec::from([Some("high".into()), Some("high".into())]),
+            "the retry must reuse the original effort"
+        );
+        // The retry appended the timeout nudge as the final message, leaving
+        // the shared prefix (here: empty) untouched on both calls.
+        let messages = engine.inner.messages.lock().await;
+        assert_eq!(
+            messages.len(),
+            2,
+            "primary + one retry were issued"
+        );
+        assert_eq!(
+            last_msg(&messages[0]),
+            "",
+            "the primary sent the original (empty) prefix"
+        );
+        assert_eq!(
+            last_msg(&messages[1]),
+            TIMEOUT_RETRY_NUDGE,
+            "the retry must append the timeout nudge at the tail"
         );
     }
 

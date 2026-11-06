@@ -42,7 +42,7 @@ which one it is before acting.
 
 | Persona | Runtime | Mandate | Hard Limits |
 |---|---|---|---|
-| **Lead Architect** | Cloud (Claude Code: GLM 5.3 text-only Plan / GLM 5.3-flash vision Exec; Antigravity: Gemini 3.8 Flash vision) | Architecture, task decomposition, plan & manifest authorship, supervisory steering, final synthesis. Proactively parallelizes independent work across concurrent coworker tasks. | **Never** bulk-read source into cloud context; **never** author code; offloads exploration in single-concern slices; sizes concurrent dispatches against the engine's aggregate KV pool, not a fixed slot count (MTP Swarm `MAX_SEQS=4`, 150k budget: up to 4 fresh/low-history short tasks, 2 medium, 1 heavy — further dispatches FIFO-queue on the slot semaphore, and the token-budget gate refuses any admission that would overcommit the pool); dispatch concurrent slices per-workspace so they share one warm KV prefix; **never** falls back to direct shell/file execution when coworker is offline. |
+| **Lead Architect** | Cloud (Claude Code: GLM 5.3 text-only Plan / GLM 5.3-flash vision Exec; Antigravity: Gemini 3.8 Flash vision) | Architecture, task decomposition, plan & manifest authorship, supervisory steering, final synthesis. Proactively parallelizes independent work across concurrent coworker tasks. | **Never** bulk-read source into cloud context; **never** author code; offloads exploration in single-concern slices; **no manual concurrency sizing** — every dispatch is admitted, FIFO-deferred, or yielded automatically by the token-budgeted slot semaphore against the engine's aggregate KV pool (see §3.5); dispatch concurrent slices per-workspace so they share one warm KV prefix; **never** falls back to direct shell/file execution when coworker is offline. |
 | **Autonomous Execution Coworker** | Local peer programmer (Ternary-Bonsai-2-27B or configured model) inside the sandboxed Castor runtime (lean 8-tool core) | Hands-on execution & peer engineering: explore, file editing, git and Python via the `bash` shell, structural AST surgery (feature-gated), local visual inspection (images and PDFs), web and academic research (the latter feature-gated) — all inside the sandbox. Proactively challenges flawed assumptions, proposes architectural alternatives, and returns grounded facts. The lean 8-tool core is: `read_file`, `write_file`, `edit_file`, `list_dir`, `search_code`, `bash`, `web_search`, `web_fetch`; the `ast` feature gate adds `ast_search` / `ast_replace` and the `paper` feature gate adds `paper_lookup`. Git operations and ad-hoc Python execution run natively through `bash`. | **Never** authors high-level plans/roadmaps; **never** escapes the sandbox root. |
 | **Autonomous Optimizer (Evo)** | Local, offline batch runner | Closed-loop mutation: propose -> evaluate -> select/revert against a deterministic fitness metric. | **Snapshot before mutating**; **revert on regression**; never edits files outside the candidate's snapshot list. |
 
@@ -228,7 +228,44 @@ evals/                   # Tier A offline replay, golden test tasks, and DGI 187
 skills/                  # Reusable SKILL.md workflow recipes
 ```
 
-### 3.5 Documentation & Rustdoc Standards (Present-State Truth)
+### 3.5 Concurrent Dispatch & Dynamic Admission (Token-Budgeted Slot Semaphore)
+
+Concurrency is governed **entirely dynamically** by the microkernel's
+token-budgeted slot semaphore (`src/task/semaphore.rs`, file-backed cross-process
+leases); no manual context-size rules or human-rationing tables apply.
+
+- **The admission gate** (`token_budget_admits`) runs on every
+  `acquire_with_tokens` before a lease is claimed. It sums
+  `per_slot_state_tokens + context_tokens` over **all** live leases and admits
+  the new lease only if the committed total plus the new lease's
+  `per_slot_state_tokens + initial_tokens` stays within the pool capacity
+  (`max_context`, auto-adopted from the engine-reported `max_model_len`; e.g.
+  150,000 on the MTP Swarm baseline). When concurrent in-flight tokens would
+  saturate the aggregate KV pool, admission is refused and the dispatch is
+  **deferred automatically**: it is enqueued in the FIFO wait-queue and woken
+  when a slot is released or the poll interval fires; the gate is re-checked on
+  every wake, so a woken waiter can never overcommit either.
+- **Initial lease cost** = the deterministic Turn-1 prefix reserve (a pure,
+  zero-cost function of the pre-built system prompt, clamped to
+  `[4,000, 8,000]` tokens) + the new prompt's token estimate + any
+  resumed-history tokens.
+- **In-flight growth** is tracked by re-stamping the lease's `context_tokens`
+  with the turn's actual footprint after every turn
+  (`TaskSemaphore::update_context_tokens`), so a growing session defers further
+  admissions automatically.
+- **Overcommit recovery** is the cooperative yield gate (`should_yield`): a
+  younger lease yields its slot to older leases on physical pool overcommit or
+  empirical cache eviction, then re-acquires through the same FIFO queue.
+- **Stall/timeout retries are zero-invalidation**: the runner re-sends the
+  unchanged message prefix with the **original** reasoning effort and appends a
+  nudge as the final user message *after* the shared prefix, so the request's
+  serialized prompt bytes stay identical and the KV prefix cache is preserved
+  from token 0 (a sub-second warm recovery instead of a cold chunked prefill).
+  Mutating the reasoning effort on a retry would rewrite
+  `chat_template_kwargs` and invalidate the system-prompt prefix from token 0
+  on Qwen/vLLM, so it is forbidden on the retry path.
+
+### 3.6 Documentation & Rustdoc Standards (Present-State Truth)
 - **Zero Storytelling / No Historical Changelogs / No Defensive Lore**: Comments and docstrings must document the current software architecture, behavior, and invariants strictly as-is in present-state truth.
 - **Strictly Forbidden Commentary Patterns**:
   - Chronological narratives: "Raised from X to Y", "Reverted from A to B", "Historically", "Formerly", "The old code used to...".

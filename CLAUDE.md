@@ -17,10 +17,14 @@ Operating contract for the Cloud Lead Architect (Claude Code / Antigravity Gemin
    - **Input coordinates**: Exact file paths or directories.
    - **Clear postconditions**: Unambiguous, testable completion criteria (e.g., "clean exit 0 on `cargo test --all-features`", "reproduce and fix panic in module X").
    - **Single-concern slices**: Keep slices focused; partition multi-domain tasks into focused sequential or concurrent contracts.
-4. **Workload Concurrency Sizing**:
-   - **1 worker**: Heavy tasks (deep refactoring, full test suites).
-   - **Up to 2 workers**: Medium tasks (isolated module analysis, verification).
-   - **Up to 4 workers**: Fast tasks (independent diagnostics, quick file checks).
+4. **Concurrent Dispatch Sizing (Dynamic)**:
+   - Dispatch independent single-concern slices in parallel and let the
+     token-budgeted slot semaphore (`src/task/semaphore.rs`) admit, FIFO-defer,
+     or yield every dispatch automatically against the engine's aggregate KV
+     pool (see `AGENTS.md` §3.5) — no manual per-size worker-count rules.
+   - Per-workspace concurrent slices share one warm KV prefix; stall/timeout
+     retries are zero-invalidation (unchanged prefix + original reasoning
+     effort + a nudge appended at the tail).
 
 ## 3. Asynchronous Lifecycle & Reactive Wakeup
 
