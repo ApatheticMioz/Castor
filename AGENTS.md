@@ -120,8 +120,6 @@ The exact list below is the present-state inventory from
 | `CASTOR_TOOL_PREFIX` | `castor` | Namespace prefix for MCP tools (`castor_coworker`, etc.). |
 | `CASTOR_STATE_DIR` | `~/.castor` | Root for task JSON, slot leases, session logs, Evo lineage. |
 | `CASTOR_MAX_CONCURRENT_TASKS` | `4` | Cross-process execution slots (disk-lease semaphore). Defaults to the Swarm baseline `MAX_SEQS=4`; user-defined profiles (e.g. `turbo`=2, `bonsai`=1) or an explicit env/file value override this. Each worker additionally token-budgets the pool at `max_context` so concurrent streams never overcommit the aggregate KV footprint. |
-| `CASTOR_MIN_EVICTION_DETECT_TOKENS` | `13056` | Minimum prompt tokens before KV-cache eviction detection engages. |
-| `CASTOR_CACHE_HIT_YIELD_RATIO` | `0.20` | KV prefix-cache hit ratio that justifies yielding a warm slot to a new task. |
 | `CASTOR_WORKSPACE_SKELETON` | `true` | Prepend a compact workspace-skeleton block to the system prompt (warm Turn-1 prefix for KV prefix caching). |
 | `CASTOR_TOOL_SPILL_BYTES` | `16384` | Max bytes of a single tool output before it is spilled to disk (head/tail preview kept in conversation). |
 | `CASTOR_DGI_REJECT_MARGIN` | `1.5` | DGI gatekeeper log-odds reject margin: reject only when `logP(OVERLOADED) − logP(ADMIT)` exceeds this. |

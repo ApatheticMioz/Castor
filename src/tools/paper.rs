@@ -12,7 +12,7 @@ use thiserror::Error;
 const DEFAULT_TIMEOUT_SECS: u64 = 15;
 /// The default `User-Agent` (mailto) identifier OpenAlex expects for polite
 /// scraping. The version segment is derived from the crate at compile time so
-/// OpenAlex attributes load to a concrete release (currently `Castor/1.4.1`).
+/// OpenAlex attributes load to the concrete release.
 const DEFAULT_USER_AGENT: &str =
     concat!("Castor/", env!("CARGO_PKG_VERSION"), " (mailto:castor@local.dev)");
 

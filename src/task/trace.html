@@ -75,7 +75,7 @@
       <div class="flex items-center gap-2 shrink-0">
         <span class="font-bold text-sm tracking-tight text-white font-mono">CASTOR TRACE</span>
         <span class="px-1.5 py-0.5 rounded text-[10px] font-mono font-medium bg-zinc-900 text-zinc-400 border border-zinc-800">
-          v1.4.1
+          v1.5.0
         </span>
       </div>
       <div class="h-3 w-px bg-border shrink-0"></div>
@@ -509,6 +509,7 @@
       activeFilter: 'all',
       activeTab: 'execution',
       lastMtime: 0,
+      lastSize: 0,
       lastActiveStatus: null,
       autoSync: true,
       followLive: localStorage.getItem('castor_trace_follow_live') !== 'false',
@@ -839,9 +840,12 @@
           return;
         }
 
-        // 4. Otherwise, refresh current task data if mtime changed
-        if (data.mtime && data.mtime !== state.lastMtime) {
-          state.lastMtime = data.mtime;
+        // 4. Otherwise, refresh current task data if mtime or size changed
+        const sizeChanged = typeof data.size === 'number' && data.size !== state.lastSize;
+        const mtimeChanged = data.mtime && data.mtime !== state.lastMtime;
+        if (sizeChanged || mtimeChanged) {
+          state.lastMtime = data.mtime || state.lastMtime;
+          state.lastSize = typeof data.size === 'number' ? data.size : state.lastSize;
           if (state.activeTaskId) {
             await reloadActiveTaskData();
           }
@@ -867,11 +871,11 @@
         }
       }
       state.activeTaskId = taskId;
-      // Follow-live (and not pinned): let reloadActiveTaskData() stick the
-      // inspector to the latest turn and its freshest tool call. A manual
-      // selection resets to the first turn of the newly selected task.
+      // Follow-live (and not pinned): reset indices so reloadActiveTaskData()
+      // binds cleanly to the latest turn and its freshest tool call.
       if (state.followLive && !state.userPinned) {
-        state.activeToolIndex = 0;
+        state.activeTurnIndex = -1;
+        state.activeToolIndex = -1;
       } else {
         state.activeTurnIndex = 0;
         state.activeToolIndex = 0;
@@ -1149,10 +1153,11 @@
           if (TOOL_PILL_COLORS[g.name]) badgeColor = TOOL_PILL_COLORS[g.name];
 
           const isToolActive = isSelected && g.indices.includes(state.activeToolIndex);
-          const activeClass = isToolActive ? 'ring-1 ring-white font-extrabold text-white brightness-125' : '';
+          const activeClass = isToolActive ? 'ring-2 ring-emerald-400 font-extrabold text-white shadow-sm brightness-125' : '';
           const countLabel = g.count > 1 ? ` <span class="opacity-75">×${g.count}</span>` : '';
+          const targetIndex = g.indices[g.indices.length - 1];
 
-          return `<span class="tool-pill px-1.5 py-0.2 rounded text-[10px] font-bold border ${badgeColor} ${activeClass} hover:brightness-125 transition" data-tidx="${g.indices[0]}">${escapeHtml(g.name)}${countLabel}</span>`;
+          return `<span class="tool-pill px-1.5 py-0.2 rounded text-[10px] font-bold border ${badgeColor} ${activeClass} hover:brightness-125 transition" data-tidx="${targetIndex}">${escapeHtml(g.name)}${countLabel}</span>`;
         }).join('');
 
         const promptSummary = (dispatch?.content || '').trim().replace(/\n/g, ' ').slice(0, 50);
@@ -1585,10 +1590,12 @@
         toolCalls.forEach((tc, idx) => {
           const btn = document.createElement('button');
           const isAct = idx === state.activeToolIndex;
-          btn.className = `px-2 py-0.5 rounded text-[11px] font-bold border transition ${
-            isAct ? 'bg-zinc-200 text-black border-white shadow-sm' : 'bg-zinc-900 text-zinc-400 border-border hover:text-white'
+          const res = results.find(r => r.tool_call_id === tc.id) || results[idx];
+          const dotColor = !res ? 'bg-amber-400 animate-pulse' : (res.is_error ? 'bg-rose-400' : 'bg-emerald-400');
+          btn.className = `flex items-center gap-1.5 px-2 py-0.5 rounded text-[11px] font-bold border transition ${
+            isAct ? 'bg-zinc-100 text-black border-white shadow-sm ring-1 ring-white' : 'bg-zinc-900 text-zinc-400 border-border hover:text-white'
           }`;
-          btn.textContent = `${idx + 1}. ${tc.name}`;
+          btn.innerHTML = `<span class="w-1.5 h-1.5 rounded-full ${dotColor}"></span><span>${idx + 1}. ${escapeHtml(tc.name)}</span>`;
           btn.addEventListener('click', () => {
             state.activeToolIndex = idx;
             // Selecting a tool pins follow-live unless it's the freshest tool call
@@ -1602,6 +1609,9 @@
             renderInspector();
           });
           toolButtonsList.appendChild(btn);
+          if (isAct) {
+            btn.scrollIntoView({ block: 'nearest', inline: 'nearest' });
+          }
         });
       } else {
         toolSwitcherBar.classList.add('hidden');
@@ -1655,6 +1665,10 @@
         if (state.activeTab === 'execution') {
           if (argsPretty.length < 10000) Prism.highlightElement(argsEl);
           if (outText.length < 30000) Prism.highlightElement(outEl);
+          if (state.followLive && !state.userPinned) {
+            const outContainer = outEl.parentElement;
+            if (outContainer) outContainer.scrollTop = outContainer.scrollHeight;
+          }
         }
       } else {
         const isLiveGenerating = task?.status === 'executing' && state.activeTurnIndex === turns.length - 1;

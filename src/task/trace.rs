@@ -73,6 +73,7 @@ pub struct PollResponse {
     pub active_task_id: Option<String>,
     pub status: String,
     pub mtime: u64,
+    pub size: u64,
     #[serde(rename = "latestTaskId")]
     pub latest_task_id: Option<String>,
     #[serde(rename = "latestStatus")]
@@ -643,18 +644,20 @@ async fn poll_handler(
     };
 
     let mut mtime = target_task.as_ref().map(|t| t.mtime).unwrap_or(0);
+    let mut size = 0u64;
     if let Some(ref task) = target_task
         && let Some(ref sess_id) = task.session_id
     {
         let ev_path = state.sessions().join(sess_id).join("events.jsonl");
-        if let Ok(meta) = ev_path.metadata()
-            && let Ok(dur) = meta.modified().and_then(|t| {
+        if let Ok(meta) = ev_path.metadata() {
+            size = meta.len();
+            if let Ok(dur) = meta.modified().and_then(|t| {
                 t.duration_since(std::time::UNIX_EPOCH)
                     .map_err(std::io::Error::other)
-            })
-        {
-            let ev_mtime = dur.as_millis() as u64;
-            mtime = mtime.max(ev_mtime);
+            }) {
+                let ev_mtime = dur.as_millis() as u64;
+                mtime = mtime.max(ev_mtime);
+            }
         }
     }
 
@@ -664,6 +667,7 @@ async fn poll_handler(
             .map(|t| t.status)
             .unwrap_or_else(|| "unknown".to_string()),
         mtime,
+        size,
         latest_task_id: latest.as_ref().map(|t| t.id.clone()),
         latest_status: latest
             .map(|t| t.status)

@@ -1,7 +1,7 @@
 {
   "name": "mcp-castor",
-  "version": "1.4.1",
-  "description": "Universal Cloud-to-Local Agent Bridge & MCP Microkernel in Rust. Offload token-heavy AST surgery and file operations to any local LLM (Ollama, vLLM, LM Studio) at $0 cost.",
+  "version": "1.5.0",
+  "description": "Universal Cloud-to-Local Agent Bridge & MCP Microkernel in Rust. Offload token-heavy code execution, testing, and file operations to any local LLM (Ollama, vLLM, LM Studio) at $0 cost.",
   "type": "module",
   "bin": {
     "castor": "bin/castor.js",

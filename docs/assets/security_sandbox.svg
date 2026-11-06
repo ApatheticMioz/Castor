@@ -70,12 +70,12 @@
     <text x="0" y="58" fill="#94a3b8" font-size="10" text-anchor="middle">Blocks rm -rf &amp; fork bombs</text>
   </g>
 
-  <!-- Node 4: AST Syntax Gate (x: 805) -->
+  <!-- Node 4: AST Syntax Gate [feature: ast] (x: 805) -->
   <g transform="translate(805, 55)" filter="url(#shadowSec3)">
     <circle cx="0" cy="0" r="28" fill="#1c1206" stroke="#f59e0b" stroke-width="2"/>
     <text x="0" y="5" fill="#f59e0b" font-size="15" font-weight="800" text-anchor="middle">4</text>
-    <text x="0" y="44" fill="#f8fafc" font-size="12" font-weight="700" text-anchor="middle">AST Syntax Gate</text>
-    <text x="0" y="58" fill="#fde68a" font-size="10" font-weight="700" text-anchor="middle">In-memory parse rollback</text>
+    <text x="0" y="44" fill="#f8fafc" font-size="12" font-weight="700" text-anchor="middle">AST Gate [opt-in]</text>
+    <text x="0" y="58" fill="#fde68a" font-size="10" font-weight="700" text-anchor="middle">feature: ast parse rollback</text>
   </g>
 
   <!-- Bottom Synthesis (Generous vertical separation at y: 132) -->
@@ -84,6 +84,6 @@
     <tspan fill="#475569">  ──►  </tspan>
     <tspan fill="#818cf8">Deterministic Shell Verification</tspan>
     <tspan fill="#475569">  ──►  </tspan>
-    <tspan fill="#f59e0b">Rollback on Syntax Error</tspan>
+    <tspan fill="#f59e0b">Opt-in AST Syntax Rollback</tspan>
   </text>
 </svg>
