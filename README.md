@@ -1,7 +1,7 @@
 <div align="center">
 
 <a href="#the-receipts">
-  <img src="https://raw.githubusercontent.com/ApatheticMioz/Castor/main/docs/assets/hero-savings.svg"
+  <img src="docs/assets/hero-savings.svg"
        alt="Castor: 99.85% cheaper than a cloud-only agent. $5,039.32 at Claude Sonnet 5 rates vs $7.53 in local electricity over 63 days and 2.31B tokens."
        width="100%">
 </a>
@@ -68,7 +68,7 @@ These numbers come straight from `castor stats` on a real workstation, from **4 
 <details>
 <summary><b>See the raw telemetry screenshot</b></summary>
 <br>
-<img src="https://raw.githubusercontent.com/ApatheticMioz/Castor/main/docs/assets/stats.webp" alt="Raw castor stats output" width="100%">
+<img src="docs/assets/stats.webp" alt="Raw castor stats output" width="100%">
 </details>
 
 Run `castor stats` yourself and you'll get the same breakdown for your own usage.
@@ -78,11 +78,11 @@ Run `castor stats` yourself and you'll get the same breakdown for your own usage
 ## See it work
 
 <div align="center">
-<a href="https://raw.githubusercontent.com/ApatheticMioz/Castor/main/docs/assets/demo.mp4">
-  <img src="https://raw.githubusercontent.com/ApatheticMioz/Castor/main/docs/assets/demo.webp"
+<a href="docs/assets/demo.mp4">
+  <img src="docs/assets/demo.webp"
        alt="Castor in action: cloud architect dispatches, local engine executes" width="100%">
 </a>
-<sub>The cloud model plans → Castor runs the edit-and-test loop locally → a short, verified result goes back. <a href="https://raw.githubusercontent.com/ApatheticMioz/Castor/main/docs/assets/demo.mp4">Watch in 1080p60</a>.</sub>
+<sub>The cloud model plans → Castor runs the edit-and-test loop locally → a short, verified result goes back. <a href="docs/assets/demo.mp4">Watch in 1080p60</a>.</sub>
 </div>
 
 ---

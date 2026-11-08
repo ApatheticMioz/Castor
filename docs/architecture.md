@@ -1,6 +1,6 @@
 # Architecture
 
-<img src="https://raw.githubusercontent.com/ApatheticMioz/Castor/main/docs/assets/architecture.svg"
+<img src="assets/architecture.svg"
      alt="Castor system architecture" width="100%">
 
 ## Flow

@@ -1,6 +1,6 @@
 # Workspace Containment
 
-<img src="https://raw.githubusercontent.com/ApatheticMioz/Castor/main/docs/assets/security_sandbox.svg"
+<img src="assets/security_sandbox.svg"
      alt="Castor workspace containment" width="100%">
 
 Castor enforces zero-trust containment at every tool boundary:
