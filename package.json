@@ -10,6 +10,7 @@
   "files": [
     "bin",
     "skills",
+    "docs",
     "README.md",
     "LICENSE"
   ],

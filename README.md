@@ -15,7 +15,7 @@ The cloud model still does the thinking. Your cloud bill drops to almost nothing
 
 <p>
   <a href="https://www.npmjs.com/package/mcp-castor"><img alt="npm" src="https://img.shields.io/badge/npm-mcp--castor-d97706?logo=npm&logoColor=white"></a>
-  <a href=".github/workflows"><img alt="CI" src="https://img.shields.io/badge/CI-Passing-1d4ed8?logo=githubactions&logoColor=white"></a>
+  <a href=".github/workflows/ci.yml"><img alt="CI" src="https://img.shields.io/badge/CI-Passing-1d4ed8?logo=githubactions&logoColor=white"></a>
   <a href="https://www.rust-lang.org/"><img alt="Rust" src="https://img.shields.io/badge/Rust-2024_Edition-1d4ed8?logo=rust&logoColor=white"></a>
   <a href="LICENSE"><img alt="License" src="https://img.shields.io/badge/License-AGPL--3.0-161e2e"></a>
 </p>

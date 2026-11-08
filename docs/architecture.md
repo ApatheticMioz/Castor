@@ -72,10 +72,11 @@ Zero-lock daemon. Slot admission is a **two-phase atomic `O_EXCL` lease**
 (claim → ownership-check release), with **zombie-aware Linux PID liveness**
 (via `/proc/{pid}/status`, `State: Z` is treated as dead so stale leases are reclaimed).
 
-The admission budget is expressed in **tokens against the aggregate KV pool**
-(`pool_capacity_tokens`). When pressure builds, the **cooperative yield gate**
-(`pool_yield_gate`) lets younger sessions voluntarily yield to older ones,
-preventing GPU VRAM thrashing under concurrency spikes.
+The admission gate runs before a lease is claimed, summing live lease `context_tokens`
+against the aggregate KV pool (`pool_capacity_tokens`). Dispatches that would saturate
+the pool are enqueued in a dynamic FIFO wait-queue and admitted as slots free up.
+When pressure builds, the **cooperative yield gate** (`pool_yield_gate`) lets younger
+sessions voluntarily yield to older ones, preventing GPU VRAM thrashing under concurrency spikes.
 See [`src/task/semaphore.rs`](../src/task/semaphore.rs).
 
 ### 4. Stream Proxy & Sanitizer
@@ -91,8 +92,8 @@ See [`src/proxy/`](../src/proxy/).
 ### 5. Evolutionary Optimizer (Evo)
 
 Closed-loop code mutation guided by an **append-only, cycle-proof lineage DAG**
-(`src/evo/`). Each mutation is gated on a **deterministic test fitness** evaluation;
-a **stagnation watchdog** (`src/evo/watchdog.rs`) inspects the DAG head and flags
+([`src/evo/`](../src/evo/)). Each mutation is gated on a **deterministic test fitness** evaluation;
+a **stagnation watchdog** ([`src/evo/watchdog.rs`](../src/evo/watchdog.rs)) inspects the DAG head and flags
 plateaus so the loop can be reset before drift accumulates.
 
 ### 6. Lean 8-Tool Core
@@ -115,6 +116,11 @@ indexed in the system prompt with just their name and summary, and loaded on dem
 the active task requires them. This preserves the **Turn-1 KV prefix cache** across tasks in the
 same workspace so repeat prompts avoid full re-prefill penalties.
 
+### 8. In-Flight Context Ceiling & Zero-Invalidation Retries
+
+- **In-Flight 90% Context Ceiling**: Proactively monitors accumulated history during live execution. At ≥ 90% of `max_context`, tool execution is halted and the model cleanly synthesizes its final deliverable in the remaining headroom, eliminating upstream HTTP 400 context overflow crashes.
+- **Zero-Invalidation Retries**: Watchdog and stall retries pass the original reasoning effort unchanged and append directives strictly to the prompt tail, preserving 100% of the KV prefix cache from Token 0 (recovering in seconds instead of triggering a cold chunked prefill).
+
 ---
 
 ## MCP Tool Surface
@@ -135,7 +141,7 @@ Castor registers three stdio MCP tools:
 | `write_file` | core | Create or overwrite files within the workspace root |
 | `edit_file` | core | Exact-substring edit with uniqueness checks and atomic tempfile replacement |
 | `list_dir` | core | Directory listing with optional depth control |
-| `search_code` | core | Deterministic path-filtered text and regex search |
+| `search_code` | core | Deterministic path-filtered literal text search (fixed strings) |
 | `bash` | core | Sandboxed shell with lexical command filter; native `git` and `python3` |
 | `web_search` | core | Web meta-search (SearXNG primary, Brave Search fallback) |
 | `web_fetch` | core | Fetch and convert HTML, PDF, or plaintext into clean Markdown |
