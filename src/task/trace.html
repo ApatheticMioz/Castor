@@ -65,6 +65,37 @@
       color: #ffffff !important;
       filter: brightness(1.5) !important;
     }
+    /* Floating "jump to live" pill. Anchored to its positioned ancestor pane
+       (timeline / inspector / output), bottom-centered. */
+    .follow-pill {
+      position: absolute;
+      bottom: 10px;
+      left: 50%;
+      transform: translateX(-50%);
+      z-index: 40;
+      display: flex;
+      align-items: center;
+      gap: 6px;
+      padding: 4px 12px;
+      border-radius: 9999px;
+      background: rgba(9, 9, 11, 0.94);
+      border: 1px solid #3f3f46;
+      color: #e4e4e7;
+      font-size: 11px;
+      font-family: 'JetBrains Mono', monospace;
+      cursor: pointer;
+      box-shadow: 0 6px 24px rgba(0, 0, 0, 0.55);
+      transition: border-color .12s, color .12s, background .12s;
+    }
+    .follow-pill:hover { border-color: #10b981; color: #ffffff; background: #0a1410; }
+    .follow-pill .pulse {
+      width: 7px; height: 7px; border-radius: 9999px;
+      background: #10b981;
+      animation: followpill-pulse 1.1s ease-in-out infinite;
+    }
+    @keyframes followpill-pulse {
+      0%, 100% { opacity: 1; } 50% { opacity: .35; }
+    }
   </style>
 </head>
 <body class="bg-black text-zinc-100 font-sans h-screen w-screen flex flex-col overflow-hidden select-none antialiased">
@@ -199,13 +230,23 @@
         </div>
       </div>
 
-      <div class="flex-1 overflow-y-auto p-1.5 flex flex-col gap-1" id="spansListContainer">
-        <!-- Rendered timeline rows -->
+      <div class="relative flex-1 min-h-0">
+        <div class="absolute inset-0 overflow-y-auto p-1.5 flex flex-col gap-1" id="spansListContainer">
+          <!-- Rendered timeline rows -->
+        </div>
+        <button type="button" id="timelineFollowPill" class="follow-pill hidden" aria-label="Jump to the latest turn">
+          <span class="pulse"></span><span id="timelineFollowPillLabel">&#8595; Live</span>
+        </button>
       </div>
     </section>
 
     <!-- PANE 3: DETAIL INSPECTOR (Right) -->
-    <main class="flex-1 flex flex-col bg-black overflow-hidden">
+    <main class="relative flex-1 flex flex-col bg-black overflow-hidden">
+      <!-- Floating "jump to live" pill for the inspector pane (shown when the
+           user scrolls up away from the newest content). -->
+      <button type="button" id="inspectorFollowPill" class="follow-pill hidden" aria-label="Jump to the latest turn">
+        <span class="pulse"></span><span id="inspectorFollowPillLabel">&#8595; Live</span>
+      </button>
       <!-- Active Task Header & Dispatch Aggregates Banner -->
       <div class="bg-card border-b border-border px-4 py-2 flex flex-col gap-2 shrink-0" id="activeTaskHeader">
         <!-- Row 1: Status Badge, Task ID, Copy, and Turn Navigation -->
@@ -373,7 +414,11 @@
               <span>Execution Output</span>
               <span id="outputMetaLabel">--</span>
             </div>
-            <pre><code class="language-bash" id="actionOutputCode">--</code></pre>
+            <pre class="relative max-h-[45vh] overflow-y-auto"><code class="language-bash" id="actionOutputCode">--</code>
+              <button type="button" id="outputFollowPill" class="follow-pill hidden" aria-label="Scroll to the end of this output">
+                <span class="pulse"></span><span>&#8595; End</span>
+              </button>
+            </pre>
           </div>
         </div>
 
@@ -512,8 +557,17 @@
       lastSize: 0,
       lastActiveStatus: null,
       autoSync: true,
-      followLive: localStorage.getItem('castor_trace_follow_live') !== 'false',
-      userPinned: false,
+      // Follow mode: `followEnabled` is the user's persisted on/off toggle
+      // for auto-following the live stream (header button). `following`
+      // (runtime, not persisted) is true only while the active task is the
+      // live stream under follow management -- picking an older task pins it
+      // (following=false) so auto-advance never yanks a reader.
+      followEnabled: localStorage.getItem('castor_trace_follow_live') !== 'false',
+      following: true,
+      // Newest turn index on the previous render (sentinel -1 until the first
+      // data load). Lets us tell "sitting on the live tail" from "navigated to
+      // an older turn": a new turn advances the view only in the former case.
+      _lastNewestTurn: -1,
     };
 
     // Semantic tool-pill colors (shared by the timeline pills and the legend).
@@ -575,27 +629,210 @@
     const TERMINAL_STATUSES = new Set(['completed', 'failed', 'cancelled', 'orphaned']);
     function isTerminalStatus(s) { return TERMINAL_STATUSES.has(s); }
 
+    // ---------------------------------------------------------------------
+    // Follow manager: per-pane stick-to-bottom.
+    //
+    //   * A pane is *stuck* while the user is within FOLLOW_STICK_PX of its
+    //     bottom edge. While stuck, content growth re-pins it to the bottom
+    //     with ZERO viewport jumps (the viewport tracks the newest content
+    //     exactly, so nothing moves out from under the reader).
+    //   * A genuine user scroll (wheel / touch / scrollbar) disengages the
+    //     stick and a floating pill appears. Growth of an *un-stuck* pane
+    //     never touches the viewport -- it only accumulates a "N new" count.
+    //   * Re-engage two ways: the user scrolls back within the threshold, or
+    //     taps the pill.
+    //
+    // Growth is driven deterministically from the render points (the exact
+    // spots where the DOM gains height) -- no observers, no drift.
+    // ---------------------------------------------------------------------
+    const FOLLOW_STICK_PX = 20;
+
+    const Follow = {
+      panes: {}, // key -> { el, pill, stuck, pendingTurns, _lastTurns, _lastH, progUntil }
+
+      register(key, el, pill) {
+        if (!el || this.panes[key]) return;
+        const rec = {
+          el, pill: pill || null,
+          stuck: true,         // start stuck: follow mode is the default
+          userMoved: false,    // user scrolled manually since last nav action
+          pendingTurns: 0,
+          _lastTurns: (state.activeTaskData?.turns || []).length,
+          _lastH: 0,
+          progUntil: -1,
+        };
+        this.panes[key] = rec;
+
+        const now = () => Date.now();
+        const atBottom = () => (el.scrollHeight - el.scrollTop - el.clientHeight) <= FOLLOW_STICK_PX;
+
+        // 'scroll' events are user-initiated unless they fall inside our
+        // programmatic-stick window (set right before we scroll ourselves).
+        el.addEventListener('scroll', () => {
+          if (now() < rec.progUntil) return; // we caused this scroll
+          rec.userMoved = true;             // genuine manual scroll
+          if (atBottom()) {
+            if (!rec.stuck) { rec.pendingTurns = 0; rec.stuck = true; this._update(rec); }
+          } else if (rec.stuck) {
+            rec.stuck = false;
+            this._update(rec);
+          }
+        }, { passive: true });
+        el.addEventListener('wheel', (e) => {
+          // Every wheel is user intent; scrolling up disengages the stick.
+          rec.userMoved = true;
+          if (e.deltaY < 0 && rec.stuck) { rec.stuck = false; this._update(rec); }
+        }, { passive: true });
+
+        rec.stuck = atBottom(); // initial state from the current position
+        this._update(rec);
+      },
+
+      // Re-pin a stuck pane to its bottom after content grew. Non-stuck
+      // panes are left untouched (their "N new" count is handled in onPoll).
+      onGrow(key) {
+        const rec = this.panes[key];
+        if (!rec || !rec.stuck) return;
+        rec.progUntil = Date.now() + 350; // ignore the scroll this causes
+        rec.el.scrollTop = rec.el.scrollHeight;
+        rec.el.scrollTo({ top: rec.el.scrollHeight, behavior: 'instant' });
+        this._update(rec);
+      },
+
+      // Explicitly engage a pane at its bottom (pill click / follow-driven
+      // selection). Smooth unless the user prefers reduced motion.
+      toBottom(key, smooth) {
+        const rec = this.panes[key];
+        if (!rec) return;
+        rec.stuck = true;
+        rec.userMoved = false;
+        rec.pendingTurns = 0;
+        rec._lastTurns = (state.activeTaskData?.turns || []).length;
+        const useSmooth = !!(smooth && !(typeof window.matchMedia === 'function'
+          && window.matchMedia('(prefers-reduced-motion: reduce)').matches));
+        // Ignore only the scroll events our own animation causes; the window
+        // is sized to the animation so a real user scroll right after it still
+        // disengages the stick.
+        rec.progUntil = Date.now() + (useSmooth ? 900 : 350);
+        this._update(rec);
+        rec.el.scrollTo({ top: rec.el.scrollHeight, behavior: useSmooth ? 'smooth' : 'instant' });
+      },
+
+      // Scroll a pane so a given row is visible, using nearest semantics:
+      // move only if the row is actually out of view (least fighting).
+      focusRow(key, rowEl) {
+        const rec = this.panes[key];
+        if (!rec || !rowEl) return;
+        if (rec.userMoved) return; // the user is controlling this pane; leave it
+        const pad = 8;
+        const paneRect = rec.el.getBoundingClientRect();
+        const rowRect = rowEl.getBoundingClientRect();
+        const rowTop = rowRect.top - paneRect.top + rec.el.scrollTop;
+        const rowBot = rowTop + rowRect.height;
+        const viewTop = rec.el.scrollTop;
+        const viewBot = viewTop + rec.el.clientHeight;
+        let target = rec.el.scrollTop; // default: already visible, don't move
+        if (rowTop < viewTop) target = rowTop - pad;
+        else if (rowBot > viewBot) target = rowBot - rec.el.clientHeight + pad;
+        target = Math.max(0, target);
+        // The ensuing animation's scroll events are suppressed (progUntil), so
+        // compute the final stick state + pill here directly from the target
+        // (not the live scrollTop, which still reflects the pre-scroll view):
+        // landing at the bottom re-engages, landing mid-list disengages.
+        const finalGap = rec.el.scrollHeight - target - rec.el.clientHeight;
+        rec.stuck = finalGap <= FOLLOW_STICK_PX;
+        if (rec.stuck) rec.pendingTurns = 0;
+        const show = rec.pill && !rec.stuck && (rec.el.scrollHeight - rec.el.clientHeight) > 4;
+        if (show) rec.pill.classList.remove('hidden');
+        else if (rec.pill) rec.pill.classList.add('hidden');
+        const useSmooth = !(typeof window.matchMedia === 'function'
+          && window.matchMedia('(prefers-reduced-motion: reduce)').matches);
+        rec.progUntil = Date.now() + (useSmooth ? 900 : 350);
+        rec.el.scrollTo({ top: target, behavior: useSmooth ? 'smooth' : 'instant' });
+      },
+
+      // Refresh stick state + pill visibility for one pane.
+      _update(rec) {
+        const el = rec.el;
+        if (el.scrollHeight > 0) {
+          const atBottom = (el.scrollHeight - el.scrollTop - el.clientHeight) <= FOLLOW_STICK_PX;
+          if (atBottom) { rec.stuck = true; rec.pendingTurns = 0; }
+        }
+        const show = rec.pill && !rec.stuck && (el.scrollHeight - el.clientHeight) > 4;
+        if (show) rec.pill.classList.remove('hidden');
+        else if (rec.pill) rec.pill.classList.add('hidden');
+      },
+
+      _updatePillLabels() {
+        const tl = this.panes['timeline'];
+        if (tl && tl.pill) {
+          const label = tl.pill.querySelector('#timelineFollowPillLabel');
+          if (label) {
+            label.textContent = tl.pendingTurns > 0
+              ? '\u2193 ' + tl.pendingTurns + ' new turn' + (tl.pendingTurns > 1 ? 's' : '')
+              : '\u2193 Live';
+          }
+        }
+      },
+
+      // Called once per poll after the active task data is refreshed: count
+      // turns that arrived while the reader was away and refresh every pill.
+      onPoll() {
+        const rec = this.panes['timeline'];
+        if (rec) {
+          const turns = (state.activeTaskData?.turns || []).length;
+          if (!rec.stuck && turns > (rec._lastTurns || 0)) {
+            rec.pendingTurns = turns - rec._lastTurns;
+          } else if (rec.stuck) {
+            rec.pendingTurns = 0;
+          }
+          rec._lastTurns = turns;
+        }
+        this._updatePillLabels();
+        for (const key of Object.keys(this.panes)) this._update(this.panes[key]);
+      },
+
+      // A newly dispatched task may take the view only while actively
+      // following, follow mode is on, and the user is at the bottom of the
+      // live inspector (no active task yet is always allowed).
+      shouldAutoAdvance() {
+        if (!state.activeTaskId) return true;
+        if (!state.following || !state.followEnabled) return false;
+        const rec = this.panes['inspector'];
+        return !!(rec && rec.stuck);
+      },
+    };
+
     function applyFollowLiveUI() {
-      if (state.followLive) {
+      if (state.followEnabled) {
         followDot.className = 'w-2 h-2 rounded-full bg-emerald-500';
         followText.textContent = 'Follow Live';
       } else {
         followDot.className = 'w-2 h-2 rounded-full bg-zinc-600';
-        followText.textContent = state.userPinned ? 'Follow Paused' : 'Follow Off';
+        followText.textContent = 'Follow Off';
       }
     }
 
     btnFollowLive.addEventListener('click', async () => {
-      state.followLive = !state.followLive;
-      state.userPinned = !state.followLive;
-      localStorage.setItem('castor_trace_follow_live', String(state.followLive));
+      // The button reflects the live-following state, so the click is
+      // unambiguous: while on the live stream it OPTS OUT (turn off); while
+      // reading an older (pinned) task it OPTS IN and jumps to the live
+      // stream. (Toggling the raw stored preference was ambiguous once a
+      // task was pinned -- the exact "it fights me" symptom.)
+      const isOnLive = state.tasks.length > 0
+        && state.activeTaskId === state.tasks[0].id;
+      const on = !(state.following && isOnLive);
+      state.followEnabled = on;
+      localStorage.setItem('castor_trace_follow_live', String(on));
+      state.following = on;
       applyFollowLiveUI();
-      if (state.followLive) {
-        // Resuming live: jump to the freshest task and immediately stick the
-        // inspector to its latest turn and freshest tool call.
+      if (on) {
+        // Enter follow mode: jump to the freshest task and re-stick the view
+        // at its newest content (instant, never fights).
         if (state.tasks.length > 0 && state.tasks[0].id !== state.activeTaskId) {
-          await selectTask(state.tasks[0].id, false);
+          await selectTask(state.tasks[0].id, true);
         } else if (state.activeTaskId) {
+          state.activeTurnIndex = -1; // re-bind to latest turn + freshest tool
           await reloadActiveTaskData();
         }
       }
@@ -604,12 +841,12 @@
 
     if (btnJumpLive) {
       btnJumpLive.addEventListener('click', async () => {
-        state.userPinned = false;
-        state.followLive = true;
+        state.followEnabled = true;
         localStorage.setItem('castor_trace_follow_live', 'true');
+        state.following = true;
         applyFollowLiveUI();
         if (state.tasks.length > 0) {
-          await selectTask(state.tasks[0].id, false);
+          await selectTask(state.tasks[0].id, true);
         }
         updateLiveNotice();
       });
@@ -757,33 +994,34 @@
       return toolCalls.length > 0 ? toolCalls.length - 1 : 0;
     }
 
-    // True when (turnIdx, toolIdx) is the freshest inspector position under the
-    // active filter -- the latest visible turn and its most recent tool call.
-    function isAtFreshestPosition(turnIdx, toolIdx) {
-      return turnIdx !== null && turnIdx === lastVisibleTurn()
-        && toolIdx === freshestToolIndexForTurn(turnIdx);
+    // Navigation helpers. Stick state is decided by the Follow manager from
+    // the actual scroll position, so no explicit pin/resume toggles are needed:
+    // moving to the newest turn re-engages, moving anywhere else disengages.
+    function selectTurn(idx, toolIdx) {
+      state.activeTurnIndex = idx;
+      state.activeToolIndex = (toolIdx == null) ? 0 : toolIdx;
+      // Explicit navigation: the user's hands return to the controls, so the
+      // automatic keep-in-view is allowed to move the panes again.
+      for (const key of Object.keys(Follow.panes)) Follow.panes[key].userMoved = false;
+      renderTimeline();
+      renderInspector();
     }
 
-    // Pin follow-live when the user manually navigates away from the freshest
-    // position (older turn, older tool pill, prev-turn nav). Persisted so the
-    // pin survives a reload; pollCheck then leaves the user exactly where they
-    // left off instead of yanking them back to the latest dispatch.
-    function pinFollowLive() {
-      state.followLive = false;
-      state.userPinned = true;
-      localStorage.setItem('castor_trace_follow_live', 'false');
-      applyFollowLiveUI();
-      updateLiveNotice();
+    function navStep(dir) {
+      const visible = getVisibleTurnIndices();
+      if (visible.length === 0) return;
+      let pos = visible.indexOf(state.activeTurnIndex);
+      if (pos < 0) pos = (dir > 0) ? 0 : visible.length - 1;
+      pos = Math.max(0, Math.min(visible.length - 1, pos + dir));
+      selectTurn(visible[pos], 0);
     }
 
-    // Re-engage follow-live when the user explicitly returns to the live stream
-    // (Follow Live / Jump Live / navigating to the latest turn or freshest tool).
-    function resumeFollowLive() {
-      state.followLive = true;
-      state.userPinned = false;
-      localStorage.setItem('castor_trace_follow_live', 'true');
-      applyFollowLiveUI();
-      updateLiveNotice();
+    function cycleTool(dir) {
+      const turn = state.activeTaskData?.turns?.[state.activeTurnIndex];
+      const toolCalls = turn?.dispatch?.tool_calls || [];
+      if (toolCalls.length < 2) return;
+      const next = Math.max(0, Math.min(toolCalls.length - 1, state.activeToolIndex + dir));
+      selectTurn(state.activeTurnIndex, next);
     }
 
     async function loadTasksInitial() {
@@ -795,9 +1033,13 @@
         renderTasksList();
 
         if (state.tasks.length > 0 && !state.activeTaskId) {
-          await selectTask(state.tasks[0].id, false);
-        } else if (state.followLive && !state.userPinned && state.tasks.length > 0 && state.tasks[0].id !== state.activeTaskId) {
-          await selectTask(state.tasks[0].id, false);
+          // First load: show the latest task and follow it.
+          state.following = true;
+          await selectTask(state.tasks[0].id, true);
+        } else if (state.tasks.length > 0 && state.tasks[0].id !== state.activeTaskId
+          && Follow.shouldAutoAdvance()) {
+          state.following = true;
+          await selectTask(state.tasks[0].id, true);
         }
         updateLiveNotice();
       } catch (err) {
@@ -819,11 +1061,14 @@
           await loadTasksInitial();
         }
 
-        // 2. Follow Live: jump to newly-dispatched live task ONLY if user has not pinned an older task!
-        if (state.followLive && !state.userPinned && data.latestTaskId
+        // 2. Follow Live (auto-advance): jump to a newly dispatched task only
+        // while actively following AND at the bottom of the live inspector --
+        // never yank a user who scrolled up to read.
+        if (data.latestTaskId
           && data.latestTaskId !== state.activeTaskId
-          && (data.latestStatus === 'executing' || data.latestStatus === 'queued' || !state.activeTaskId)) {
-          await selectTask(data.latestTaskId, false);
+          && (data.latestStatus === 'executing' || data.latestStatus === 'queued')
+          && Follow.shouldAutoAdvance()) {
+          await selectTask(data.latestTaskId, true);
           return;
         }
 
@@ -854,26 +1099,28 @@
       } catch {}
     }
 
-    async function selectTask(taskId, isUserAction = false) {
-      if (isUserAction) {
-        if (state.tasks.length > 0 && taskId !== state.tasks[0].id) {
-          // User intentionally chose an older task: pin it so pollCheck doesn't yank them away!
-          state.userPinned = true;
-          state.followLive = false;
-          localStorage.setItem('castor_trace_follow_live', 'false');
-          applyFollowLiveUI();
-        } else if (state.tasks.length > 0 && taskId === state.tasks[0].id) {
-          // User explicitly clicked the freshest task: unpin and follow live
-          state.userPinned = false;
-          state.followLive = true;
-          localStorage.setItem('castor_trace_follow_live', 'true');
-          applyFollowLiveUI();
-        }
+    // `autoAdvance` marks an explicit opt-in to follow the freshest stream
+    // (Follow Live toggle / Jump pill / following-driven dispatch). Plain
+    // selection never force-jumps: the latest task enters follow mode, any
+    // older task is pinned (auto-advance off while reading it).
+    async function selectTask(taskId, autoAdvance = false) {
+      const isLatest = state.tasks.length > 0 && state.tasks[0].id === taskId;
+      if (autoAdvance) {
+        state.following = true;
+      } else if (isLatest) {
+        // Explicitly choosing the live stream re-engages follow mode.
+        state.following = true;
+        state.followEnabled = true;
+        localStorage.setItem('castor_trace_follow_live', 'true');
+        applyFollowLiveUI();
+      } else {
+        // Choosing an older task pins it: stay put, no auto-advance.
+        state.following = false;
       }
       state.activeTaskId = taskId;
-      // Follow-live (and not pinned): reset indices so reloadActiveTaskData()
-      // binds cleanly to the latest turn and its freshest tool call.
-      if (state.followLive && !state.userPinned) {
+      // Follow-driven selection re-binds to the latest turn + freshest tool
+      // call on the next render; manual selection lands on turn #00.
+      if (autoAdvance || isLatest) {
         state.activeTurnIndex = -1;
         state.activeToolIndex = -1;
       } else {
@@ -899,28 +1146,65 @@
         const turns = data.turns || [];
         updateFilterCounts(turns);
 
+        // Follow-driven selection marker (must be visible to the growth block
+        // below, so it is hoisted out of the branch scope).
+        const wasFollowSelect = state.activeTurnIndex < 0;
         const visibleIndices = getVisibleTurnIndices();
         if (visibleIndices.length > 0) {
-          if (state.followLive && !state.userPinned) {
-            // Follow-live stickiness: lock the inspector to the latest turn and,
-            // within it, the freshest tool call, so live streaming/polling always
-            // surfaces the newest execution without a manual click.
-            state.activeTurnIndex = visibleIndices[visibleIndices.length - 1];
+          const newestIdx = visibleIndices[visibleIndices.length - 1];
+          if (state._lastNewestTurn >= 0 && newestIdx > state._lastNewestTurn
+              && state.following && state.followEnabled
+              && state.activeTurnIndex === state._lastNewestTurn
+              && (Follow.panes['inspector'] ? Follow.panes['inspector'].stuck : true)) {
+            // A turn was appended and the user is sitting on the live tail:
+            // advance the view to it (this IS the follow behaviour).
+            state.activeTurnIndex = newestIdx;
+            const currentTurn = turns[state.activeTurnIndex];
+            const toolCalls = currentTurn?.dispatch?.tool_calls || [];
+            state.activeToolIndex = toolCalls.length > 0 ? toolCalls.length - 1 : 0;
+          } else if (wasFollowSelect) {
+            // Follow-driven selection (Follow Live toggle / Jump / auto-advance):
+            // bind to the latest turn and its freshest tool call.
+            state.activeTurnIndex = newestIdx;
             const currentTurn = turns[state.activeTurnIndex];
             const toolCalls = currentTurn?.dispatch?.tool_calls || [];
             state.activeToolIndex = toolCalls.length > 0 ? toolCalls.length - 1 : 0;
           } else if (!visibleIndices.includes(state.activeTurnIndex)) {
-            // Pinned: keep the user's selection unless it fell out of the active filter.
+            // Selection fell out of the active filter: clamp, never yank.
             state.activeTurnIndex = visibleIndices[0];
             state.activeToolIndex = 0;
           }
+          state._lastNewestTurn = newestIdx;
         } else {
           state.activeTurnIndex = 0;
           state.activeToolIndex = 0;
+          state._lastNewestTurn = -1;
         }
 
         renderTimeline();
         renderInspector();
+
+        // Timeline growth: only re-pin while stuck (measured vs last render).
+        if (Follow.panes['timeline']) {
+          const tl = Follow.panes['timeline'];
+          const h = spansListContainer.scrollHeight;
+          if (h > (tl._lastH || 0)) Follow.onGrow('timeline');
+          tl._lastH = h;
+        }
+        if (wasFollowSelect) {
+          // Follow-driven selection: re-engage stick at the newest content.
+          Follow.toBottom('inspector', false);
+          Follow.toBottom('timeline', false);
+          Follow.toBottom('output', false);
+        } else {
+          // Per-pane stick: re-pin only panes that are at the bottom (stuck).
+          // onGrow is a no-op for a scrolled-up pane, so a reader's viewport
+          // never moves; pill visibility is refreshed by onPoll below.
+          Follow.onGrow('inspector');
+          Follow.onGrow('output');
+        }
+
+        Follow.onPoll();
       } catch (err) {
         console.error('Failed to fetch task trace', err);
       }
@@ -1094,7 +1378,9 @@
           <p class="text-[11px] text-zinc-500 font-sans line-clamp-1">${escapeHtml(cleanPrompt)}</p>
         `;
 
-        card.addEventListener('click', () => selectTask(task.id, true));
+        // User card click: the latest task (re-)enters follow mode; any older
+        // task is pinned so auto-advance won't yank the reader away from it.
+        card.addEventListener('click', () => selectTask(task.id, false));
         tasksListContainer.appendChild(card);
       });
     }
@@ -1205,33 +1491,25 @@
         row.querySelectorAll('.tool-pill').forEach(btn => {
           btn.addEventListener('click', (e) => {
             e.stopPropagation();
-            state.activeTurnIndex = idx;
-            state.activeToolIndex = parseInt(btn.dataset.tidx, 10) || 0;
-            // Picking a tool pins follow-live unless it's the freshest tool call
-            // of the latest turn (which is where follow-live lives).
-            if (isAtFreshestPosition(idx, state.activeToolIndex)) {
-              resumeFollowLive();
+            const tIdx = parseInt(btn.dataset.tidx, 10) || 0;
+            if (idx === lastVisibleTurn()) {
+              // Latest turn: select the pill, re-engage stick at the bottom.
+              selectTurn(idx, tIdx);
+              Follow.toBottom('inspector', false);
             } else {
-              pinFollowLive();
+              selectTurn(idx, tIdx);
             }
-            renderTimeline();
-            renderInspector();
           });
         });
 
         row.addEventListener('click', () => {
-          state.activeTurnIndex = idx;
-          // Landing on the latest turn resumes follow-live and sticks to the
-          // freshest tool call; selecting any older turn pins the user in place.
           if (idx === lastVisibleTurn()) {
-            state.activeToolIndex = freshestToolIndexForTurn(idx);
-            resumeFollowLive();
+            // Landing on the latest turn re-engages follow at its bottom.
+            selectTurn(idx, freshestToolIndexForTurn(idx));
+            Follow.toBottom('inspector', false);
           } else {
-            state.activeToolIndex = 0;
-            pinFollowLive();
+            selectTurn(idx, 0);
           }
-          renderTimeline();
-          renderInspector();
         });
 
         spansListContainer.appendChild(row);
@@ -1596,18 +1874,9 @@
             isAct ? 'bg-zinc-100 text-black border-white shadow-sm ring-1 ring-white' : 'bg-zinc-900 text-zinc-400 border-border hover:text-white'
           }`;
           btn.innerHTML = `<span class="w-1.5 h-1.5 rounded-full ${dotColor}"></span><span>${idx + 1}. ${escapeHtml(tc.name)}</span>`;
-          btn.addEventListener('click', () => {
-            state.activeToolIndex = idx;
-            // Selecting a tool pins follow-live unless it's the freshest tool call
-            // of the latest turn (which is where follow-live lives).
-            if (isAtFreshestPosition(state.activeTurnIndex, idx)) {
-              resumeFollowLive();
-            } else {
-              pinFollowLive();
-            }
-            renderTimeline();
-            renderInspector();
-          });
+          // Selecting a tool is an explicit user action; the button list is a
+          // small horizontal control, so nearest-keeping it in view is enough.
+          btn.addEventListener('click', () => selectTurn(state.activeTurnIndex, idx));
           toolButtonsList.appendChild(btn);
           if (isAct) {
             btn.scrollIntoView({ block: 'nearest', inline: 'nearest' });
@@ -1665,10 +1934,6 @@
         if (state.activeTab === 'execution') {
           if (argsPretty.length < 10000) Prism.highlightElement(argsEl);
           if (outText.length < 30000) Prism.highlightElement(outEl);
-          if (state.followLive && !state.userPinned) {
-            const outContainer = outEl.parentElement;
-            if (outContainer) outContainer.scrollTop = outContainer.scrollHeight;
-          }
         }
       } else {
         const isLiveGenerating = task?.status === 'executing' && state.activeTurnIndex === turns.length - 1;
@@ -1723,11 +1988,10 @@
         if (rawEl.textContent.length < 40000) Prism.highlightElement(rawEl);
       }
 
-      // Auto-scroll timeline to selected row
+      // Keep the selected row in view in the timeline using nearest semantics
+      // (only move when it is actually out of view -- no forced yank).
       const selectedRow = document.getElementById(`turn-row-${state.activeTurnIndex}`);
-      if (selectedRow) {
-        selectedRow.scrollIntoView({ block: 'nearest', behavior: 'smooth' });
-      }
+      if (selectedRow) Follow.focusRow('timeline', selectedRow);
     }
 
     function switchTab(tabName) {
@@ -1795,17 +2059,7 @@
     });
 
     btnPrevTurn.addEventListener('click', () => {
-      const visibleIndices = getVisibleTurnIndices();
-      const currentPos = visibleIndices.indexOf(state.activeTurnIndex);
-      if (currentPos > 0) {
-        state.activeTurnIndex = visibleIndices[currentPos - 1];
-        state.activeToolIndex = 0;
-        // Navigating up to an older turn pauses follow-live so polling doesn't
-        // yank the user back to the latest dispatch while they read.
-        pinFollowLive();
-        renderTimeline();
-        renderInspector();
-      }
+      navStep(-1);
     });
 
     btnNextTurn.addEventListener('click', () => {
@@ -1813,18 +2067,13 @@
       const currentPos = visibleIndices.indexOf(state.activeTurnIndex);
       if (currentPos >= 0 && currentPos < visibleIndices.length - 1) {
         const targetTurn = visibleIndices[currentPos + 1];
-        state.activeTurnIndex = targetTurn;
-        // Reaching the latest turn re-engages follow-live and sticks to the
-        // freshest tool call; stepping to a non-latest (older) turn pins.
         if (targetTurn === lastVisibleTurn()) {
-          state.activeToolIndex = freshestToolIndexForTurn(targetTurn);
-          resumeFollowLive();
+          // Reaching the latest turn re-engages follow at the bottom.
+          selectTurn(targetTurn, freshestToolIndexForTurn(targetTurn));
+          Follow.toBottom('inspector', false);
         } else {
-          state.activeToolIndex = 0;
-          pinFollowLive();
+          selectTurn(targetTurn, 0);
         }
-        renderTimeline();
-        renderInspector();
       }
     });
 
@@ -1850,27 +2099,9 @@
       
       // Multi-tool cycling: Left/Right or h/l
       else if (e.key === 'ArrowLeft' || e.key === 'h') {
-        const turns = state.activeTaskData?.turns || [];
-        const turn = turns[state.activeTurnIndex];
-        const toolCalls = turn?.dispatch?.tool_calls || [];
-        if (toolCalls.length > 1 && state.activeToolIndex > 0) {
-          state.activeToolIndex--;
-          if (isAtFreshestPosition(state.activeTurnIndex, state.activeToolIndex)) resumeFollowLive();
-          else pinFollowLive();
-          renderTimeline();
-          renderInspector();
-        }
+        cycleTool(-1);
       } else if (e.key === 'ArrowRight' || e.key === 'l') {
-        const turns = state.activeTaskData?.turns || [];
-        const turn = turns[state.activeTurnIndex];
-        const toolCalls = turn?.dispatch?.tool_calls || [];
-        if (toolCalls.length > 1 && state.activeToolIndex < toolCalls.length - 1) {
-          state.activeToolIndex++;
-          if (isAtFreshestPosition(state.activeTurnIndex, state.activeToolIndex)) resumeFollowLive();
-          else pinFollowLive();
-          renderTimeline();
-          renderInspector();
-        }
+        cycleTool(1);
       }
       
       // Filter cycle: f
@@ -1964,6 +2195,16 @@
         .replace(/"/g, '&quot;')
         .replace(/'/g, '&#039;');
     }
+
+    // Register the follow/stick manager for the vertical scroll panes.
+    Follow.register('timeline', document.getElementById('spansListContainer'), document.getElementById('timelineFollowPill'));
+    Follow.register('inspector', document.getElementById('inspectorContent'), document.getElementById('inspectorFollowPill'));
+    Follow.register('output', document.getElementById('actionOutputCode').parentElement, document.getElementById('outputFollowPill'));
+
+    // Pill click = explicit re-engage: scroll that pane to its bottom.
+    document.getElementById('timelineFollowPill').addEventListener('click', () => Follow.toBottom('timeline', true));
+    document.getElementById('inspectorFollowPill').addEventListener('click', () => Follow.toBottom('inspector', true));
+    document.getElementById('outputFollowPill').addEventListener('click', () => Follow.toBottom('output', true));
 
     loadContextConfig();
     applyFollowLiveUI();
