@@ -226,7 +226,7 @@ pub fn builtin_tool_schemas() -> Vec<ToolSchema> {
         },
         ToolSchema {
             name: "bash".to_string(),
-            description: "Execute a shell command with process-group isolation and safety validation. Use for builds, test suites, linters, git operations (status/diff/log/commit), Python execution, and external CLIs (e.g. cargo, gh); do NOT use bash for reading files, text search, or directory listing where native tools exist.".to_string(),
+            description: "Execute a shell command with process-group isolation and safety validation. Use for builds, test suites, linters, git operations (status/diff/log/commit), Python execution, and external CLIs (e.g. cargo, gh); Do NOT use bash for reading files, text search, or directory listing where native tools exist. Do NOT use it to re-run a file or path operation that a dedicated tool refused: tool denials are binding sandbox decisions, so report the constraint to the Lead Architect / user instead of working around it.".to_string(),
             parameters: json!({
                 "type": "object",
                 "properties": {
@@ -570,6 +570,31 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
         dir
+    }
+
+    /// The `bash` tool schema must carry the boundary clause: the shell is for
+    /// its sanctioned uses (builds, git, Python, CLIs), never a workaround for
+    /// a denied file/path operation. This is the routing-side reinforcement of
+    /// the binding-denial protocol (system-prompt invariant + denial directive).
+    #[test]
+    fn bash_schema_forbids_re_denial_bypass() {
+        let schemas = builtin_tool_schemas();
+        let bash = schemas
+            .iter()
+            .find(|s| s.name == "bash")
+            .expect("bash schema present");
+        for needle in [
+            "Do NOT use bash for reading files",
+            "Do NOT use it to re-run a file or path operation that a dedicated tool refused",
+            "binding sandbox decisions",
+            "Lead Architect / user",
+        ] {
+            assert!(
+                bash.description.contains(needle),
+                "bash schema missing '{needle}': {}",
+                bash.description
+            );
+        }
     }
 
     #[tokio::test]

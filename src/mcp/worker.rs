@@ -142,7 +142,8 @@ Peer Engineering Invariants:\n\
     let routing = routing.concat();
     system_prompt.push_str(&routing);
     system_prompt.push_str(
-        "- Verification Discipline: Never claim completion or close a task without running the verification gate and confirming clean output.",
+        "- Verification Discipline: Never claim completion or close a task without running the verification gate and confirming clean output.\n\
+- Security & Authority: Tool refusals tagged `Access denied`, `Execution blocked`, or `binary file` are binding policy decisions, not transient failures or permission requests. Never route around one \u{2014} no `bash`/`cat`/`cp`/`mv`/`tee` substitute, alternative path, symlink, or privilege escalation. If the blocked file or operation is essential to the task, stop that line of work and report the constraint in your final report, naming the exact target and the allowed root or permission that would unblock it, so the Lead Architect / user can adjust the workspace policy deliberately. (If the denial was your own typo \u{2014} a malformed or mistyped in-workspace path \u{2014} correct it and retry; that is fixing your error, not bypassing policy.)",
     );
 
     system_prompt.push_str(&format!(
@@ -818,5 +819,40 @@ mod tests {
             !prompt.contains("[Workspace Skeleton]"),
             "skeleton must be omitted when disabled"
         );
+    }
+
+    /// The standing `Security & Authority` invariant must be present in the
+    /// static (low-churn) persona block: it makes tool denials *binding*,
+    /// forbids the `bash`/path bypass, and defines the escalation path to the
+    /// Lead Architect / user. This is the normative half of the denial protocol
+    /// (the other half is the directive carried by each denial message).
+    #[test]
+    fn system_prompt_defines_binding_denial_authority() {
+        let root = std::path::PathBuf::from("/work/repo");
+        let prompt = build_worker_system_prompt(&root, false, "", "");
+
+        assert!(
+            prompt.contains("Security & Authority:"),
+            "invariant missing: {prompt}"
+        );
+        for needle in [
+            "binding policy decisions",
+            "Never route around",
+            "`bash`/`cat`/`cp`/`mv`/`tee`",
+            "report the constraint",
+            "Lead Architect / user",
+        ] {
+            assert!(
+                prompt.contains(needle),
+                "invariant missing '{needle}': {prompt}"
+            );
+        }
+        // The invariant sits in the static persona block: before [Workspace]
+        // (byte-0 persona) and after the tool-routing list.
+        let p_inv = prompt
+            .find("Security & Authority:")
+            .expect("invariant present");
+        let p_workspace = prompt.find("[Workspace]").expect("workspace present");
+        assert!(p_inv < p_workspace, "invariant must sit in the static block, before [Workspace]");
     }
 }

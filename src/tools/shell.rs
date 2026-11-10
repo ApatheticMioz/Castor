@@ -27,16 +27,33 @@ pub enum ShellPolicyError {
     #[error("InvalidCommandError: Shell command must be a non-empty string")]
     InvalidCommand,
     #[error(
-        "CommandSecurityError: Execution blocked. Command matches prohibited destructive pattern: {0}"
+        "CommandSecurityError: Execution blocked. Command matches prohibited destructive pattern: {0}. \
+         The command was not run. This is a binding security decision, not a transient failure. \
+         Do NOT bypass it with privilege escalation, backgrounding, or shell wrappers \
+         (e.g. `sudo`, `nohup`, `env`, `sh -c`). If the task genuinely cannot proceed without \
+         this operation, stop and report the constraint in your final report to the Lead \
+         Architect / user."
     )]
     ProhibitedPattern(String),
-    #[error("CommandSecurityError: Execution blocked. Unexpanded shell reference in target '{0}'")]
+    #[error(
+        "CommandSecurityError: Execution blocked. Unexpanded shell reference in target '{0}'. \
+         The command was not run. Expand the reference to a concrete, in-workspace path and retry \
+         — do not substitute an absolute out-of-workspace path or another tool to reach the same \
+         target; if the target is outside the workspace, stop and report the constraint to the \
+         Lead Architect / user."
+    )]
     UnexpandedReference(String),
     #[error(
-        "CommandSecurityError: Execution blocked. Target '{0}' resolves to protected root: {1}"
+        "CommandSecurityError: Execution blocked. Target '{0}' resolves to protected root: {1}. \
+         The command was not run. These system directories are protected from destructive \
+         operations; this is a binding security decision, not a transient failure. \
+         Do NOT bypass it (no privilege escalation, backgrounding, wrappers, or an alternative \
+         command targeting the same protected path). If the task cannot proceed without touching \
+         that path, stop and report the constraint in your final report to the Lead \
+         Architect / user."
     )]
     ProtectedRoot(String, String),
-    #[error("FatalDeadManFuseError: Execution halted by dead-man fuse (synthetic canary tripped)")]
+    #[error("FatalDeadManFuseError: Execution halted by dead-man fuse (synthetic canary tripped). The command was not run. Do not retry this command — report the trigger to the Lead Architect / user.")]
     DeadManFuse,
 }
 
@@ -1539,6 +1556,46 @@ mod tests {
             validate(CANARY_DISASTER_FUSE_TOKEN),
             Err(ShellPolicyError::DeadManFuse)
         ));
+    }
+
+    #[test]
+    fn command_security_denials_carry_binding_directive() {
+        // The typed command-security refusals must tell the model the command
+        // was not run and where to escalate; the two *binding* security
+        // decisions (destructive pattern, protected root) must forbid routing
+        // around them (wrappers / escalation / backgrounding).
+        let protected = validate("rm -rf /").unwrap_err().to_string();
+        let destructive = validate("mkfs.ext4 /dev/sda1").unwrap_err().to_string();
+        for msg in [&protected, &destructive] {
+            for needle in [
+                "was not run",
+                "binding security decision",
+                "Do NOT bypass",
+                "Lead Architect / user",
+            ] {
+                assert!(msg.contains(needle), "refusal missing '{needle}': {msg}");
+            }
+        }
+        // The unexpanded-reference refusal is a *fixable typo*, not a binding
+        // decision: it says what to do (expand to a concrete in-workspace path),
+        // and forbids turning that into an out-of-workspace or other-tool bypass.
+        let unexpanded = validate("rm -rf $HOME").unwrap_err().to_string();
+        for needle in [
+            "was not run",
+            "Expand the reference to a concrete, in-workspace path",
+            "do not substitute an absolute out-of-workspace path",
+            "Lead Architect / user",
+        ] {
+            assert!(
+                unexpanded.contains(needle),
+                "refusal missing '{needle}': {unexpanded}"
+            );
+        }
+        // The dead-man fuse is a hard stop, not a retryable condition.
+        let fuse = validate(CANARY_DISASTER_FUSE_TOKEN).unwrap_err().to_string();
+        assert!(fuse.contains("was not run"), "{fuse}");
+        assert!(fuse.contains("Do not retry this command"), "{fuse}");
+        assert!(fuse.contains("Lead Architect / user"), "{fuse}");
     }
 
     #[test]

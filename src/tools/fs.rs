@@ -119,8 +119,9 @@ impl FsExecutor {
         };
         if !ok {
             return Err(SandboxError::PathEscape(format!(
-                "PathEscapeError: Access denied. Path '{}' does not permit this operation",
-                input
+                "PathEscapeError: Access denied. Path '{}' is read-only and does not permit this operation.{}",
+                input,
+                sandbox::BINDING_DENIAL_DIRECTIVE
             ))
             .into());
         }
@@ -1090,6 +1091,61 @@ mod tests {
 
         let err = ex.read_file("/etc/passwd", 1, None).unwrap_err();
         assert!(matches!(err, FsError::Sandbox(SandboxError::PathEscape(_))));
+    }
+
+    /// The tool-level refusal (runner → model) is `Error: {SandboxError}`: the
+    /// path-escape denial must reach the model carrying the binding directive
+    /// (no-bypass + escalate to the Lead Architect / user), not a bare refusal.
+    #[test]
+    fn out_of_tree_denial_reaches_model_with_directive() {
+        let root = test_root("directive_tool");
+        let ex = executor(&root);
+
+        let err = ex.read_file("/etc/passwd", 1, None).unwrap_err();
+        let msg = format!("Error: {err}");
+        assert!(msg.contains("Error: PathEscapeError"), "{msg}");
+        for needle in [
+            "binding sandbox policy decision",
+            "Do NOT attempt to bypass",
+            "report the constraint",
+            "Lead Architect / user",
+        ] {
+            assert!(msg.contains(needle), "model-facing denial missing '{needle}': {msg}");
+        }
+    }
+
+    /// A write into a read-only root is a denial too, and carries the same
+    /// binding directive (not just "not permitted").
+    #[test]
+    fn write_to_read_only_root_carries_binding_directive() {
+        let ws = test_root("directive_ro_write");
+        // An explicit RW/RO split (as the sandbox `rw_ro_policy` helper does):
+        // RW = workspace, RO = state dir. A write under the state dir is a
+        // read-only-root denial — independent of the OS `temp_dir()` write root
+        // that `for_workspace` would otherwise add.
+        let state = std::env::temp_dir().join(format!(
+            "castor_directive_ro_{}_{}",
+            std::process::id(),
+            std::process::id() * 7 + 1
+        ));
+        let _ = fs::remove_dir_all(&state);
+        fs::create_dir_all(&state).unwrap();
+        let policy = SandboxPolicy::new(
+            vec![sandbox::canonical_or_self(&ws)],
+            vec![
+                sandbox::canonical_or_self(&ws),
+                sandbox::canonical_or_self(&state),
+            ],
+        );
+        let ex = FsExecutor::with_policy(policy);
+        let target = state.join("x.txt");
+
+        let err = ex.write_file(&target.to_string_lossy(), "x\n", true).unwrap_err();
+        let msg = err.to_string();
+        assert!(msg.contains("is read-only"), "{msg}");
+        assert!(msg.contains("Do NOT attempt to bypass"), "{msg}");
+        assert!(msg.contains("Lead Architect / user"), "{msg}");
+        let _ = fs::remove_dir_all(&state);
     }
 
     #[test]

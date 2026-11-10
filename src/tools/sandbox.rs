@@ -26,18 +26,20 @@ pub enum SandboxError {
     NullByte(String),
     #[error("{0}")]
     DeviceName(String),
-    #[error("{0}")]
+    #[error("{0}{BINDING_DENIAL_DIRECTIVE}")]
     PathEscape(String),
-    #[error("{0}")]
+    #[error("{0}{BINDING_DENIAL_DIRECTIVE}")]
     SymlinkEscape(String),
     #[error("{0}")]
     WorkspaceRoot(String),
     #[error(
         "BinaryFileError: '{file}' is a binary file ({detected_type}); reason: {reason}. \
          A text-only model must not ingest binary content. Do NOT read this file as text. \
-         To extract its text, use the bash tool with a format-appropriate extractor \
+         To extract its text, use the `bash` tool with a format-appropriate extractor \
          (e.g. 'pdftotext file -' for PDF, 'strings file', 'exiftool file', 'unzip -l file') \
-         and read the extracted text output instead."
+         and read the extracted text output instead. \
+         This is the sanctioned exception for extracting text from binary files only — \
+         it does NOT authorize bypassing any other denial or the workspace's allowed roots."
     )]
     BinaryFile {
         file: PathBuf,
@@ -47,6 +49,37 @@ pub enum SandboxError {
     #[error("io: {0}")]
     Io(#[from] std::io::Error),
 }
+
+/// The policy directive appended to every **binding** refusal message
+/// (`PathEscape`, `SymlinkEscape`, and the read-only-root write denial built in
+/// [`super::fs::FsExecutor::resolve_with`]).
+///
+/// Three jobs:
+///   1. Frame the denial as a *policy decision* (not a transient failure), so
+///      the model stops looking for a "tweak and retry."
+///   2. Explicitly forbid the bypass the tool-routing prior otherwise invites
+///      (`bash`/`cat`, alternative paths, other tools) — this is the
+///      load-bearing line: without it a `read_file`/`write_file` denial reads as
+///      a soft limit and `bash` becomes the default escape hatch (the shell
+///      policy only blocks *destructive* commands, not path reads, so the
+///      bypass would actually succeed).
+///   3. Give the *correct* action: stop, and surface the constraint in the
+///      final report to the Lead Architect / user, with the exact target and the
+///      root/permission that would unblock it.
+///
+/// Kept as a single source of truth so every sandbox denial carries identical
+/// guidance. The `bash`-specific `ShellPolicyError` variants in
+/// [`super::shell`] carry an equivalent one-sentence directive inlined (a
+/// proc-macro `#[error]` cannot reference this const); keep those in sync with
+/// this text and with the `Security & Authority` invariant in
+/// [`crate::mcp::worker::build_worker_system_prompt`].
+pub const BINDING_DENIAL_DIRECTIVE: &str = " \
+This refusal is a binding sandbox policy decision, not a transient failure. \
+Do NOT attempt to bypass it with `bash` (or `cat`/`cp`/`mv`/`tee`), alternative paths, \
+or any other tool. \
+If this file or resource is essential to the task, stop and report the constraint \
+in your final report to the Lead Architect / user, naming the exact target and the \
+allowed root or permission that would unblock it.";
 
 /// Layer 1: resolve the workspace root through the OS symlink/junction
 /// resolution layer so containment checks compare against a real path.
@@ -72,8 +105,6 @@ pub fn resolve_workspace_root(root: &Path) -> Result<PathBuf, SandboxError> {
     })
 }
 
-/// Whether `path` is lexically inside (or equal to) `root`.
-///
 /// The primary check is an exact prefix match. On case-insensitive stores —
 /// Windows (NTFS) and WSL's `/mnt/[a-z]` drvfs/drive mounts, where
 /// `d:\` ≡ `D:\` and `/mnt/c/Users/Apath` ≡ `/mnt/c/Users/apath` — a
@@ -330,7 +361,11 @@ impl ResolvedPath {
     }
 }
 
-fn canonical_or_self(p: &Path) -> PathBuf {
+/// Canonicalize `p` through the OS symlink/junction layer, falling back to
+/// `p` unchanged when it cannot be resolved (a missing or vanished path).
+/// Public so tests that build an explicit [`SandboxPolicy`] can canonicalize
+/// their roots the same way the policy itself does.
+pub fn canonical_or_self(p: &Path) -> PathBuf {
     dunce::canonicalize(p).unwrap_or_else(|_| p.to_path_buf())
 }
 
@@ -1364,5 +1399,104 @@ mod tests {
         let resolved = policy.resolve("alias.txt").unwrap();
         assert_eq!(resolved.class, AccessClass::ReadWrite);
         assert!(resolved.permits_read());
+    }
+
+    // ========================================================================
+    // Denial-directive tests
+    //
+    // The binding security refusals (`PathEscape`, `SymlinkEscape`) must
+    // carry the anti-bypass + escalation directive verbatim, so the coworker
+    // reports the constraint to the Lead Architect / user instead of routing
+    // around the denial with `bash`. These lock that text in place.
+    // ========================================================================
+
+    #[test]
+    fn path_escape_denial_carries_binding_directive() {
+        let ws = test_root("directive_escape");
+        let policy = SandboxPolicy::workspace_only(&ws);
+        // Absolute out-of-tree path under the tight policy.
+        let err = policy.resolve("/etc/passwd").unwrap_err();
+        let msg = err.to_string();
+        assert!(
+            msg.contains("PathEscapeError"),
+            "denial must keep its type tag: {msg}"
+        );
+        for needle in [
+            "binding sandbox policy decision",
+            "Do NOT attempt to bypass",
+            "`bash`",
+            "report the constraint",
+            "Lead Architect / user",
+            "allowed root or permission",
+        ] {
+            assert!(msg.contains(needle), "denial missing '{needle}': {msg}");
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn symlink_escape_denial_carries_binding_directive() {
+        let ws = test_root("directive_symlink");
+        let policy = SandboxPolicy::workspace_only(&ws);
+        let outside = std::env::temp_dir().join(format!(
+            "castor_directive_symlink_target_{}_{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        fs::create_dir_all(&outside).unwrap();
+        let outside_file = outside.join("secret.txt");
+        fs::write(&outside_file, "top secret\n").unwrap();
+        let link = ws.join("src").join("link_out");
+        std::os::unix::fs::symlink(&outside_file, &link).unwrap();
+
+        let err = policy.resolve("src/link_out").unwrap_err();
+        let msg = err.to_string();
+        assert!(
+            msg.contains("SymlinkEscapeError"),
+            "denial must keep its type tag: {msg}"
+        );
+        for needle in [
+            "binding sandbox policy decision",
+            "Do NOT attempt to bypass",
+            "`bash`",
+            "report the constraint",
+            "Lead Architect / user",
+        ] {
+            assert!(msg.contains(needle), "denial missing '{needle}': {msg}");
+        }
+        let _ = fs::remove_dir_all(&outside);
+    }
+
+    #[test]
+    fn binary_file_denial_scopes_the_bash_exception() {
+        let ws = test_root("directive_binary");
+        let bin = ws.join("blob.bin");
+        fs::write(&bin, [0x00, 0x01, 0x02, 0xFF, 0xFE]).unwrap();
+        let err = check_binary(&bin).unwrap_err();
+        let SandboxError::BinaryFile {
+            detected_type,
+            reason,
+            ..
+        } = &err
+        else {
+            panic!("expected BinaryFile, got {err:?}");
+        };
+        assert!(detected_type.contains("application/octet-stream"), "{detected_type}");
+        assert!(reason.contains("null bytes"), "{reason}");
+        let msg = err.to_string();
+        // The sanctioned extraction path stays ...
+        assert!(msg.contains("To extract its text, use the `bash` tool"), "{msg}");
+        // ... but is explicitly scoped so it is never read as a general bypass.
+        assert!(
+            msg.contains("sanctioned exception for extracting text from binary files only"),
+            "binary denial must scope the bash exception: {msg}"
+        );
+        assert!(
+            msg.contains("does NOT authorize bypassing any other denial"),
+            "binary denial must not authorize bypassing other denials: {msg}"
+        );
     }
 }
