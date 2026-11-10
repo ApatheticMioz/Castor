@@ -1,98 +1,46 @@
-//! Session runner: the multi-turn agent loop.
+//! Multi-turn autonomous agent execution loop and session orchestration.
 //!
-//! - [`ToolExecutor`]: the async trait the runner depends on for tool execution.
-//! - [`ChatEngine`]: the async trait the runner depends on for engine chat.
-//! - [`run_session`]: build messages (tool schemas last, vLLM APC contract) →
-//!   engine chat → execute tool calls → append results → continue until the
-//!   model produces a final or the turn budget is exhausted.
-//!
-//! Named sessions persist their sanitized conversation history to
-//! `<state>/sessions/<id>/messages.json` (end of each turn + normal
-//! completion) and resume it at the start of a later dispatch, subject to
-//! the 75% `max_context` watermark. A running session is additionally bounded
-//! in flight: once its accumulated history reaches 90% of `max_context`
-//! (re-checked every turn, not only at resume), tool dispatch is disabled for
-//! that turn and the session lands cleanly on a final completion in the
-//! remaining 10% headroom, so a growing context never overflows the engine's
-//! window into an unhandled HTTP 400.
-//!
-//! Budgets, cooperative landing, loop detection, and the JSONL event ledger
-//! live here; the loop detector and event logger are split into submodules.
+//! # Architecture
+//! The runner subsystem is decomposed into focused submodules:
+//! - [`messages`] — message shaping, reasoning tag stripping, tool delimiter sanitization.
+//! - [`context`] — token budgeting, in-flight ceilings, and session history persistence.
+//! - [`salvage`] — reasoning budget ceiling detection and markdown salvage reporting.
+//! - [`budget`] — turn budget, probe budget, and landing window constants.
+//! - [`skeleton`] — tool output spilling and deterministic workspace skeleton generation.
+//! - [`loop_detector`] — action-hash sliding window loop breaker.
+//! - [`events`] — session JSONL event logging.
 
+pub mod budget;
+pub mod context;
 pub mod events;
 pub mod loop_detector;
+pub mod messages;
+pub mod salvage;
+pub mod skeleton;
 
-use std::fs;
 use std::path::{Path, PathBuf};
 
 use async_trait::async_trait;
-use serde::{Deserialize, Serialize};
 use thiserror::Error;
 use tracing::warn;
 
-use crate::engine::{EngineClient, EngineError, Message, Metrics, ToolCall, ToolSchema};
+use crate::engine::{EngineClient, EngineError, Message, ToolSchema};
 use crate::state::StateDir;
 
+pub use budget::{DEFAULT_PROBE_BUDGET, DEFAULT_TURNS_BUDGET};
+pub use context::resumed_history_tokens;
+pub use skeleton::{build_workspace_skeleton, spill_tool_output, SPILL_THRESHOLD_BYTES};
+
+use budget::{LANDING_WINDOW, LOOP_THRESHOLD, LOOP_WINDOW};
+use context::{
+    CONTEXT_CEILING_DIRECTIVE, history_tokens, in_flight_ceiling_tokens, load_messages,
+    save_messages,
+};
 use events::EventLogger;
 use loop_detector::{LoopDetector, LoopState};
+use messages::{is_severed_stop, metrics_json, msg, sanitize_tool_delimiters, strip_reasoning_tags};
+use salvage::{is_reasoning_ceiling, SALVAGE_PROMPT};
 
-/// Default turn budget (from the task record; extendable up to `MAX_ELASTIC_TURNS`).
-pub const DEFAULT_TURNS_BUDGET: u32 = 80;
-
-/// Turns before the end of the budget at which a landing notice is injected.
-const LANDING_WINDOW: u32 = 5;
-
-/// `finish_reason` value the engine reports when a response is truncated at
-/// its reasoning/output token ceiling. This is the signal for a
-/// `reasoning_budget_exhausted` termination.
-const REASONING_CEILING_FINISH: &str = "length";
-
-/// Peer-empowered salvage prompt injected when the reasoning ceiling is hit.
-///
-/// Asks the autonomous peer engineer to synthesize what it has verified,
-/// implementation state, data tables, and exact blockers, with full tools
-/// available to ground its findings.
-const SALVAGE_PROMPT: &str = "[System: Salvage] Reasoning budget ceiling reached for this dispatch. \
-    As an autonomous peer engineer, provide your collaborative status report: \
-    (1) summarize the findings, conclusions, and implementations you have reached so far, \
-    (2) present any data tables, metrics, or scratchpad artifacts produced, and \
-    (3) identify remaining blockers, failing test coordinates, or open questions for the next slice. \
-    You have full tools available if you need to inspect scratchpad outputs or verify test logs to ground your report.";
-
-/// A terminal turn where the engine stopped at its reasoning/output ceiling:
-/// no further tool calls were issued and the finish reason is the ceiling
-/// sentinel (`"length"`).
-fn is_reasoning_ceiling(completion: &crate::engine::Completion) -> bool {
-    completion.tool_calls.is_empty()
-        && completion
-            .finish_reason
-            .as_deref()
-            .is_some_and(|f| f == REASONING_CEILING_FINISH)
-}
-
-/// The in-flight context-ceiling directive, appended as a final user message
-/// once a running session's accumulated history reaches 90% of
-/// [`SessionOptions::max_context`]. It tells the model to stop dispatching
-/// tools and synthesize an immediate final response so the next request stays
-/// within the engine's context window (a >`max_context` send would otherwise
-/// surface as an unhandled HTTP 400 and fail the task).
-const CONTEXT_CEILING_DIRECTIVE: &str =
-    "[System: Working context budget has reached 90%. Do not execute further tools. \
-     Synthesize your final conclusions and response immediately.]";
-
-/// Sliding-window size for loop detection (action hashes).
-const LOOP_WINDOW: usize = 6;
-
-/// Consecutive identical actions that trip loop detection.
-const LOOP_THRESHOLD: usize = 3;
-
-/// Default probe budget: consecutive non-mutating bash probes before the
-/// probe-budget advisory is injected.
-pub const DEFAULT_PROBE_BUDGET: usize = 4;
-
-/// The async trait the runner depends on for tool execution.
-///
-/// The concrete tools implement this trait; the runner depends only on it.
 #[async_trait]
 pub trait ToolExecutor: Send + Sync {
     /// Execute a tool by name with JSON arguments.
@@ -169,125 +117,6 @@ pub enum RunnerError {
     Io(#[from] std::io::Error),
 }
 
-fn msg(role: &str, content: impl Into<String>) -> Message {
-    Message {
-        role: role.into(),
-        content: content.into(),
-        tool_calls: Vec::new(),
-        tool_call_id: None,
-    }
-}
-
-/// Strip <th_ink>...</th_ink> reasoning traces from an assistant message before
-/// persisting it in multi-turn conversation history, preventing context bloat
-/// and prompt-cache invalidation. Delegates to the tag-generic
-/// [`strip_reasoning_tags`] with the reserved default tag pair.
-fn strip_think_tags(content: &str) -> String {
-    strip_reasoning_tags(content, concat!("<th", "ink>"), concat!("</th", "ink>"))
-}
-
-/// Generic reasoning-tag stripper: removes `open_tag`..`close_tag` spans from
-/// `content` and trims a dangling open tag.
-fn strip_reasoning_tags(content: &str, open_tag: &str, close_tag: &str) -> String {
-    let mut result = content.to_string();
-    while let Some(start) = result.find(open_tag) {
-        let abs = start;
-        if let Some(rel_end) = result[abs..].find(close_tag) {
-            result.replace_range(abs..abs + rel_end + close_tag.len(), "");
-        } else {
-            result.truncate(abs);
-            break;
-        }
-    }
-    result.trim().to_string()
-}
-
-/// Insert a zero-width space after `<` in any occurrence of `open_tag` or
-/// `close_tag` inside `text`, so downstream tool-call parsers never see a
-/// valid XML-like delimiter embedded in reasoning content.
-fn sanitize_tool_delimiters(text: &str, open_tag: &str, close_tag: &str) -> String {
-    let mut result = text.to_string();
-    for tag in [open_tag, close_tag] {
-        // Insert a zero-width space immediately after the `<` of every
-        // occurrence of `tag`, so the byte sequence no longer reads as a valid
-        // XML-like delimiter. We restart the search from the insertion point so
-        // repeated occurrences are all handled in one pass.
-        let mut from = 0;
-        while from <= result.len() {
-            match result[from..].find(tag) {
-                Some(rel) => {
-                    let pos = from + rel; // index of the tag's opening '<'
-                    result.insert(pos + 1, '\u{200b}');
-                    // Resume just after the (now length+1) sanitized tag region.
-                    from = pos + 1 + tag.len();
-                }
-                None => break,
-            }
-        }
-    }
-    result
-}
-
-/// True when the model closed its reasoning block (emitted `close_tag`) and
-/// still has non-empty text after the *last* `close_tag` — i.e. a "severed"
-/// stop where deliberation ended but no tool call followed. Returns false
-/// when `close_tag` is absent (no closed reasoning block to sever on).
-fn is_severed_stop(content: &str, close_tag: &str) -> bool {
-    match content.rfind(close_tag) {
-        Some(pos) => !content[pos + close_tag.len()..].trim().is_empty(),
-        None => false,
-    }
-}
-
-/// The per-turn `metrics` object embedded in a `dispatch` event, in the same
-/// camelCase shape the telemetry projection (`parse_session_events`) reads
-/// (`prompt_tokens` / `completion_tokens` / `reasoning_tokens`).
-///
-/// Only the engine-reported token counts are emitted, so an absent field is
-/// omitted rather than zero-filled (honest telemetry: `None` never masquerades
-/// as a measured zero).
-fn metrics_json(m: &Metrics) -> serde_json::Value {
-    let mut o = serde_json::Map::new();
-    if let Some(p) = m.prompt_tokens {
-        o.insert("prompt_tokens".into(), serde_json::json!(p));
-    }
-    if let Some(k) = m.cached_tokens {
-        o.insert("cached_tokens".into(), serde_json::json!(k));
-    }
-    if let Some(c) = m.completion_tokens {
-        o.insert("completion_tokens".into(), serde_json::json!(c));
-    }
-    if let Some(r) = m.reasoning_tokens {
-        o.insert("reasoning_tokens".into(), serde_json::json!(r));
-    }
-    if let Some(r) = m.tokens_per_sec {
-        o.insert("tokens_per_sec".into(), serde_json::json!(r));
-    }
-    if let Some(t) = m.ttft_ms {
-        o.insert("ttft_ms".into(), serde_json::json!(t));
-    }
-    o.insert("total_ms".into(), serde_json::json!(m.total_ms));
-    serde_json::Value::Object(o)
-}
-
-/// Per-turn slot-bookkeeping context injected into [`SessionOptions`].
-///
-/// It carries everything the runner's turn loop needs to record a turn's token
-/// footprint on a held lease and to participate in the pool's cooperative
-/// yield gate:
-///
-/// - `sem`: the shared token-budgeted slot pool.
-/// - `lease`: the currently-held slot lease, wrapped in an `Arc<Mutex<..>>` so
-///   the runner can atomically swap it when a yield hands the slot to another
-///   worker (the worker holds the same `Arc` to release the final lease on
-///   exit).
-/// - `task_id`: the task bound to the lease (key for
-///   [`crate::task::semaphore::TaskSemaphore::update_context_tokens`]).
-///
-/// The yield gate itself is owned entirely by the pool
-/// ([`crate::task::semaphore::TaskSemaphore::should_yield`]) and is driven by
-/// the pool's own token-budget state, so no per-turn threshold knobs are
-/// injected here.
 #[derive(Clone)]
 pub struct LeaseYieldContext {
     pub sem: std::sync::Arc<crate::task::semaphore::TaskSemaphore>,
@@ -479,460 +308,28 @@ impl SessionOptions {
     }
 }
 
-/// Compute the salvage-report path for a session:
-/// `<state_or_workspace>/.scratch/salvage_<session_id>.md`.
-///
-/// Returns `None` when there is no usable base directory — the caller then
-/// logs the salvage outcome without writing a file (no crash).
 fn salvage_report_path(options: Option<&SessionOptions>, session_id: &str) -> Option<PathBuf> {
-    let base = options?.scratch_root()?;
-    Some(
-        base.join(".scratch")
-            .join(format!("salvage_{session_id}.md")),
-    )
+    salvage::salvage_report_path(options.and_then(|o| o.scratch_root()).as_deref(), session_id)
 }
 
-/// Render the full salvage report (header + the model's plain-text summary)
-/// to a Markdown file, creating the `.scratch/` directory on demand.
-///
-/// Never panics on I/O: a failure to create the directory or write the file is
-/// returned as an error so the caller can log it cleanly.
 fn write_salvage_report(
     path: &Path,
     session_id: &str,
     turns: u32,
     body: &str,
 ) -> std::io::Result<()> {
-    if let Some(parent) = path.parent() {
-        fs::create_dir_all(parent)?;
-    }
-    let report = format!(
-        "# Salvage report — session `{session_id}`\n\n\
-         - **status:** `reasoning_budget_exhausted`\n\
-         - **turns consumed:** {turns}\n\n\
-         The model reached its reasoning ceiling before completing the task. The \
-         conversation history is preserved in the session event ledger; the plain-text \
-         summary below was extracted in a single non-coercive salvage turn (tools \
-         disabled, low effort).\n\n---\n\n{body}\n"
-    );
-    fs::write(path, report)
+    salvage::write_salvage_report(path, session_id, turns, body)
 }
 
-/// Default maximum tool result bytes before overflowing to disk.
-///
-/// This is the fallback threshold used when
-/// [`SessionOptions::tool_spill_bytes`] is `None`. It is intentionally
-/// conservative (16 KiB) so the default conversation stays small — keeping the
-/// Turn-1 prefix byte-for-byte stable across sessions in the same workspace
-/// (a warm KV prefix that lets 96%+ of the prefix cache hit). Operators can
-/// raise it via `CASTOR_TOOL_SPILL_BYTES`.
-pub const SPILL_THRESHOLD_BYTES: usize = 16384;
-
-/// Spill oversized tool outputs to `<scratch>/.scratch/tool_out_<id>.txt` and return
-/// a concise pointer block.
-///
-/// `threshold` is the byte ceiling that triggers a spill; `None` falls back to
-/// [`SPILL_THRESHOLD_BYTES`].
-pub fn spill_tool_output(
-    output: &str,
-    tool_call_id: &str,
-    scratch_root: Option<&Path>,
-    threshold: Option<usize>,
-) -> (String, Option<(usize, PathBuf)>) {
-    let threshold = threshold.unwrap_or(SPILL_THRESHOLD_BYTES);
-    let bytes = output.len();
-    if bytes <= threshold {
-        return (output.to_string(), None);
-    }
-
-    let safe_id: String = tool_call_id
-        .chars()
-        .map(|c| {
-            if c.is_ascii_alphanumeric() || c == '_' || c == '-' {
-                c
-            } else {
-                '_'
-            }
-        })
-        .take(64)
-        .collect();
-    let safe_id = if safe_id.is_empty() {
-        "out".to_string()
-    } else {
-        safe_id
-    };
-
-    let fallback_scratch = std::env::temp_dir().join("castor_scratch");
-    let base = scratch_root.unwrap_or(&fallback_scratch);
-    let scratch_dir = base.join(".scratch");
-    let _ = fs::create_dir_all(&scratch_dir);
-    let _ =
-        crate::pruner::prune_scratch_dir(&scratch_dir, crate::pruner::DEFAULT_SCRATCH_TTL_MS, None);
-    let file_path = scratch_dir.join(format!("tool_out_{safe_id}.txt"));
-
-    match fs::write(&file_path, output) {
-        Ok(()) => {
-            // Report the *canonical* location so the pointer is a guaranteed
-            // read target: `scratch_root` (the state dir) is frequently a
-            // symlink (e.g. WSL's `/home/apath/.castor ->
-            // /mnt/c/Users/apath/.castor`), and the sandbox compares against
-            // the canonical read root. Canonicalizing the written path (falling
-            // back to the lexical path if resolution fails) keeps the printed
-            // hint and the `tool_output_spilled` event on the one spelling
-            // `read_file` will accept.
-            let reported = dunce::canonicalize(&file_path).unwrap_or(file_path);
-            let head: String = output.chars().take(1024).collect();
-            let tail: String = output
-                .chars()
-                .rev()
-                .take(1024)
-                .collect::<String>()
-                .chars()
-                .rev()
-                .collect();
-            let elided = bytes.saturating_sub(head.len() + tail.len());
-            let pointer = format!(
-                "[Tool output spilled to disk: {bytes} bytes > {threshold}-byte threshold. \
-Full payload saved to: {}]\n\n\
---- Head preview (first 1024 bytes) ---\n{head}\n\
-... [{elided} bytes elided] ...\n\
---- Tail preview (last 1024 bytes) ---\n{tail}\n\n\
-Hint: use read_file with start_line/end_line or search_code to inspect specific regions of {}.",
-                reported.display(),
-                reported.display()
-            );
-            (pointer, Some((bytes, reported)))
-        }
-        Err(e) => {
-            let head: String = output.chars().take(2048).collect();
-            let elided = bytes.saturating_sub(head.len());
-            let truncated = format!(
-                "[ToolOutputSpillError: could not write to {}: {e}. Payload truncated from {bytes} bytes]\n\n{head}\n\n... [remaining {elided} bytes truncated] ...",
-                file_path.display()
-            );
-            (truncated, None)
-        }
-    }
-}
-
-/// Maximum number of top-level entries emitted in a [`build_workspace_skeleton`]
-/// block. Capping keeps the skeleton a tiny, stable prefix even for huge
-/// workspaces.
-const WORKSPACE_SKELETON_MAX_ENTRIES: usize = 40;
-
-/// Directories that never help a Turn-1 orientation and whose presence would
-/// only make the skeleton depend on build state — always excluded so the block
-/// stays byte-for-byte stable for a given source tree.
-const WORKSPACE_SKELETON_IGNORED: &[&str] = &[".git", "target", "node_modules", ".scratch"];
-
-/// Fixed allowlist of the canonical top-level manifest / contract files the
-/// skeleton may surface. Any *other* top-level file is ignored so that
-/// arbitrary untracked artifacts (e.g. `random_output.mp4`) never leak into the
-/// prefix, keeping it byte-for-byte stable for a given source tree.
-const WORKSPACE_SKELETON_MANIFESTS: &[&str] = &[
-    "Cargo.toml",
-    "package.json",
-    "pyproject.toml",
-    "AGENTS.md",
-    "CLAUDE.md",
-    "GEMINI.md",
-    "README.md",
-];
-
-/// Build a compact, deterministic `[Workspace Skeleton]` block.
-///
-/// The block is intentionally tiny and *pure* (a function of the workspace's
-/// stable top-level shape alone — no timestamps, no mtimes, no sizes) so that
-/// every session started in the same workspace prepends an identical prefix to
-/// its system prompt. A byte-identical prefix is what lets 96%+ of the KV cache
-/// hit on Turn 1 across concurrent sessions.
-///
-/// Rules (Finding 4 — hardening against untracked-artifact drift):
-/// - **Directories**: every *non-hidden* top-level directory is listed with a
-///   trailing `/` (e.g. `src/`). Hidden dirs (any `.` prefix) and the build
-///   dirs in [`WORKSPACE_SKELETON_IGNORED`] are excluded.
-/// - **Files**: only the canonical manifest / contract files in
-///   [`WORKSPACE_SKELETON_MANIFESTS`] are listed. Every other top-level file
-///   (including arbitrary untracked output) is dropped.
-/// - Each section is sorted lexicographically, so the order is independent of
-///   the OS directory-enumeration order; directories come first, then the
-///   canonical manifests.
-/// - The directory section is capped at [`WORKSPACE_SKELETON_MAX_ENTRIES`]; a
-///   trailing `(N more…)` marker is emitted when it is truncated.
-/// - If the directory cannot be read, an empty skeleton (header only) is
-///   returned so the prefix is still well-defined (deterministic, never a
-///   crash) and still identical for the same workspace.
-pub fn build_workspace_skeleton(workspace: &std::path::Path) -> String {
-    let mut out = String::from("[Workspace Skeleton]\n");
-    let mut dirs: Vec<String> = Vec::new();
-    let mut files: Vec<String> = Vec::new();
-    if let Ok(iter) = std::fs::read_dir(workspace) {
-        for entry in iter.filter_map(|e| e.ok()) {
-            let name = entry.file_name().to_string_lossy().into_owned();
-            let is_hidden = name.starts_with('.');
-            let is_dir = entry.file_type().map(|ft| ft.is_dir()).unwrap_or(false);
-            if is_dir {
-                // Keep only stable, non-hidden source dirs; drop hidden and
-                // build-state dirs (`.git`, `.scratch`, `target`, …).
-                if !is_hidden && !WORKSPACE_SKELETON_IGNORED.contains(&name.as_str()) {
-                    dirs.push(name);
-                }
-            } else if WORKSPACE_SKELETON_MANIFESTS.contains(&name.as_str()) {
-                files.push(name);
-            }
-        }
-    }
-    dirs.sort();
-    dirs.dedup();
-    files.sort();
-    files.dedup();
-    // Deterministic ordering: non-hidden source dirs (trailing `/`) first,
-    // then the canonical manifest / contract files. Both sections are
-    // independently sorted, so the whole block is a pure function of the
-    // workspace's stable top-level shape.
-    for d in dirs.iter().take(WORKSPACE_SKELETON_MAX_ENTRIES) {
-        out.push_str(&format!("- {d}/\n"));
-    }
-    let more_dirs = dirs.len().saturating_sub(WORKSPACE_SKELETON_MAX_ENTRIES);
-    for f in &files {
-        out.push_str(&format!("- {f}\n"));
-    }
-    if more_dirs > 0 {
-        out.push_str(&format!("({more_dirs} more…)\n"));
-    }
-    out
-}
-
-/// The on-disk shape of a single persisted history message.
-///
-/// Deliberately a *projection* of [`Message`]: it carries only `role`,
-/// `content`, `tool_calls`, and `tool_call_id` — it never carries a
-/// `reasoning_content` payload, so persisted history is sanitized of any
-/// deliberation trace ("cleared to `None`").
-#[derive(Debug, Clone, Serialize, Deserialize)]
-struct PersistedMessage {
-    role: String,
-    content: String,
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    tool_calls: Vec<PersistedToolCall>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    tool_call_id: Option<String>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-struct PersistedToolCall {
-    index: usize,
-    id: String,
-    name: String,
-    arguments: String,
-}
-
-impl From<&PersistedMessage> for Message {
-    fn from(p: &PersistedMessage) -> Self {
-        Message {
-            role: p.role.clone(),
-            content: p.content.clone(),
-            tool_calls: p
-                .tool_calls
-                .iter()
-                .map(|t| ToolCall {
-                    index: t.index,
-                    id: t.id.clone(),
-                    name: t.name.clone(),
-                    arguments: t.arguments.clone(),
-                })
-                .collect(),
-            tool_call_id: p.tool_call_id.clone(),
-        }
-    }
-}
-
-/// Project a [`Message`] into its persisted (sanitized) form.
-fn to_persisted(m: &Message) -> PersistedMessage {
-    // Reasoning is never persisted: the projection has no `reasoning_content`
-    // field at all (the "cleared to None" guarantee), and any ` think` trace
-    // inside assistant content is stripped to prevent context bloat.
-    let content = if m.role == "assistant" {
-        strip_think_tags(&m.content)
-    } else {
-        m.content.clone()
-    };
-    PersistedMessage {
-        role: m.role.clone(),
-        content,
-        tool_calls: m
-            .tool_calls
-            .iter()
-            .map(|t| PersistedToolCall {
-                index: t.index,
-                id: t.id.clone(),
-                name: t.name.clone(),
-                arguments: t.arguments.clone(),
-            })
-            .collect(),
-        tool_call_id: m.tool_call_id.clone(),
-    }
-}
-
-/// The persisted-history location: `<state>/sessions/<session_id>/messages.json`.
-fn session_messages_path(state: &StateDir, session_id: &str) -> PathBuf {
-    state.sessions().join(session_id).join("messages.json")
-}
-
-/// Persist a session's sanitized conversation history.
-///
-/// Drops `system` messages (the system prompt is re-supplied on resume, not
-/// stored) and strips ` think` traces from assistant messages. Best-effort: a
-/// write failure is logged, never propagated (it must not crash the session).
-fn save_messages(state: &StateDir, session_id: &str, messages: &[Message]) {
-    let path = session_messages_path(state, session_id);
-    let sanitized: Vec<PersistedMessage> = messages
-        .iter()
-        .filter(|m| m.role != "system")
-        .map(to_persisted)
-        .collect();
-    if let Some(parent) = path.parent()
-        && let Err(e) = fs::create_dir_all(parent)
-    {
-        warn!(session = %session_id, "failed to create session history dir: {e}");
-        return;
-    }
-    match serde_json::to_vec_pretty(&sanitized) {
-        Ok(bytes) => {
-            if let Err(e) = fs::write(&path, bytes) {
-                warn!(session = %session_id, "failed to persist session history: {e}");
-            }
-        }
-        Err(e) => {
-            warn!(session = %session_id, "failed to serialize session history: {e}");
-        }
-    }
-}
-
-/// Load a previously persisted session history.
-///
-/// Returns `None` when the file is absent or unreadable (a fresh session) or
-/// when it cannot be parsed. On success, returns the reconstructed non-system
-/// [`Message`]s, ready to be prepended to a fresh `[system, user]` pair.
-fn load_messages(state: &StateDir, session_id: &str) -> Option<Vec<Message>> {
-    let path = session_messages_path(state, session_id);
-    let bytes = fs::read(&path).ok()?;
-    let persisted: Vec<PersistedMessage> = serde_json::from_slice(&bytes).ok()?;
-    Some(persisted.iter().map(Message::from).collect())
-}
-
-/// Approximate a text's token count as `chars / 4` (the rough chars-per-token
-/// heuristic for a 4-chars/token packing).
-fn approx_tokens(text: &str) -> usize {
-    text.chars().count() / 4
-}
-
-/// Approximate a message list's token count (sum of per-message `chars / 4`).
-fn history_tokens(messages: &[Message]) -> usize {
-    messages.iter().map(|m| approx_tokens(&m.content)).sum()
-}
-
-/// The 75% rollover watermark for a given `max_context` token budget.
-fn watermark_tokens(max_context: usize) -> usize {
-    (max_context as u64 * 75 / 100) as usize
-}
-
-/// The 90% in-flight ceiling for a given `max_context` token budget.
-///
-/// Unlike the 75% resume-time watermark (which only fires once, on session
-/// resume, in [`should_resume`]), this ceiling is re-checked at the top of
-/// **every** turn inside [`run_session`]. When a session's accumulated history
-/// reaches it, tool dispatch is disabled for that turn,
-/// [`CONTEXT_CEILING_DIRECTIVE`] is appended, and the model is given one
-/// final completion in the remaining 10% headroom — so a session whose
-/// in-conversation context grows monotonically (large tool outputs, multi-step
-/// traces) always lands cleanly within the engine's window instead of sending
-/// a >`max_context` request and failing with an unhandled HTTP 400.
-fn in_flight_ceiling_tokens(max_context: usize) -> usize {
-    (max_context as u64 * 90 / 100) as usize
-}
-
-/// The token footprint of a *resumed* session's loaded history, subject to the
-/// same 75% [`max_context`] watermark gate used by [`run_session`] on resume.
-///
-/// This is the DRY source of truth for "how much context is this task already
-/// carrying into the slot pool" (Issues #23 / #28):
-///
-/// - No state dir, no persisted history, or a `max_context` that is `None` /
-///   `0` (watermark disabled) → returns `0` (nothing to account for, exactly
-///   matching the resume path's "disabled" behavior).
-/// - The loaded history fits within the 75% watermark → its
-///   [`history_tokens`] footprint is returned.
-/// - The loaded history exceeds the watermark → `0` (the session would roll
-///   over to a fresh `[system, user]` pair, so it carries no resumed history).
-pub fn resumed_history_tokens(state: &StateDir, session_id: &str, max_context: Option<u32>) -> u32 {
-    let Some(mc) = max_context else {
-        return 0;
-    };
-    if mc == 0 {
-        return 0; // watermark disabled
-    }
-    let Some(history) = load_messages(state, session_id) else {
-        return 0;
-    };
-    if history.is_empty() {
-        return 0;
-    }
-    let wm = watermark_tokens(mc as usize);
-    if history_tokens(&history) <= wm {
-        history_tokens(&history) as u32
-    } else {
-        0 // over the watermark → would roll over → no resumed history
-    }
-}
-
-/// Decide whether a loaded history should be resumed or rolled over.
-///
-/// Resumes when the watermark is disabled (no options, or `max_context == 0`)
-/// or when the loaded history plus the new user prompt fits within 75% of
-/// `max_context`. Otherwise the session rolls over to a fresh `[system, user]`
-/// pair (the caller simply does not prepend the history).
 fn should_resume(
     history: &[Message],
     new_user_prompt: &str,
     options: Option<&SessionOptions>,
 ) -> bool {
-    let Some(opts) = options else {
-        return true; // no options → no budget known → resume (disabled)
-    };
-    if opts.max_context == 0 {
-        return true; // watermark disabled
-    }
-    let wm = watermark_tokens(opts.max_context);
-    let est = history_tokens(history) + approx_tokens(new_user_prompt);
-    est <= wm
+    let max_context = options.map(|o| o.max_context).unwrap_or(0);
+    context::should_resume(history, new_user_prompt, max_context)
 }
 
-/// Per-turn stall-watchdog wrapper for a single [`ChatEngine::chat`] call.
-///
-/// Two independent triggers, both optional (`None` / `0` disables that
-/// trigger):
-///
-/// - **Wall-clock timeout**: when `turn_timeout_secs > 0`, the chat call is
-///   wrapped in [`tokio::time::timeout`]. A timeout is a hard stall.
-/// - **Reasoning-token budget**: when `max_turn_reasoning_tokens > 0` and the
-///   turn returns `finish_reason == "length"` with no `tool_calls` and
-///   `metrics.reasoning_tokens` at or above the budget, the model is presumed
-///   to have reasoned its way to a dead end (it "stalled" in deliberation
-///   rather than acting).
-///
-/// When either trigger fires, a `"turn_stall_retry"` event is appended to
-/// `logger` and the chat is retried **once**. The retry is a **zero-invalidation
-/// retry**: it re-sends the *unchanged* message prefix and passes the original
-/// `effort` through untouched, so the request's prompt bytes are identical to
-/// the stalling primary call (the nudge is a message *appended at the tail*,
-/// after the shared prefix). Deliberately mutating `effort` (e.g. to `"low"`)
-/// is forbidden on the retry path: the engine rewrites `chat_template_kwargs`
-/// with the effort knob, which changes the Turn-0 serialization of the system
-/// prompt and invalidates the KV prefix cache from token 0 (a cold chunked
-/// prefill on every retry). If the retry itself errors, that error is
-/// returned. When no trigger fires, the original completion is returned
-/// untouched.
 #[allow(clippy::too_many_arguments)] // each argument is a distinct watchdog input
 async fn chat_with_watchdog(
     engine: &dyn ChatEngine,
