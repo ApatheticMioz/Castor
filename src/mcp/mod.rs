@@ -574,7 +574,7 @@ impl CastorMcpServer {
                 }
             }
             "stats" => {
-                let stats = crate::telemetry::derive_stats(state.root(), &Default::default());
+                let stats = crate::telemetry::rollup::derive_stats(state.root(), &Default::default());
                 let text = format!(
                     "# Castor Telemetry Stats\n\
                      - total_prompt_tokens: {}\n\

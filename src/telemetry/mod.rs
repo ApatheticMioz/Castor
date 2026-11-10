@@ -21,14 +21,9 @@ use std::collections::BTreeMap;
 
 use serde::{Deserialize, Serialize};
 
-mod derive;
-mod emit;
-mod rollup;
-
-pub use rollup::{
-    derive_stats, format_stats_card, format_stats_card_styled, write_stats_json,
-};
-pub use emit::init_tracing;
+pub mod derive;
+pub mod emit;
+pub mod rollup;
 
 /// Baseline frontier-model pricing (USD per million tokens).
 const PROMPT_COST_PER_MILLION: f64 = 2.0;

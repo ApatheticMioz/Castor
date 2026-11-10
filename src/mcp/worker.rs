@@ -314,7 +314,7 @@ pub async fn run_job_with_engine(
         // A byte-identical, deterministic `[Workspace Skeleton]` block (a pure
         // function of the workspace's stable top-level shape) — a warm KV prefix
         // so 96%+ of the Turn-1 prefix cache hits across concurrent sessions.
-        runner::build_workspace_skeleton(std::path::Path::new(&spec.cwd))
+        runner::skeleton::build_workspace_skeleton(std::path::Path::new(&spec.cwd))
     } else {
         String::new()
     };
@@ -336,7 +336,7 @@ pub async fn run_job_with_engine(
 
     // Include any resumed-history tokens so the slot's initial budget reflects
     // the true working set (prefix + history + new prompt).
-    let resumed_tokens = runner::resumed_history_tokens(state, &spec.session_id, Some(max_ctx));
+    let resumed_tokens = runner::context::resumed_history_tokens(state, &spec.session_id, Some(max_ctx));
     let new_prompt_tokens = (spec.prompt.chars().count() / 4) as u32;
     let initial_tokens = new_prompt_tokens.saturating_add(resumed_tokens);
     let lease = sem.acquire_with_tokens(&spec.task_id, initial_tokens).await;
@@ -409,7 +409,7 @@ pub async fn run_job_with_engine(
     };
 
     let tools = executor.tool_schemas();
-    let turns_budget = spec.turns_budget.unwrap_or(runner::DEFAULT_TURNS_BUDGET);
+    let turns_budget = spec.turns_budget.unwrap_or(runner::budget::DEFAULT_TURNS_BUDGET);
 
     // Terminal artifacts (the reasoning-ceiling salvage report) are persisted
     // under the state dir's `.scratch/`. The per-session reasoning-effort

@@ -27,11 +27,10 @@ use tracing::warn;
 use crate::engine::{EngineClient, EngineError, Message, ToolSchema};
 use crate::state::StateDir;
 
-pub use budget::{DEFAULT_PROBE_BUDGET, DEFAULT_TURNS_BUDGET};
-pub use context::resumed_history_tokens;
-pub use skeleton::{build_workspace_skeleton, spill_tool_output, SPILL_THRESHOLD_BYTES};
-
-use budget::{LANDING_WINDOW, LOOP_THRESHOLD, LOOP_WINDOW};
+use budget::{
+    DEFAULT_PROBE_BUDGET, DEFAULT_TURNS_BUDGET, LANDING_WINDOW, LOOP_THRESHOLD, LOOP_WINDOW,
+};
+use skeleton::spill_tool_output;
 use context::{
     CONTEXT_CEILING_DIRECTIVE, history_tokens, in_flight_ceiling_tokens, load_messages,
     save_messages,
@@ -1302,6 +1301,7 @@ impasse, state your findings and ask for alignment rather than continuing to re-
 #[cfg(test)]
 mod tests {
     use super::*;
+    use super::skeleton::{build_workspace_skeleton, SPILL_THRESHOLD_BYTES};
     use crate::engine::{Completion, Metrics, ToolCall};
     use crate::state::StateDir;
     use std::collections::VecDeque;

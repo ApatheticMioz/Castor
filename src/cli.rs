@@ -699,7 +699,7 @@ pub async fn run_with(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
                 let since_ms = now_epoch_ms() as i128 - duration.as_secs_f64() as i128 * 1000;
                 opts.since_ms = Some(since_ms);
             }
-            let stats = telemetry::derive_stats(state.root(), &opts);
+            let stats = telemetry::rollup::derive_stats(state.root(), &opts);
             if json {
                 println!(
                     "{}",
@@ -710,7 +710,7 @@ pub async fn run_with(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
                 let use_color = !no_color
                     && std::io::stdout().is_terminal()
                     && std::env::var("NO_COLOR").is_err();
-                print!("{}", telemetry::format_stats_card_styled(&stats, use_color));
+                print!("{}", telemetry::rollup::format_stats_card_styled(&stats, use_color));
             }
         }
         Command::Evo { action } => {
