@@ -20,7 +20,7 @@
 use std::collections::{HashMap, VecDeque};
 use std::fs;
 use std::io;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
@@ -743,12 +743,56 @@ impl TaskSemaphore {
         }
     }
 
+    /// Read a lease from an explicit path; `None` if absent or unparseable.
+    fn read_lease_path(&self, path: &Path) -> Option<Lease> {
+        fs::read_to_string(path)
+            .ok()
+            .and_then(|s| serde_json::from_str(&s).ok())
+    }
+
+    /// **Compare-and-delete** for one slot file: re-read the file and delete
+    /// it **only if** its `(tenant, task_id, at)` identity still matches the
+    /// `expected` lease that was evaluated for reclamation (or the file is
+    /// gone / unreadable). Returns `true` when a file was actually unlinked.
+    ///
+    /// The re-read is what makes the reaper safe against the
+    /// evaluate-then-unlink race: if another process **claimed or updated**
+    /// the slot while the reaper was evaluating (a new tenant, a new task
+    /// binding, or a re-stamped `at`), the identity no longer matches and the
+    /// slot is left intact. A plain unconditional unlink would destroy the
+    /// *new* lease — the classic ABA foot-gun — leaving that tenant without
+    /// the slot it just claimed.
+    fn reap_if_match(&self, path: &Path, expected: Option<&Lease>) -> bool {
+        let re_read = self.read_lease_path(path);
+        if let (Some(a), Some(b)) = (re_read.as_ref(), expected)
+            && (a.tenant != b.tenant || a.task_id != b.task_id || a.at != b.at)
+        {
+            return false; // slot changed since evaluation — do not delete
+        }
+        fs::remove_file(path).is_ok()
+    }
+
+    /// Reap one slot file end-to-end: evaluate the lease under the full
+    /// reclamation rule ([`Self::lease_reclaimable_full`]) and, when
+    /// reclaimable, delete it via the atomic [`Self::reap_if_match`]
+    /// compare-and-delete. Returns `true` when a file was unlinked.
+    fn reap_slot_file(&self, path: &Path) -> bool {
+        let lease = self.read_lease_path(path);
+        if !self.lease_reclaimable_full(lease.as_ref()) {
+            return false;
+        }
+        self.reap_if_match(path, lease.as_ref())
+    }
+
     /// Clear reclaimable slot leases. Used at boot, after a crash, and after
     /// every task terminal transition.
     ///
     /// A lease is reclaimed when it is unreadable, owned by a dead pid, or
     /// bound to a task that has already reached a terminal state — see
-    /// [`Self::lease_reclaimable_full`] for the full rule.
+    /// [`Self::lease_reclaimable_full`] for the full rule. Deletion is
+    /// ownership-checked via the atomic [`Self::reap_if_match`]
+    /// compare-and-delete, so a slot claimed or updated by another task
+    /// between the evaluation and the unlink is never destroyed.
     pub fn clear_reclaimable(&self) {
         let _ = fs::create_dir_all(&self.inner.slots_dir);
         let entries = match fs::read_dir(&self.inner.slots_dir) {
@@ -764,12 +808,7 @@ impl TaskSemaphore {
             if !name.starts_with("slot_") || !name.ends_with(".json") {
                 continue;
             }
-            let lease: Option<Lease> = fs::read_to_string(&path)
-                .ok()
-                .and_then(|s| serde_json::from_str(&s).ok());
-            if self.lease_reclaimable_full(lease.as_ref()) {
-                let _ = fs::remove_file(&path);
-            }
+            let _ = self.reap_slot_file(&path);
         }
     }
 
@@ -778,14 +817,21 @@ impl TaskSemaphore {
     /// This is the dedicated zombie-slot reaper: it deletes any `slot_N.json`
     /// that is unreadable, owned by a dead (or zombie) pid, or bound to a task
     /// that has already reached a terminal state (completed / failed /
-    /// cancelled). It is idempotent and safe to call repeatedly — a live
-    /// worker's lease is never removed, so a healthy long-running task is
-    /// never false-positived.
+    /// cancelled) — see [`Self::lease_reclaimable_full`].
     ///
-    /// Used at boot and by the status server's periodic reaper; the worker also
-    /// releases its own slot on every terminal transition (the primary path),
-    /// so this is a backstop for workers that die between marking their task
-    /// terminal and releasing the slot (panic / kill / crash).
+    /// Deletion is a **compare-and-delete**: each reclaimable lease is
+    /// re-read from disk and unlinked only if its `(tenant, task_id, at)`
+    /// identity is unchanged since the evaluation ([`Self::reap_if_match`]).
+    /// If another task claimed the slot or updated the lease in the meantime,
+    /// the re-read differs and the slot is left intact, so a healthy
+    /// (re)claimant never loses the slot it just acquired and a live worker's
+    /// in-flight lease is never false-positived.
+    ///
+    /// Idempotent and safe to call repeatedly. Used at boot and by the status
+    /// server's periodic reaper; the worker also releases its own slot on
+    /// every terminal transition (the primary path), so this is a backstop
+    /// for workers that die between marking their task terminal and releasing
+    /// the slot (panic / kill / crash).
     pub fn reap_slots(&self) -> usize {
         let _ = fs::create_dir_all(&self.inner.slots_dir);
         let entries = match fs::read_dir(&self.inner.slots_dir) {
@@ -802,12 +848,7 @@ impl TaskSemaphore {
             if !name.starts_with("slot_") || !name.ends_with(".json") {
                 continue;
             }
-            let lease: Option<Lease> = fs::read_to_string(&path)
-                .ok()
-                .and_then(|s| serde_json::from_str(&s).ok());
-            if self.lease_reclaimable_full(lease.as_ref())
-                && fs::remove_file(&path).is_ok()
-            {
+            if self.reap_slot_file(&path) {
                 reaped += 1;
             }
         }
@@ -1880,6 +1921,143 @@ mod tests {
         sem.update_context_tokens("b", 100);
         // committed = 105 > 50 → yield.
         assert!(sem.should_yield(&b));
+    }
+
+    // ------------------------------------------------------------------
+    // Compare-and-delete slot reaping (ABA-safe)
+    // ------------------------------------------------------------------
+
+    /// The re-read-then-unlink must DELETE a slot whose `(tenant, task_id, at)`
+    /// identity is unchanged between the reclamation evaluation and the
+    /// unlink — the normal zombie-slot path.
+    #[test]
+    fn reap_if_match_deletes_when_lease_unchanged() {
+        let state = tmp_state();
+        let sem = TaskSemaphore::new(&state, 2);
+        let path = sem.slot_path(0);
+        let evaluated = Lease {
+            tenant: 4_999_999, // dead owner → reclaimable
+            task_id: "t".into(),
+            at: 1,
+            hb: 1,
+            context_tokens: 0,
+        };
+        fs::write(&path, serde_json::to_string(&evaluated).unwrap()).unwrap();
+        assert!(
+            sem.reap_if_match(&path, Some(&evaluated)),
+            "an unchanged dead-owner lease must be deleted"
+        );
+        assert!(!path.exists());
+    }
+
+    /// If the slot is **claimed or updated** (different `(tenant, task_id, at)`
+    /// identity) after the reclamation evaluation, the compare must fail and
+    /// the file must be left intact — a plain unlink would destroy the new
+    /// lease (ABA).
+    #[test]
+    fn reap_if_match_keeps_when_lease_changed() {
+        let state = tmp_state();
+        let sem = TaskSemaphore::new(&state, 2);
+        let path = sem.slot_path(0);
+        // The reaper evaluated an old dead-owner lease…
+        let old = Lease {
+            tenant: 4_999_999,
+            task_id: "t".into(),
+            at: 1,
+            hb: 1,
+            context_tokens: 0,
+        };
+        fs::write(&path, serde_json::to_string(&old).unwrap()).unwrap();
+        // …but the slot has since been claimed/updated by a different tenant
+        // (or re-stamped): the re-read no longer matches `old`.
+        let new = Lease {
+            tenant: 1,
+            task_id: "t2".into(),
+            at: 999,
+            hb: 999,
+            context_tokens: 0,
+        };
+        fs::write(&path, serde_json::to_string(&new).unwrap()).unwrap();
+        assert!(
+            !sem.reap_if_match(&path, Some(&old)),
+            "a slot claimed/updated since evaluation must NOT be deleted"
+        );
+        assert!(
+            path.exists(),
+            "the new lease must survive the compare"
+        );
+        assert_eq!(sem.read_lease(0).as_ref(), Some(&new));
+    }
+
+    /// If the slot file is **gone** by the time the re-read happens, the
+    /// compare is a no-op (nothing to delete, no spurious failure).
+    #[test]
+    fn reap_if_match_noop_when_file_gone() {
+        let state = tmp_state();
+        let sem = TaskSemaphore::new(&state, 2);
+        let path = sem.slot_path(0);
+        let evaluated = Lease {
+            tenant: 4_999_999,
+            task_id: "t".into(),
+            at: 1,
+            hb: 1,
+            context_tokens: 0,
+        };
+        fs::write(&path, serde_json::to_string(&evaluated).unwrap()).unwrap();
+        let _ = fs::remove_file(&path); // slot vanished between evaluation and re-read
+        assert!(!sem.reap_if_match(&path, Some(&evaluated)));
+    }
+
+    /// `reap_slots` end-to-end: it must delete a stale slot (dead owner) whose
+    /// identity is stable, but must NOT touch a slot whose bound task is still
+    /// active under a live owner, and a second pass must be a no-op.
+    #[test]
+    fn reap_slots_compare_and_delete_end_to_end() {
+        use crate::task::registry::{TaskRegistry, TaskStatus};
+        let state = tmp_state();
+        let reg = TaskRegistry::new(&state);
+        let sem = TaskSemaphore::new(&state, 4);
+        let me = std::process::id() as u32;
+
+        // An active (non-terminal) task bound to a live owner → must be kept.
+        let active = rt().block_on(reg.create("p", "/tmp", "s")).unwrap();
+        let _ = rt()
+            .block_on(reg.transition(&active, TaskStatus::Executing, None))
+            .unwrap();
+        fs::write(
+            sem.slot_path(0),
+            serde_json::to_string(&Lease {
+                tenant: me,
+                task_id: active,
+                at: now_ms(),
+                hb: now_ms(),
+                context_tokens: 0,
+            })
+            .unwrap(),
+        )
+        .unwrap();
+
+        // A dead-owner slot → must be deleted.
+        let dead = Lease {
+            tenant: 4_999_999,
+            task_id: "t".into(),
+            at: now_ms(),
+            hb: now_ms(),
+            context_tokens: 0,
+        };
+        fs::write(sem.slot_path(1), serde_json::to_string(&dead).unwrap())
+            .unwrap();
+
+        let reaped = sem.reap_slots();
+        assert_eq!(reaped, 1, "only the dead-owner slot should be reclaimed");
+        assert!(
+            sem.slot_path(0).exists(),
+            "the live-owner/active-task slot must be kept"
+        );
+        assert!(!sem.slot_path(1).exists(), "the dead-owner slot must be gone");
+
+        // Idempotent: a second pass reaps nothing.
+        assert_eq!(sem.reap_slots(), 0);
     }
 
     /// With the pool budget disabled (`pool_capacity_tokens == 0`) the yield

@@ -105,20 +105,30 @@ pub fn resolve_workspace_root(root: &Path) -> Result<PathBuf, SandboxError> {
     })
 }
 
-/// Whether `path` is lexically inside (or equal to) `root`.
+/// Whether `path` is **lexically** inside (or equal to) `root` — a pure
+/// *spelling* comparison that never resolves symlinks.
 ///
 /// The primary check is an exact, **byte-wise** prefix match. Rust's `Path`
 /// comparison is byte-wise on *every* OS — **including Windows** — so a
-/// canonically-cased allowed root and a differently-cased spelling of the
-/// *same* location do NOT match by bytes on a case-insensitive store (Windows
-/// NTFS, or WSL's `/mnt/[a-z]` drvfs/drive mounts, where `D:\` ≡ `d:\` and
-/// `/mnt/c/Users/Apath` ≡ `/mnt/c/Users/apath`). A component-boundary-aware
-/// case-insensitive prefix check is therefore the fallback that makes such a
-/// spelling be recognized as the same location, and it is **required on both**
-/// Windows (NTFS is case-insensitive by default) and WSL drive mounts. On
-/// Linux that fallback is deliberately scoped to `/mnt/<letter>` drive paths
-/// so a bare (case-sensitive) ext4 filesystem is never made over-permissive by
-/// it — a mixed-case non-drive path must still be denied there.
+/// differently-cased spelling of the *same* location does not match by bytes
+/// on a case-insensitive store (Windows NTFS, or WSL's `/mnt/[a-z]` drvfs
+/// drive mounts, where `D:\` ≡ `d:\` and `/mnt/c/Users/Apath` ≡
+/// `/mnt/c/Users/apath`). A component-boundary-aware case-insensitive prefix
+/// check is therefore the fallback that recognizes such a spelling as the same
+/// location.
+///
+/// On Windows the fallback always applies (NTFS is case-insensitive by
+/// default). On Linux it is gated by a **canonical-identity** volume probe
+/// ([`volume_is_case_insensitive`] on the root's store) rather than a
+/// `/mnt/[a-z]` string heuristic: the fallback runs only when the actual
+/// filesystem reports the store case-insensitive, so a bare (case-sensitive)
+/// ext4/btrfs store is never made over-permissive, and a `/mnt/<x>` path that
+/// is merely a local directory is correctly rejected.
+///
+/// This is deliberately *lexical only*: the containment policy uses it to tell
+/// a **symlink escape** (the *spelling* is in-tree but the *real* location is
+/// not) apart from a plain out-of-tree path. The symlink-dereferenced variant
+/// that canonicalizes both ends first is [`is_within_canonical`].
 fn is_within(path: &Path, root: &Path) -> bool {
     if path.strip_prefix(root).is_ok() {
         return true;
@@ -127,11 +137,59 @@ fn is_within(path: &Path, root: &Path) -> bool {
     {
         let p_ci = case_insensitive_form(path);
         let r_ci = case_insensitive_form(root);
-        // Restrict the Windows-style case-insensitive matching on Linux to
-        // WSL drive mounts so a bare (case-sensitive) Linux filesystem is
-        // never over-permissive; on Windows the matching always applies.
-        let wsl_drive = is_wsl_drive_prefix(&r_ci) || is_wsl_drive_prefix(&p_ci);
-        if wsl_drive || cfg!(windows) {
+        // Windows: the CI fallback always applies. Linux: gate on the
+        // canonical-identity volume probe of the root's store (a path lexically
+        // under the root lives on the same mount) so a case-sensitive store is
+        // never over-permissive.
+        let ci = if cfg!(windows) {
+            true
+        } else {
+            volume_is_case_insensitive(&canonical_resolve(root))
+        };
+        if ci {
+            let r_trim = r_ci.trim_end_matches('/');
+            if p_ci == r_ci || p_ci.starts_with(&format!("{r_trim}/")) {
+                return true;
+            }
+        }
+    }
+    false
+}
+
+/// Whether `path` lands inside `root` **by canonical identity**: both ends are
+/// resolved to their true (symlink/junction-dereferenced) location via
+/// [`canonical_resolve`] before the comparison, so a symlinked allowed root
+/// and any path beneath it compare like-for-like against the root's canonical
+/// form.
+///
+/// The primary check is an exact **byte-wise** prefix match on the canonical
+/// forms. On a case-insensitive store a differently-cased spelling of the
+/// *same* real location does not match by bytes, so a case-insensitive prefix
+/// fallback applies when the root's volume is one — decided by the
+/// *canonical-identity* probe [`volume_is_case_insensitive`] (not a string
+/// prefix): a spelling of the root with its deepest alphabetic component
+/// re-cased resolves to the same location iff the volume is case-insensitive.
+/// On Windows the volume is always treated as case-insensitive (NTFS); on
+/// Linux a bare ext4/btrfs volume reports "sensitive", so a mixed-case
+/// *sibling* is still denied there.
+fn is_within_canonical(path: &Path, root: &Path) -> bool {
+    let real_path = canonical_resolve(path);
+    let real_root = canonical_resolve(root);
+    if real_path.strip_prefix(&real_root).is_ok() {
+        return true;
+    }
+    #[cfg(any(windows, target_os = "linux"))]
+    {
+        // Windows: NTFS is case-insensitive by default, so the fallback always
+        // applies. Linux: gate on the canonical-identity volume probe.
+        let ci = if cfg!(windows) {
+            true
+        } else {
+            volume_is_case_insensitive(&real_root)
+        };
+        if ci {
+            let p_ci = case_insensitive_form(&real_path);
+            let r_ci = case_insensitive_form(&real_root);
             let r_trim = r_ci.trim_end_matches('/');
             if p_ci == r_ci || p_ci.starts_with(&format!("{r_trim}/")) {
                 return true;
@@ -156,18 +214,58 @@ fn case_insensitive_form(p: &Path) -> String {
     }
 }
 
-/// Whether a lowercased, forward-slash path is the root of a WSL drive mount:
-/// `/mnt/<single-lowercase-letter>` or `/mnt/<letter>/...`.
+/// Whether the store containing the canonical path `root` is case-insensitive
+/// — the predicate that decides whether a differently-cased spelling of a
+/// location may match its canonical form.
+///
+/// This is a *canonical-identity* test, not a string-prefix heuristic: the
+/// root's final path component is re-cased (its ASCII letters flipped) to form
+/// an alternative spelling of the *same* location, and both spellings are
+/// canonicalized through the OS symlink/junction layer. They resolve to the
+/// same real location **if and only if** the store is case-insensitive. On a
+/// case-sensitive store the re-cased spelling resolves to a distinct (or
+/// nonexistent) location, so the test is false there even if the path shares a
+/// drive-mount shape with one (e.g. a Linux `/mnt/d` that is a local directory,
+/// not a Windows drive).
+///
+/// Windows always reports `true` (NTFS / drvfs are case-insensitive in the
+/// default configuration). On Linux the probe is a no-op (and returns `false`)
+/// when the root's final component has no ASCII letters, so there is no
+/// re-cased spelling to test — a conservative default that only ever narrows,
+/// never widens, the set of matched spellings.
 #[cfg(any(windows, target_os = "linux"))]
-fn is_wsl_drive_prefix(s: &str) -> bool {
-    let Some(rest) = s.strip_prefix("/mnt/") else {
-        return false;
-    };
-    if rest.is_empty() {
-        return false;
+fn volume_is_case_insensitive(root: &Path) -> bool {
+    #[cfg(windows)]
+    {
+        return true;
     }
-    rest.as_bytes()[0].is_ascii_lowercase()
-        && (rest.len() == 1 || rest.as_bytes()[1] == b'/')
+    #[cfg(not(windows))]
+    {
+        let Some(name) = root.file_name() else {
+            return false;
+        };
+        let s = name.to_string_lossy();
+        // A component without ASCII letters has no differently-cased spelling,
+        // so there is nothing to probe (and no risk of over-permission).
+        if !s.chars().any(|c| c.is_ascii_alphabetic()) {
+            return false;
+        }
+        let re_cased = if s.starts_with(|c: char| c.is_ascii_uppercase()) {
+            s.to_ascii_lowercase()
+        } else {
+            s.to_ascii_uppercase()
+        };
+        if re_cased == s {
+            return false;
+        }
+        let probe = root
+            .parent()
+            .unwrap_or_else(|| Path::new("/"))
+            .join(&re_cased);
+        // A canonicalized re-cased spelling equal to the canonical root means
+        // the filesystem mapped the two spellings to the same location.
+        canonical_or_self(&probe) == canonical_or_self(root)
+    }
 }
 
 /// Layer 2: refuse symlink escapes. An existing target must canonicalize
@@ -479,14 +577,18 @@ impl SandboxPolicy {
     /// - **read roots**: canonicalized `workspace_root` + optional `state_dir`
     ///   (`~/.castor`) + (on Linux) `/usr`, `/bin`, `/lib`, `/etc`
     ///
-    /// The `state_dir` read root is canonicalized through the OS symlink layer
-    /// (and so is its `.scratch/` subdirectory) so that both the state dir and
-    /// the spill files the runner writes under it are *unconditionally* valid
-    /// read targets: a `~/.castor` that is a symlink (e.g. WSL's
-    /// `/home/apath/.castor -> /mnt/c/Users/apath/.castor`) resolves to the
-    /// same canonical location the spill writer reports, and reads through
-    /// either spelling succeed.
+    /// Both the workspace root and the state dir are resolved to their *true*
+    /// canonical paths **once, here, at construction** (via the OS
+    /// symlink/junction layer), and the `.scratch/` spill subdirectory is
+    /// canonicalized too. Every later membership check therefore compares
+    /// canonical-to-canonical: a `~/.castor` that is a symlink (e.g. WSL's
+    /// `/home/apath/.castor -> /mnt/c/Users/apath/.castor`) and the spill files
+    /// the runner writes under it both resolve to the same canonical location,
+    /// so reads through either spelling succeed unconditionally.
     pub fn for_workspace(root: &Path, state_dir: Option<&Path>) -> Self {
+        // Single canonical resolution of the workspace root (and, if supplied,
+        // the state dir) so every root this policy holds is a true canonical
+        // path, never a symlink or differently-cased spelling.
         let ws = canonical_or_self(root);
         let write_roots = vec![ws.clone(), canonical_or_self(&std::env::temp_dir())];
         let mut read_roots = vec![ws];
@@ -584,9 +686,18 @@ impl SandboxPolicy {
     /// directory (`cwd`): a relative `path` is resolved against the cwd (which
     /// may be a subdirectory of the workspace, or the workspace root itself
     /// when no cwd is set) before containment is checked against the roots.
-    /// `base` is lexical-normalized here; the caller is responsible for
-    /// canonicalizing it and, if it must itself be an allowed location, for
-    /// validating that separately.
+    ///
+    /// **Single-root canonicalization.** Both the resolution base and the
+    /// target are canonicalized through the OS symlink/junction layer before
+    /// any containment decision: the base (relative-path anchor) and the
+    /// target (the path being classified) are each reduced to their *true*
+    /// canonical location so that a symlinked cwd — or a symlinked allowed
+    /// root — never mismatches its canonical spelling (see
+    /// [`canonical_resolve`]). The returned [`ResolvedPath::path`] is still the
+    /// *lexically* normalized path (stable and printable); only the *decision*
+    /// uses the canonical location. Callers that need `base` itself to be an
+    /// allowed location must validate that separately (it is the caller's
+    /// anchor, not a path the model asked for).
     pub fn resolve_with_base(
         &self,
         input: &str,
@@ -620,19 +731,27 @@ impl SandboxPolicy {
             )));
         }
 
-        // Lexical membership: is the (symlink-free) spelling inside a root?
+        // (5) Canonical membership: resolve the target to its real
+        // (symlink/junction-dereferenced) location — through the nearest
+        // existing ancestor when the path does not yet exist — so a symlinked
+        // allowed root (e.g. `/home/apath/.castor -> /mnt/c/Users/apath/.castor`)
+        // and any file beneath it compare against the canonical roots by their
+        // *real* location. `is_within_canonical` canonicalizes each side (path
+        // and root) through the OS symlink/junction layer before comparing, so
+        // the real location and the roots always compare like-for-like.
+        let real = canonical_resolve(&normalized);
+        let real_in_write = self
+            .write_roots
+            .iter()
+            .any(|r| is_within_canonical(&real, r));
+        let real_in_read = self.read_roots.iter().any(|r| is_within_canonical(&real, r));
+        // Lexical membership: does the (symlink-free) spelling sit inside a
+        // root? Used only to distinguish a symlink escape (lexical in, real
+        // out) from a plain out-of-tree path (both out). This stays a pure
+        // spelling check (never canonicalizes) so the two senses remain
+        // distinct.
         let lexical_in_write = self.write_roots.iter().any(|r| is_within(&normalized, r));
         let lexical_in_read = self.read_roots.iter().any(|r| is_within(&normalized, r));
-
-        // (6) Symlink containment: resolve to the real location — through the
-        // nearest existing ancestor when the path itself does not yet exist —
-        // so a symlinked allowed root (e.g. `/home/apath/.castor ->
-        // /mnt/c/Users/apath/.castor`) and any file beneath it compare against
-        // the roots by their *real* location. If the real location lands in
-        // neither root set, it escapes the sandbox.
-        let real = canonical_resolve(&normalized);
-        let real_in_write = self.write_roots.iter().any(|r| is_within(&real, r));
-        let real_in_read = self.read_roots.iter().any(|r| is_within(&real, r));
         if !real_in_write && !real_in_read {
             // The lexical spelling is in-tree but the *real* location is not:
             // a symlink escape (the target points outside every allowed root).
@@ -811,39 +930,53 @@ mod tests {
     // Case-sensitivity of `is_within`
     //
     // Rust's `Path` comparison is byte-wise on every OS, so a mixed-case
-    // spelling of a location on a case-insensitive store (Windows NTFS, WSL
-    // `/mnt/<drive>`) does NOT match by bytes. These pin the intended behavior:
-    //   (a) WSL drive mounts match case-insensitively (the fallback is required
-    //       there, on both Windows and WSL); and
-    //   (b) a bare (case-sensitive) Linux filesystem is never over-permissive
-    //       — a mixed-case non-drive path is denied against a differently-cased
-    //       root, even though their lowercased forms are equal.
+    // spelling of a location on a case-insensitive store (Windows NTFS, or a
+    // drvfs `/mnt/<x>` drive mount under WSL) does NOT match by bytes. The
+    // fallback that recognizes such a spelling as the same location is gated on
+    // a *canonical-identity* volume probe, not on a path-prefix heuristic.
+    // These tests run against real directories so the probe is exercised
+    // against the actual filesystem of whatever host runs the suite:
+    //   (a) on a case-insensitive volume (NTFS / a drvfs mount) a
+    //       mixed-case spelling of an existing root matches it;
+    //   (b) on a bare case-sensitive volume (the common Linux /tmp on ext4)
+    //       the same mixed-case spelling is DENIED, and the volume probe
+    //       itself reports the volume as case-sensitive.
     // ========================================================================
 
     #[cfg(any(windows, target_os = "linux"))]
     #[test]
-    fn wsl_drive_path_matches_root_case_insensitively() {
-        // A WSL `/mnt/<drive>` root and a differently-cased spelling of the
-        // same location must match. The primary byte-wise check fails on the
-        // case difference (`/Users/Apath` vs `/Users/apath`), so this proves
-        // the case-insensitive fallback is what makes them compare equal.
-        let root = Path::new("/mnt/c/Users/apath");
-        let p = Path::new("/mnt/c/Users/Apath/Projects/llm");
-        assert!(
-            is_within(p, root),
-            "a WSL drive path should match its root case-insensitively"
+    fn canonical_identity_case_insensitivity() {
+        let root = test_root("ci_identity");
+        // A differently-cased spelling of the *root itself* matches iff the
+        // volume is case-insensitive — the primary byte-wise check fails on
+        // the case difference, so a `true` outcome proves the canonical
+        // fallback, and a `false` outcome proves a case-sensitive store is
+        // never over-permissive.
+        let re_cased = canonical_or_self(&root);
+        let mixed = re_cased
+            .file_name()
+            .map(|f| {
+                let s = f.to_string_lossy().into_owned();
+                let flipped = if s.starts_with(|c: char| c.is_ascii_uppercase()) {
+                    s.to_ascii_lowercase()
+                } else {
+                    s.to_ascii_uppercase()
+                };
+                re_cased.parent().unwrap_or(Path::new("/")).join(flipped)
+            })
+            .expect("test root has a file name");
+        let matches = is_within(&mixed, &root);
+        assert_eq!(
+            matches,
+            volume_is_case_insensitive(&canonical_or_self(&root)),
+            "the is_within fallback must agree with the canonical-identity \
+             volume probe on the host's real filesystem"
         );
-        // An equal-length root (differing only in case) also matches.
-        assert!(
-            is_within(Path::new("/mnt/c/Users/Apath"), root),
-            "a same-location, differently-cased WSL root should match"
-        );
-        // The drive *letter* itself is case-insensitive on the store, so a
-        // differently-cased drive still resolves to the same mount.
-        assert!(
-            is_within(Path::new("/mnt/C/Users/apath/x"), root),
-            "a differently-cased WSL drive letter should match the same mount"
-        );
+        // A *different* location with the same lowercased form is never
+        // treated as inside (no byte-wise or case-insensitive prefix match
+        // can relate them), regardless of the store's case policy.
+        let other = test_root("ci_identity_other");
+        assert!(!is_within(&other, &root));
     }
 
     #[cfg(target_os = "linux")]
@@ -851,9 +984,9 @@ mod tests {
     fn non_drive_linux_path_is_case_sensitive() {
         // On a bare (case-sensitive) Linux filesystem, the case-insensitive
         // fallback must NOT apply: a mixed-case path is denied against a
-        // differently-cased root, even though their lowercased forms are equal.
-        // The `is_wsl_drive_prefix` scope is what prevents the fallback from
-        // leaking over-permission onto ext4/btrfs.
+        // differently-cased root, even though their lowercased forms are
+        // equal. The canonical-identity volume probe is what prevents the
+        // fallback from leaking over-permission onto ext4/btrfs.
         let root = Path::new("/tmp/sandbox_a");
         let p = Path::new("/tmp/Sandbox_A/file.txt");
         assert!(

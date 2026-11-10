@@ -211,6 +211,45 @@ fn is_structural_open(chars: &[char], i: usize) -> bool {
         || chars[i - 1] == '$'
 }
 
+/// Whether a *byte* is one of the single-byte shell delimiter / metacharacters
+/// (all delimiters are ASCII, so this is well-defined on a raw byte).
+///
+/// Used by the zero-allocation group / case / substitution scanners, which walk
+/// `cmd.char_indices()` (yielding *byte* positions) and inspect neighbor bytes
+/// directly instead of a collected `Vec<char>`. A neighbor byte is a delimiter
+/// character iff it is one of these ASCII bytes: a byte ≥ 0x80 is a UTF-8
+/// continuation byte and can never be a delimiter, so the byte test agrees with
+/// the char-level [`is_delimiter_boundary`] on exactly the positions those
+/// scanners visit.
+fn is_delimiter_byte(b: u8) -> bool {
+    matches!(
+        b,
+        b' ' | b'\t' | b';' | b'&' | b'|' | b'(' | b')' | b'{' | b'}' | b'<' | b'>' | b'\n' | b'\r'
+    )
+}
+
+/// Whether the `{`/`}` whose first byte is at `i` (a char boundary in `s`) is
+/// a **standalone word** — a word of its own — in the zero-allocation scanners
+/// that walk `s.char_indices()`. Mirrors the char-level
+/// [`is_standalone_brace`]: the byte just before the char and the byte just
+/// after it (`i + len`) must each be a delimiter (or the string edge). A byte
+/// ≥ 0x80 is a UTF-8 continuation byte and can never be a delimiter, so the
+/// byte test agrees with the char test at exactly the positions those scanners
+/// visit.
+fn is_standalone_brace_byte(s: &str, i: usize, len: usize) -> bool {
+    let word_start = i == 0 || is_delimiter_byte(s.as_bytes()[i - 1]);
+    let word_end = i + len >= s.len() || is_delimiter_byte(s.as_bytes()[i + len]);
+    word_start && word_end
+}
+
+/// Whether the `(` whose first byte is at `i` (a char boundary in `s`) is a
+/// structural opener in the zero-allocation scanners: it starts a word,
+/// follows a delimiter, or follows `$` (as in `$(...)`). Mirrors the
+/// char-level [`is_structural_open`] on bytes.
+fn is_structural_open_byte(s: &str, i: usize) -> bool {
+    i == 0 || is_delimiter_byte(s.as_bytes()[i - 1]) || s.as_bytes()[i - 1] == b'$'
+}
+
 /// Splits a command into segments on the top-level shell separators
 /// `&&`, `&`, `||`, `|`, `;`, newlines, and `)` terminators (group ends,
 /// `$(...)` ends, and unmatched `case` pattern closers).
@@ -615,13 +654,16 @@ fn analyze_group(cmd: &str, cwd: &str, home: &str, depth: usize) -> Result<(), S
         return Ok(());
     }
 
-    let chars: Vec<char> = cmd.chars().collect();
+    // Zero-allocation scan: `cmd.char_indices()` yields the *byte* offset of
+    // every character, so the three pieces are cut straight out of `cmd` as
+    // `&str` slices — no `Vec<char>`, no rebuild, and a slice boundary always
+    // lands on a char boundary (so multi-byte characters are never split).
     let mut quote: Option<char> = None;
     let mut start: Option<(usize, char)> = None;
     let mut close: Option<usize> = None;
     let mut paren: usize = 0;
     let mut brace: usize = 0;
-    for (i, &ch) in chars.iter().enumerate() {
+    for (i, ch) in cmd.char_indices() {
         if let Some(q) = quote {
             if ch == q {
                 quote = None;
@@ -640,13 +682,13 @@ fn analyze_group(cmd: &str, cwd: &str, home: &str, depth: usize) -> Result<(), S
                 paren += 1;
             }
             ')' => paren = paren.saturating_sub(1),
-            '{' if is_standalone_brace(&chars, i) => {
+            '{' if is_standalone_brace_byte(cmd, i, 1) => {
                 if start.is_none() && paren == 0 && brace == 0 {
                     start = Some((i, '{'));
                 }
                 brace += 1;
             }
-            '}' if is_standalone_brace(&chars, i) => brace = brace.saturating_sub(1),
+            '}' if is_standalone_brace_byte(cmd, i, 1) => brace = brace.saturating_sub(1),
             _ => {}
         }
         if let Some((_, k)) = start
@@ -664,23 +706,22 @@ fn analyze_group(cmd: &str, cwd: &str, home: &str, depth: usize) -> Result<(), S
         return Ok(()); // no complete group: ordinary segment
     };
 
-    // `s` and `c` are *character* indices (from `chars`), not byte indices, so
-    // the three pieces are rebuilt from the char vector. Slicing the original
-    // `&str` by those numbers would split a multi-byte UTF-8 character (e.g.
-    // `→`, emoji) that falls inside the slice and panic.
-    let prefix: String = chars[..s].iter().collect();
-    let body: String = chars[s + 1..c].iter().collect();
-    let suffix: String = chars[c + 1..].iter().collect();
+    // `s` and `c` are *byte* offsets on char boundaries: `s` is the offset of
+    // the opener (a slice start), `c + 1` is one past the closer (a slice
+    // end), so the three pieces are direct `&str` sub-slices of `cmd`.
+    let prefix = &cmd[..s];
+    let body = &cmd[s + 1..c];
+    let suffix = &cmd[c + 1..];
 
     if !prefix.trim().is_empty() {
-        analyze_command(&prefix, cwd, home, depth + 1)?;
+        analyze_command(prefix, cwd, home, depth + 1)?;
     }
     let inner = body.trim().trim_matches(';').trim();
     if !inner.is_empty() {
         analyze_command(inner, cwd, home, depth + 1)?;
     }
     if !suffix.trim().is_empty() {
-        analyze_command(&suffix, cwd, home, depth + 1)?;
+        analyze_command(suffix, cwd, home, depth + 1)?;
     }
     Ok(())
 }
@@ -706,19 +747,27 @@ fn analyze_case(cmd: &str, cwd: &str, home: &str, depth: usize) -> Result<(), Sh
         return Ok(());
     }
 
-    let lower: Vec<char> = cmd.to_ascii_lowercase().chars().collect();
+    let lower: String = cmd.to_ascii_lowercase();
 
     // `case <word> in ...`: find the keyword `in` as a standalone word
     // (the cased word is a single token, so it cannot contain `in`).
+    //
+    // Zero-allocation: `char_indices()` yields the *byte* offset of each
+    // character and the word-boundary neighbors are inspected as raw bytes
+    // (`floor_char_boundary` steps from a byte offset to the char boundary on
+    // its left, and `lower[i]` is the char at that offset), so no `Vec<char>`
+    // is collected.
     let mut in_idx: Option<usize> = None;
-    for (i, &ch) in lower.iter().enumerate() {
-        if ch == 'i'
-            && lower.get(i + 1) == Some(&'n')
-            && (i == 0 || is_delimiter_boundary(lower[i - 1]))
-            && (i + 2 >= lower.len() || is_delimiter_boundary(lower[i + 2]))
-        {
-            in_idx = Some(i + 2);
-            break;
+    for (i, ch) in lower.char_indices() {
+        if ch == 'i' && lower[i..].starts_with("in") {
+            let b0 = lower.floor_char_boundary(i);
+            let b1 = lower.floor_char_boundary(i + 2);
+            if (i == 0 || is_delimiter_byte(lower.as_bytes()[b0 - 1]))
+                && (i + 2 >= lower.len() || is_delimiter_byte(lower.as_bytes()[b1]))
+            {
+                in_idx = Some(b1);
+                break;
+            }
         }
     }
     let Some(in_idx) = in_idx else {
@@ -727,36 +776,42 @@ fn analyze_case(cmd: &str, cwd: &str, home: &str, depth: usize) -> Result<(), Sh
 
     // The pattern/body region runs from after `in` to the last standalone
     // `esac` word (an unclosed `case` is a bash syntax error — nothing
-    // executes — so its tail still gets analyzed below).
-    let region_chars: Vec<char> = lower[in_idx..].to_vec();
-    let mut body_end = region_chars.len();
-    for (i, &ch) in region_chars.iter().enumerate() {
-        if ch == 'e'
-            && region_chars.get(i + 1) == Some(&'s')
-            && region_chars.get(i + 2) == Some(&'a')
-            && region_chars.get(i + 3) == Some(&'c')
-            && (i == 0 || is_delimiter_boundary(region_chars[i - 1]))
-            && (i + 4 >= region_chars.len()
-                || is_delimiter_boundary(region_chars[i + 4]))
-        {
-            body_end = i;
+    // executes — so its tail still gets analyzed below). `in_idx` is a char
+    // boundary in `lower`, and so is `body_end`, so the region is a direct
+    // `&str` sub-slice of `lower` (no allocation).
+    let tail = &lower[in_idx..];
+    let mut body_end = tail.len();
+    for (i, ch) in tail.char_indices() {
+        if ch == 'e' && tail[i..].starts_with("esac") {
+            let b0 = tail.floor_char_boundary(i);
+            let b1 = tail.floor_char_boundary(i + 4);
+            if (i == 0 || is_delimiter_byte(tail.as_bytes()[b0 - 1]))
+                && (i + 4 >= tail.len() || is_delimiter_byte(tail.as_bytes()[b1]))
+            {
+                body_end = b0;
+            }
         }
     }
-    let region: String = region_chars[..body_end].iter().collect();
+    let region = &tail[..body_end];
 
-    let rchars: Vec<char> = region.chars().collect();
+    // Walk the region `P) B ;; P2) B2 ;;` flushing each body as a *byte*
+    // sub-slice of `region`. Group delimiters inside a body count toward
+    // depth, so a `)` closing a subshell inside the body never terminates the
+    // pattern; quoted `)` and `;;` never count. `paren`/`brace` hold char
+    // depths; the byte positions are always char boundaries, so the byte
+    // neighbor test agrees with the char-level rules.
     let mut quote: Option<char> = None;
     let mut paren: usize = 0;
     let mut brace: usize = 0;
     let mut body_start: Option<usize> = None;
     let mut i = 0;
-    while i < rchars.len() {
-        let ch = rchars[i];
+    while i < region.len() {
+        let ch = region[i..].chars().next().unwrap();
         if let Some(q) = quote {
             if ch == q {
                 quote = None;
             }
-            i += 1;
+            i += ch.len_utf8();
             continue;
         }
         if ch == '"' || ch == '\'' {
@@ -765,22 +820,22 @@ fn analyze_case(cmd: &str, cwd: &str, home: &str, depth: usize) -> Result<(), Sh
             continue;
         }
         match ch {
-            '(' if is_structural_open(&rchars, i) => paren += 1,
+            '(' if is_structural_open_byte(region, i) => paren += 1,
             ')' if paren > 0 => paren -= 1,
-            '{' if is_standalone_brace(&rchars, i) => brace += 1,
-            '}' if is_standalone_brace(&rchars, i) => {
+            '{' if is_standalone_brace_byte(region, i, 1) => brace += 1,
+            '}' if is_standalone_brace_byte(region, i, 1) => {
                 brace = brace.saturating_sub(1)
             }
             _ => {}
         }
         let at_top = paren == 0 && brace == 0;
         let flush_body = |s: usize, e: usize| -> Result<(), ShellPolicyError> {
-            // `s`/`e` are *character* indices into `rchars`; rebuild the body
-            // from the char vector (slicing the `String` by char index would
-            // split a multi-byte character and panic).
-            let body: String = rchars[s..e].iter().collect();
+            // `s`/`e` are *byte* offsets on char boundaries, so the body is a
+            // direct `&str` sub-slice of `region` (multi-byte characters are
+            // never split and nothing is allocated).
+            let body = &region[s..e];
             if !body.trim().is_empty() {
-                analyze_command(&body, cwd, home, depth + 1)
+                analyze_command(body, cwd, home, depth + 1)
             } else {
                 Ok(())
             }
@@ -791,7 +846,7 @@ fn analyze_case(cmd: &str, cwd: &str, home: &str, depth: usize) -> Result<(), Sh
                 flush_body(s, i)?;
             }
             body_start = Some(i + 1);
-        } else if at_top && ch == ';' && rchars.get(i + 1) == Some(&';') {
+        } else if at_top && ch == ';' && region[i + 1..].starts_with(';') {
             // End of the current body (a lone `;` inside a body is part of
             // the body's own command list — analyzed with it).
             if let Some(s) = body_start.take() {
@@ -799,14 +854,14 @@ fn analyze_case(cmd: &str, cwd: &str, home: &str, depth: usize) -> Result<(), Sh
             }
             i += 1;
         }
-        i += 1;
+        i += ch.len_utf8();
     }
     if let Some(s) = body_start {
-        // `s` is a *character* index into `rchars`; rebuild from the char
-        // vector so a multi-byte character is never split.
-        let body: String = rchars[s..].iter().collect();
+        // `s` is a *byte* offset on a char boundary: the trailing body is a
+        // direct `&str` sub-slice of `region`.
+        let body = &region[s..];
         if !body.trim().is_empty() {
-            analyze_command(&body, cwd, home, depth + 1)?;
+            analyze_command(body, cwd, home, depth + 1)?;
         }
     }
     Ok(())
@@ -830,16 +885,19 @@ fn analyze_substitutions(
     if depth >= MAX_GROUP_DEPTH {
         return Ok(());
     }
-    let chars: Vec<char> = cmd.chars().collect();
+    // Zero-allocation scan: `char_indices()` yields the *byte* offset of every
+    // character, so each substitution body is cut straight out of `cmd` as a
+    // `&str` sub-slice — no `Vec<char>`, no rebuild, and every boundary lands
+    // on a char boundary (a multi-byte character is never split).
     let mut quote: Option<char> = None;
     let mut i = 0;
-    while i < chars.len() {
-        let ch = chars[i];
+    while i < cmd.len() {
+        let ch = cmd[i..].chars().next().unwrap();
         if let Some(q) = quote {
             if ch == q {
                 quote = None;
             }
-            i += 1;
+            i += ch.len_utf8();
             continue;
         }
         if ch == '"' || ch == '\'' {
@@ -847,12 +905,12 @@ fn analyze_substitutions(
             i += 1;
             continue;
         }
-        if ch == '$' && i + 1 < chars.len() && chars[i + 1] == '(' {
+        if ch == '$' && cmd[i + 1..].starts_with('(') {
             // `$(...)`: scan for the balanced close.
             let mut paren = 1usize;
             let mut j = i + 2;
-            while j < chars.len() && paren > 0 {
-                let cj = chars[j];
+            while j < cmd.len() && paren > 0 {
+                let cj = cmd[j..].chars().next().unwrap();
                 if quote.is_none() {
                     if cj == '"' || cj == '\'' {
                         quote = Some(cj);
@@ -864,15 +922,15 @@ fn analyze_substitutions(
                 } else if cj == quote.unwrap() {
                     quote = None;
                 }
-                j += 1;
+                j += cj.len_utf8();
             }
-            if paren == 0 && j <= chars.len() {
-                // `i`/`j` are *character* indices; rebuild the body from the
-                // char vector (slicing `cmd` by char index would split a
-                // multi-byte character and panic).
-                let body: String = chars[i + 2..j - 1].iter().collect();
+            if paren == 0 && j <= cmd.len() {
+                // `i`/`j` are *byte* offsets on char boundaries: the body is a
+                // direct `&str` sub-slice of `cmd` (`i + 2` is one past the
+                // `(`, `j - 1` is the closer's byte).
+                let body = &cmd[i + 2..j - 1];
                 if !body.trim().is_empty() {
-                    analyze_command(&body, cwd, home, depth + 1)?;
+                    analyze_command(body, cwd, home, depth + 1)?;
                 }
                 i = j;
                 continue;
@@ -884,22 +942,26 @@ fn analyze_substitutions(
         if ch == '`' {
             // Backtick substitution: to the next unquoted backtick.
             let mut j = i + 1;
-            while j < chars.len() && chars[j] != '`' {
-                j += 1;
+            while j < cmd.len() {
+                let cj = cmd[j..].chars().next().unwrap();
+                if cj == '`' {
+                    break;
+                }
+                j += cj.len_utf8();
             }
-            if j < chars.len() {
-                // `i`/`j` are *character* indices; rebuild from the char
-                // vector so a multi-byte character is never split.
-                let body: String = chars[i + 1..j].iter().collect();
+            if j < cmd.len() {
+                // `i`/`j` are *byte* offsets on char boundaries: the body is a
+                // direct `&str` sub-slice of `cmd`.
+                let body = &cmd[i + 1..j];
                 if !body.trim().is_empty() {
-                    analyze_command(&body, cwd, home, depth + 1)?;
+                    analyze_command(body, cwd, home, depth + 1)?;
                 }
                 i = j + 1;
                 continue;
             }
             break; // unclosed backtick: syntax error, cannot execute
         }
-        i += 1;
+        i += ch.len_utf8();
     }
     Ok(())
 }
@@ -2312,5 +2374,43 @@ mod utf8_regression {
         assert!(validate("echo →; echo 📦; echo →").is_ok());
         assert!(validate("echo $(→) && echo 📦").is_ok());
         assert!(validate("ls → && cat 📦").is_ok());
+    }
+
+    // Zero-allocation byte-slicing canaries: multi-byte characters directly
+    // *adjacent* to the structural delimiters must be classified exactly as
+    // the char-level rules classify them (a non-ASCII neighbor byte is never
+    // a delimiter), and destructive bodies must still be caught.
+    #[test]
+    fn multibyte_neighbor_of_delimiters_still_correct() {
+        // `{` glued to a multi-byte char on its left is a literal char
+        // (not a standalone brace word): no group, benign.
+        assert!(validate("echo →{rm").is_ok());
+        assert!(validate("echo 📦{x").is_ok());
+        // A standalone `{` whose body ends in `;` right after a multi-byte
+        // char: the group body must still be analyzed.
+        assert!(matches!(
+            validate("{ rm -rf / →; }"),
+            Err(ShellPolicyError::ProtectedRoot(_, _))
+        ));
+        assert!(matches!(
+            validate("→ (rm -rf /)"),
+            Err(ShellPolicyError::ProtectedRoot(_, _))
+        ));
+        // `$(...)` immediately preceded by a multi-byte char: the `(` is a
+        // structural opener and the hidden destructive body is caught.
+        assert!(matches!(
+            validate("echo →$(rm -rf /)"),
+            Err(ShellPolicyError::ProtectedRoot(_, _))
+        ));
+        // A bare mid-word `(` after a multi-byte char (`a(x`) is not a
+        // structural opener and stays benign.
+        assert!(validate("echo →(x").is_ok());
+        // Case keyword search with a multi-byte char adjacent to `in`:
+        // `in` is found as a standalone word only with delimiter neighbors.
+        assert!(validate("case $X in a) echo ok ;; esac").is_ok());
+        assert!(matches!(
+            validate("case $X in →in) rm -rf / ;; esac"),
+            Err(ShellPolicyError::ProtectedRoot(_, _))
+        ));
     }
 }
