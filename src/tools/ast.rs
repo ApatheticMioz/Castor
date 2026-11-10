@@ -381,24 +381,43 @@ pub fn html_validation_text(content: &str) -> String {
         }
     }
 
+    // `&` is a single ASCII byte (0x26) and can never appear as a continuation
+    // byte of a multi-byte UTF-8 sequence, so scanning for it byte-by-byte is
+    // safe: every `bytes[i] == b'&'` sits on a char boundary. Everything else is
+    // flushed in whole char-boundary slices (`&content[last..]`) so multi-byte
+    // sequences (accented, CJK, emoji) are copied intact and never mangled into
+    // per-byte Latin-1 mojibake (the old `out.push(bytes[i] as char)` did
+    // exactly that, turning e.g. `Café` into `CafÃ©`).
     let mut out = String::with_capacity(content.len());
     let mut i = 0usize;
+    let mut last = 0usize;
     while i < n {
         if bytes[i] != b'&' {
-            out.push(bytes[i] as char);
             i += 1;
             continue;
         }
+        // Flush the run of non-`&` bytes preceding this `&` as a UTF-8 slice.
+        if last < i {
+            out.push_str(&content[last..i]);
+        }
         match reference_end(bytes, i) {
             Some(end) => {
+                // A valid character reference: keep it verbatim (idempotent).
                 out.push_str(&content[i..end]);
+                last = end;
                 i = end;
             }
             None => {
+                // A bare `&`: escape it, then continue scanning past that byte.
                 out.push_str("&amp;");
+                last = i + 1;
                 i += 1;
             }
         }
+    }
+    // Trailing run of non-`&` bytes after the last `&`.
+    if last < n {
+        out.push_str(&content[last..n]);
     }
     out
 }
@@ -895,6 +914,40 @@ mod tests {
         assert_eq!(
             html_validation_text("D &#65; &#x41;"),
             "D &#65; &#x41;"
+        );
+    }
+
+    #[test]
+    fn html_validation_text_preserves_multibyte_utf8() {
+        // The non-`&` runs are flushed as whole char-boundary slices, so
+        // multi-byte UTF-8 (accented, CJK, emoji) is copied intact — the old
+        // byte-by-byte `out.push(bytes[i] as char)` mangled each of these into
+        // per-byte Latin-1 mojibake (e.g. `Café` → `CafÃ©`). A multi-byte char
+        // can never equal the ASCII `&` byte, so the ampersand scan stays
+        // boundary-safe and the `&` handling is unchanged.
+        //
+        // (a) A bare `&` next to multi-byte text: the accented `é` (2 bytes),
+        //     the CJK chars (3 bytes each), and the emoji (4 bytes each) all
+        //     survive byte-for-byte while the bare `&` is still escaped.
+        assert_eq!(
+            html_validation_text("Café & 中文 & 测试 & 😀 & 😃"),
+            "Café &amp; 中文 &amp; 测试 &amp; 😀 &amp; 😃"
+        );
+        // (b) A *valid* reference adjacent to multi-byte text: the reference is
+        //     kept verbatim and the surrounding non-ASCII bytes stay intact.
+        assert_eq!(
+            html_validation_text("Café &amp; 😀 &copy; 中文"),
+            "Café &amp; 😀 &copy; 中文"
+        );
+        // (c) Pure multi-byte text with no `&` at all is a no-op identity —
+        //     the whole string round-trips exactly (this is the mojibake case).
+        assert_eq!(
+            html_validation_text("Café 😀 中文"),
+            "Café 😀 中文"
+        );
+        assert_eq!(
+            html_validation_text("测试"),
+            "测试"
         );
     }
 

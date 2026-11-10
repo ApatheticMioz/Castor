@@ -381,7 +381,18 @@ pub async fn run_job_with_engine(
         config.openalex_api_key.clone(),
         ext_bridge,
     ) {
-        Ok(exec) => exec,
+        Ok(exec) => {
+            // Re-baseline the executor against the task's actual working
+            // directory (the dispatch cwd, host-path-normalized and canonical
+            // through the OS symlink layer by `with_cwd`). This makes the
+            // active-task cwd *live* for every dispatch: relative
+            // `read_file`/`write_file`/`edit_file`/`list_dir`/`search_code`
+            // paths resolve against it and the `bash` child spawns in it,
+            // instead of silently falling back to the workspace root. When the
+            // dispatch cwd is the workspace root itself (the common case) this
+            // is a no-op relative to the prior behavior.
+            exec.with_cwd(host_raw_path.clone())
+        }
         Err(e) => {
             let err_msg = format!("failed to initialize executor: {e}");
             let _ = registry

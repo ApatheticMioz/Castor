@@ -105,15 +105,20 @@ pub fn resolve_workspace_root(root: &Path) -> Result<PathBuf, SandboxError> {
     })
 }
 
-/// The primary check is an exact prefix match. On case-insensitive stores —
-/// Windows (NTFS) and WSL's `/mnt/[a-z]` drvfs/drive mounts, where
-/// `d:\` ≡ `D:\` and `/mnt/c/Users/Apath` ≡ `/mnt/c/Users/apath` — a
-/// component-boundary-aware case-insensitive prefix check is applied so a
-/// canonically-cased allowed root compares consistently against a
-/// differently-cased spelling of the *same* location. On Windows Rust's
-/// `strip_prefix` is already case-insensitive (so the primary check usually
-/// suffices); on WSL/Linux `strip_prefix` is byte-wise, so the fallback is
-/// what makes a drive-mounted root match regardless of casing.
+/// Whether `path` is lexically inside (or equal to) `root`.
+///
+/// The primary check is an exact, **byte-wise** prefix match. Rust's `Path`
+/// comparison is byte-wise on *every* OS — **including Windows** — so a
+/// canonically-cased allowed root and a differently-cased spelling of the
+/// *same* location do NOT match by bytes on a case-insensitive store (Windows
+/// NTFS, or WSL's `/mnt/[a-z]` drvfs/drive mounts, where `D:\` ≡ `d:\` and
+/// `/mnt/c/Users/Apath` ≡ `/mnt/c/Users/apath`). A component-boundary-aware
+/// case-insensitive prefix check is therefore the fallback that makes such a
+/// spelling be recognized as the same location, and it is **required on both**
+/// Windows (NTFS is case-insensitive by default) and WSL drive mounts. On
+/// Linux that fallback is deliberately scoped to `/mnt/<letter>` drive paths
+/// so a bare (case-sensitive) ext4 filesystem is never made over-permissive by
+/// it — a mixed-case non-drive path must still be denied there.
 fn is_within(path: &Path, root: &Path) -> bool {
     if path.strip_prefix(root).is_ok() {
         return true;
@@ -800,6 +805,68 @@ mod tests {
         assert_eq!(resolved, root.join("src").join("main.rs"));
         let resolved = normalize_traversal(&root, "./src/../src/main.rs").unwrap();
         assert_eq!(resolved, root.join("src").join("main.rs"));
+    }
+
+    // ========================================================================
+    // Case-sensitivity of `is_within`
+    //
+    // Rust's `Path` comparison is byte-wise on every OS, so a mixed-case
+    // spelling of a location on a case-insensitive store (Windows NTFS, WSL
+    // `/mnt/<drive>`) does NOT match by bytes. These pin the intended behavior:
+    //   (a) WSL drive mounts match case-insensitively (the fallback is required
+    //       there, on both Windows and WSL); and
+    //   (b) a bare (case-sensitive) Linux filesystem is never over-permissive
+    //       — a mixed-case non-drive path is denied against a differently-cased
+    //       root, even though their lowercased forms are equal.
+    // ========================================================================
+
+    #[cfg(any(windows, target_os = "linux"))]
+    #[test]
+    fn wsl_drive_path_matches_root_case_insensitively() {
+        // A WSL `/mnt/<drive>` root and a differently-cased spelling of the
+        // same location must match. The primary byte-wise check fails on the
+        // case difference (`/Users/Apath` vs `/Users/apath`), so this proves
+        // the case-insensitive fallback is what makes them compare equal.
+        let root = Path::new("/mnt/c/Users/apath");
+        let p = Path::new("/mnt/c/Users/Apath/Projects/llm");
+        assert!(
+            is_within(p, root),
+            "a WSL drive path should match its root case-insensitively"
+        );
+        // An equal-length root (differing only in case) also matches.
+        assert!(
+            is_within(Path::new("/mnt/c/Users/Apath"), root),
+            "a same-location, differently-cased WSL root should match"
+        );
+        // The drive *letter* itself is case-insensitive on the store, so a
+        // differently-cased drive still resolves to the same mount.
+        assert!(
+            is_within(Path::new("/mnt/C/Users/apath/x"), root),
+            "a differently-cased WSL drive letter should match the same mount"
+        );
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn non_drive_linux_path_is_case_sensitive() {
+        // On a bare (case-sensitive) Linux filesystem, the case-insensitive
+        // fallback must NOT apply: a mixed-case path is denied against a
+        // differently-cased root, even though their lowercased forms are equal.
+        // The `is_wsl_drive_prefix` scope is what prevents the fallback from
+        // leaking over-permission onto ext4/btrfs.
+        let root = Path::new("/tmp/sandbox_a");
+        let p = Path::new("/tmp/Sandbox_A/file.txt");
+        assert!(
+            !is_within(p, root),
+            "a mixed-case non-drive Linux path must be DENIED against a \
+             differently-cased root (case-sensitive store)"
+        );
+        // The exact, same-case spelling still matches — we deny only the
+        // *different-case* spelling, not the identical location.
+        assert!(
+            is_within(Path::new("/tmp/sandbox_a/file.txt"), root),
+            "the identical-case path must still match"
+        );
     }
 
     // ========================================================================

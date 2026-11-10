@@ -597,6 +597,43 @@ mod tests {
         }
     }
 
+    /// `with_cwd` must be *live*, not dormant: setting the active task cwd
+    /// re-baselines relative filesystem-path resolution to it, and the worker
+    /// calls it for every dispatch (`run_job_with_engine`). This proves it by
+    /// showing the same relative `read_file` fails while `cwd` is unset
+    /// (resolved against the workspace root) and succeeds once `cwd` points at
+    /// the subdirectory that actually holds the file.
+    #[tokio::test]
+    async fn with_cwd_rebases_relative_reads() {
+        let ws = temp_workspace();
+        let sub = ws.join("sub");
+        std::fs::create_dir_all(&sub).unwrap();
+        std::fs::write(sub.join("marker.txt"), "hello-cwd\n").unwrap();
+
+        let executor = CompositeExecutor::new(&ws, None).expect("failed to create executor");
+
+        // Unset cwd: a relative path resolves against the workspace root,
+        // where `marker.txt` does not exist, so the read is refused.
+        let before = executor.execute("read_file", r#"{"path":"marker.txt"}"#).await;
+        assert!(
+            matches!(&before, Err(ToolError::Execute { .. })),
+            "expected read_file to fail with cwd unset (resolves to {}): {before:?}",
+            ws.display()
+        );
+
+        // Live cwd: the same relative read now resolves against the subdirectory
+        // and returns the file. Proves the worker's `with_cwd` call is effective.
+        let executor = executor.with_cwd(sub);
+        let after = executor.execute("read_file", r#"{"path":"marker.txt"}"#).await;
+        match after {
+            Ok(out) => assert!(
+                out.text.contains("hello-cwd"),
+                "with_cwd must make the relative read resolve into the cwd: {out:?}"
+            ),
+            Err(e) => panic!("with_cwd must make the relative read succeed: {e:?}"),
+        }
+    }
+
     #[tokio::test]
     async fn composite_executor_executes_fs_and_bash() {
         let ws = temp_workspace();
