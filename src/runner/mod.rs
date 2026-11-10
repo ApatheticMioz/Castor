@@ -572,6 +572,15 @@ pub fn spill_tool_output(
 
     match fs::write(&file_path, output) {
         Ok(()) => {
+            // Report the *canonical* location so the pointer is a guaranteed
+            // read target: `scratch_root` (the state dir) is frequently a
+            // symlink (e.g. WSL's `/home/apath/.castor ->
+            // /mnt/c/Users/apath/.castor`), and the sandbox compares against
+            // the canonical read root. Canonicalizing the written path (falling
+            // back to the lexical path if resolution fails) keeps the printed
+            // hint and the `tool_output_spilled` event on the one spelling
+            // `read_file` will accept.
+            let reported = dunce::canonicalize(&file_path).unwrap_or(file_path);
             let head: String = output.chars().take(1024).collect();
             let tail: String = output
                 .chars()
@@ -589,17 +598,17 @@ Full payload saved to: {}]\n\n\
 ... [{elided} bytes elided] ...\n\
 --- Tail preview (last 1024 bytes) ---\n{tail}\n\n\
 Hint: use read_file with start_line/end_line or search_code to inspect specific regions of {}.",
-                file_path.display(),
-                file_path.display()
+                reported.display(),
+                reported.display()
             );
-            (pointer, Some((bytes, file_path)))
+            (pointer, Some((bytes, reported)))
         }
         Err(e) => {
             let head: String = output.chars().take(2048).collect();
+            let elided = bytes.saturating_sub(head.len());
             let truncated = format!(
                 "[ToolOutputSpillError: could not write to {}: {e}. Payload truncated from {bytes} bytes]\n\n{head}\n\n... [remaining {elided} bytes truncated] ...",
-                file_path.display(),
-                elided = bytes.saturating_sub(head.len())
+                file_path.display()
             );
             (truncated, None)
         }

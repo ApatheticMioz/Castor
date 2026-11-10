@@ -72,25 +72,66 @@ pub fn resolve_workspace_root(root: &Path) -> Result<PathBuf, SandboxError> {
     })
 }
 
+/// Whether `path` is lexically inside (or equal to) `root`.
+///
+/// The primary check is an exact prefix match. On case-insensitive stores —
+/// Windows (NTFS) and WSL's `/mnt/[a-z]` drvfs/drive mounts, where
+/// `d:\` ≡ `D:\` and `/mnt/c/Users/Apath` ≡ `/mnt/c/Users/apath` — a
+/// component-boundary-aware case-insensitive prefix check is applied so a
+/// canonically-cased allowed root compares consistently against a
+/// differently-cased spelling of the *same* location. On Windows Rust's
+/// `strip_prefix` is already case-insensitive (so the primary check usually
+/// suffices); on WSL/Linux `strip_prefix` is byte-wise, so the fallback is
+/// what makes a drive-mounted root match regardless of casing.
 fn is_within(path: &Path, root: &Path) -> bool {
     if path.strip_prefix(root).is_ok() {
         return true;
     }
-    #[cfg(windows)]
+    #[cfg(any(windows, target_os = "linux"))]
     {
-        let p_str = path
-            .to_string_lossy()
-            .replace('/', "\\")
-            .to_ascii_lowercase();
-        let r_str = root
-            .to_string_lossy()
-            .replace('/', "\\")
-            .to_ascii_lowercase();
-        if p_str == r_str || p_str.starts_with(&format!("{r_str}\\")) {
-            return true;
+        let p_ci = case_insensitive_form(path);
+        let r_ci = case_insensitive_form(root);
+        // Restrict the Windows-style case-insensitive matching on Linux to
+        // WSL drive mounts so a bare (case-sensitive) Linux filesystem is
+        // never over-permissive; on Windows the matching always applies.
+        let wsl_drive = is_wsl_drive_prefix(&r_ci) || is_wsl_drive_prefix(&p_ci);
+        if wsl_drive || cfg!(windows) {
+            let r_trim = r_ci.trim_end_matches('/');
+            if p_ci == r_ci || p_ci.starts_with(&format!("{r_trim}/")) {
+                return true;
+            }
         }
     }
     false
+}
+
+/// Forward-slash, lowercased form of a path (Windows separators normalized to
+/// `/` first).
+#[cfg(any(windows, target_os = "linux"))]
+fn case_insensitive_form(p: &Path) -> String {
+    let s = p.to_string_lossy();
+    #[cfg(windows)]
+    {
+        s.replace('\\', "/").to_ascii_lowercase()
+    }
+    #[cfg(not(windows))]
+    {
+        s.to_ascii_lowercase()
+    }
+}
+
+/// Whether a lowercased, forward-slash path is the root of a WSL drive mount:
+/// `/mnt/<single-lowercase-letter>` or `/mnt/<letter>/...`.
+#[cfg(any(windows, target_os = "linux"))]
+fn is_wsl_drive_prefix(s: &str) -> bool {
+    let Some(rest) = s.strip_prefix("/mnt/") else {
+        return false;
+    };
+    if rest.is_empty() {
+        return false;
+    }
+    rest.as_bytes()[0].is_ascii_lowercase()
+        && (rest.len() == 1 || rest.as_bytes()[1] == b'/')
 }
 
 /// Layer 2: refuse symlink escapes. An existing target must canonicalize
@@ -293,6 +334,47 @@ fn canonical_or_self(p: &Path) -> PathBuf {
     dunce::canonicalize(p).unwrap_or_else(|_| p.to_path_buf())
 }
 
+/// Resolve `p` to its real (symlink/junction-dereferenced) location, even when
+/// `p` itself does not yet exist.
+///
+/// When `p` exists, the whole chain is canonicalized. When `p` does not exist
+/// but some ancestor does, the nearest existing ancestor is canonicalized and
+/// the missing tail is re-appended. This is what makes a *symlinked allowed
+/// root* (e.g. WSL's `/home/apath/.castor -> /mnt/c/Users/apath/.castor`) and
+/// any file beneath it — including a spill file the runner just created or a
+/// new file the model is about to write — resolve to the same canonical
+/// location the allowed roots use, so containment checks compare like-for-like
+/// instead of mismatching a symlink spelling against a canonical root.
+fn canonical_resolve(p: &Path) -> PathBuf {
+    if p.exists() {
+        return canonical_or_self(p);
+    }
+    // Walk up to the nearest existing ancestor, collecting the missing tail.
+    // Each step strictly shortens the path, so the loop terminates at the
+    // filesystem root (or the first existing ancestor).
+    let mut tail: Vec<&Path> = Vec::new();
+    let mut cur = p;
+    loop {
+        match cur.parent() {
+            Some(parent) if !parent.as_os_str().is_empty() && parent != cur => {
+                if let Some(name) = cur.file_name() {
+                    tail.push(Path::new(name));
+                }
+                cur = parent;
+                if cur.exists() {
+                    break;
+                }
+            }
+            _ => break,
+        }
+    }
+    let mut out = canonical_or_self(cur);
+    for seg in tail.iter().rev() {
+        out = out.join(seg);
+    }
+    out
+}
+
 fn dedupe(v: Vec<PathBuf>) -> Vec<PathBuf> {
     let mut out = Vec::new();
     for p in v {
@@ -356,12 +438,28 @@ impl SandboxPolicy {
     /// - **write roots**: canonicalized `workspace_root` + `std::env::temp_dir()`
     /// - **read roots**: canonicalized `workspace_root` + optional `state_dir`
     ///   (`~/.castor`) + (on Linux) `/usr`, `/bin`, `/lib`, `/etc`
+    ///
+    /// The `state_dir` read root is canonicalized through the OS symlink layer
+    /// (and so is its `.scratch/` subdirectory) so that both the state dir and
+    /// the spill files the runner writes under it are *unconditionally* valid
+    /// read targets: a `~/.castor` that is a symlink (e.g. WSL's
+    /// `/home/apath/.castor -> /mnt/c/Users/apath/.castor`) resolves to the
+    /// same canonical location the spill writer reports, and reads through
+    /// either spelling succeed.
     pub fn for_workspace(root: &Path, state_dir: Option<&Path>) -> Self {
         let ws = canonical_or_self(root);
-        let write_roots = vec![ws.clone(), std::env::temp_dir()];
+        let write_roots = vec![ws.clone(), canonical_or_self(&std::env::temp_dir())];
         let mut read_roots = vec![ws];
         if let Some(sd) = state_dir {
-            read_roots.push(canonical_or_self(sd));
+            let sd_c = canonical_or_self(sd);
+            // The `.scratch/` spill directory is always a valid read target:
+            // canonicalize it (when it exists) so a symlinked state dir never
+            // splits the spill path from its read root.
+            let scratch = sd_c.join(".scratch");
+            if scratch.is_dir() {
+                read_roots.push(canonical_or_self(&scratch));
+            }
+            read_roots.push(sd_c);
         }
         #[cfg(target_os = "linux")]
         for p in ["/usr", "/bin", "/lib", "/etc"] {
@@ -411,7 +509,8 @@ impl SandboxPolicy {
         join(&sub)
     }
 
-    /// Classify a raw path string against the policy.
+    /// Classify a raw path string against the policy, resolving any *relative*
+    /// path against the primary write root (the workspace).
     ///
     /// Order of operations (preserving the 5-layer invariants, generalized to the
     /// root sets):
@@ -419,12 +518,15 @@ impl SandboxPolicy {
     /// 2. tilde expansion to canonical `$HOME`,
     /// 3. backslash→slash normalization + lexical `.`/`..` collapse (layer 4),
     /// 4. reserved-device-name refusal (layer 4),
-    /// 5. lexical membership: a path whose *lexical* form is outside every root is
-    ///    an out-of-tree [`SandboxError::PathEscape`] (layer 3, checked first);
-    /// 6. symlink containment: if the path exists and its canonical (symlink-
-    ///    resolved) location falls outside every root, it is a
-    ///    [`SandboxError::SymlinkEscape`] (layer 2, generalized);
-    /// 7. the granted class reflects the *canonical* location — `ReadWrite` if
+    /// 5. canonical membership: the path's *real* (symlink-dereferenced)
+    ///    location — resolved through the nearest existing ancestor when the
+    ///    path does not yet exist — must land inside a root. If it does not:
+    ///    a [`SandboxError::SymlinkEscape`] when the lexical spelling was
+    ///    in-tree (the link points outside), else a plain out-of-tree
+    ///    [`SandboxError::PathEscape`]. This ordering means a symlinked
+    ///    allowed root (and anything beneath it) always resolves consistently,
+    ///    while a symlink that escapes the roots is still refused;
+    /// 6. the granted class reflects the *canonical* location — `ReadWrite` if
     ///    under a write root, else `ReadOnly` if under a read root — so a symlink
     ///    from a write root into a read-only root is treated as read-only, never
     ///    read-write.
@@ -432,6 +534,24 @@ impl SandboxPolicy {
     /// The returned [`ResolvedPath::path`] is the lexically-normalized path (stable
     /// and printable); its `class` is derived from the canonical location.
     pub fn resolve(&self, input: &str) -> Result<ResolvedPath, SandboxError> {
+        self.resolve_with_base(input, None)
+    }
+
+    /// Classify `input` against the policy, resolving any *relative* path
+    /// against `base` instead of the primary write root (the workspace).
+    ///
+    /// The filesystem tools use this to honor the active task's working
+    /// directory (`cwd`): a relative `path` is resolved against the cwd (which
+    /// may be a subdirectory of the workspace, or the workspace root itself
+    /// when no cwd is set) before containment is checked against the roots.
+    /// `base` is lexical-normalized here; the caller is responsible for
+    /// canonicalizing it and, if it must itself be an allowed location, for
+    /// validating that separately.
+    pub fn resolve_with_base(
+        &self,
+        input: &str,
+        base: Option<&Path>,
+    ) -> Result<ResolvedPath, SandboxError> {
         if input.contains('\0') {
             return Err(SandboxError::NullByte(
                 "NullByteError: Path contains prohibited null byte character".into(),
@@ -439,9 +559,12 @@ impl SandboxPolicy {
         }
         let expanded = self.expand_tilde_prefix(input);
         let posix = expanded.replace('\\', "/");
-        // A relative path is resolved against the primary write root (the
-        // workspace); an absolute path is used as-is.
-        let base = self.write_roots.first().cloned().unwrap_or_default();
+        // A relative path is resolved against the explicit base (the active
+        // task cwd) when one is supplied, otherwise the primary write root
+        // (the workspace). An absolute path is used as-is.
+        let base = base
+            .map(|b| normalize_lexical(b))
+            .unwrap_or_else(|| self.write_roots.first().cloned().unwrap_or_default());
         let p = if Path::new(&posix).is_absolute() {
             PathBuf::from(posix)
         } else {
@@ -457,31 +580,34 @@ impl SandboxPolicy {
             )));
         }
 
-        // (5) Lexical out-of-tree check first — a plainly-absolute path outside
-        // every root is a PathEscape (layer 3), not a symlink error.
+        // Lexical membership: is the (symlink-free) spelling inside a root?
         let lexical_in_write = self.write_roots.iter().any(|r| is_within(&normalized, r));
         let lexical_in_read = self.read_roots.iter().any(|r| is_within(&normalized, r));
-        if !lexical_in_write && !lexical_in_read {
-            return Err(SandboxError::PathEscape(format!(
-                "PathEscapeError: Access denied. Path '{}' escapes all allowed roots",
-                input
-            )));
-        }
 
-        // (6) Symlink containment: resolve to the real location; it must itself
-        // land inside a root or the symlink escapes the sandbox.
-        let real = if normalized.exists() {
-            dunce::canonicalize(&normalized).unwrap_or(normalized.clone())
-        } else {
-            normalized.clone()
-        };
+        // (6) Symlink containment: resolve to the real location — through the
+        // nearest existing ancestor when the path itself does not yet exist —
+        // so a symlinked allowed root (e.g. `/home/apath/.castor ->
+        // /mnt/c/Users/apath/.castor`) and any file beneath it compare against
+        // the roots by their *real* location. If the real location lands in
+        // neither root set, it escapes the sandbox.
+        let real = canonical_resolve(&normalized);
         let real_in_write = self.write_roots.iter().any(|r| is_within(&real, r));
         let real_in_read = self.read_roots.iter().any(|r| is_within(&real, r));
         if !real_in_write && !real_in_read {
-            return Err(SandboxError::SymlinkEscape(format!(
-                "SymlinkEscapeError: Path '{}' resolves to '{}' escaping all allowed roots",
-                normalized.display(),
-                real.display()
+            // The lexical spelling is in-tree but the *real* location is not:
+            // a symlink escape (the target points outside every allowed root).
+            if lexical_in_write || lexical_in_read {
+                return Err(SandboxError::SymlinkEscape(format!(
+                    "SymlinkEscapeError: Path '{}' resolves to '{}' escaping all allowed roots",
+                    normalized.display(),
+                    real.display()
+                )));
+            }
+            // Lexically out of every root (and its real location is too): a
+            // plain out-of-tree path, not a symlink error.
+            return Err(SandboxError::PathEscape(format!(
+                "PathEscapeError: Access denied. Path '{}' escapes all allowed roots",
+                input
             )));
         }
 

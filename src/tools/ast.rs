@@ -331,13 +331,94 @@ fn replace_in_memory(
     Ok((src, edits.len()))
 }
 
+/// Produce an HTML-validation copy of `content` in which *bare* ampersands
+/// (those not already part of a valid character reference) are escaped to
+/// `&amp;`.
+///
+/// The grammar this exists for is [`SupportLang::Html`]: the tree-sitter HTML
+/// scanner treats an `&` not followed by a valid character reference (e.g.
+/// `&amp;`, `&#65;`, `&nbsp;`) as malformed and recovers an `ERROR` node. That
+/// is a real validation concern, but *bare* ampersands are pervasive and valid
+/// in real-world HTML (e.g. the headline "Model Rationale & Intent"), so
+/// escaping them here lets the gate accept HTML that a browser would parse
+/// fine while still flagging a genuinely broken reference.
+///
+/// A character reference is `&[name];` (1-30 name chars: letters, digits, `_`)
+/// or `&#digits;` / `&#x hex;`. References *without* a closing `;` (e.g.
+/// `&amp`) and a trailing, incomplete `&` are NOT treated as valid, so both
+/// are escaped. The escape is idempotent: a `&amp;` already in the text stays
+/// `&amp;` (its `&` is a valid reference and is left alone), so it never
+/// double-escapes to `&amp;amp;`.
+pub fn html_validation_text(content: &str) -> String {
+    let bytes = content.as_bytes();
+    let n = bytes.len();
+
+    // Returns the index just past the valid character reference starting at
+    // `i` (`bytes[i] == b'&'`), or `None` when the `&` is not the start of a
+    // valid reference (so it must be escaped).
+    fn reference_end(bytes: &[u8], i: usize) -> Option<usize> {
+        let n = bytes.len();
+        if matches!(bytes.get(i + 1), Some(b'#')) {
+            // Numeric reference: `&#digits;` or `&#x hex;`.
+            let mut k = i + 2;
+            let hex = matches!(bytes.get(k), Some(b'x') | Some(b'X'));
+            if hex {
+                k += 1;
+            }
+            let start = k;
+            while k < n && (if hex { bytes[k].is_ascii_hexdigit() } else { bytes[k].is_ascii_digit() }) {
+                k += 1;
+            }
+            (k > start && matches!(bytes.get(k), Some(b';'))).then_some(k + 1)
+        } else {
+            // Named reference: `&[1-30 alphanumeric / '_'];`.
+            let mut k = i + 1;
+            while k < n && (bytes[k].is_ascii_alphanumeric() || bytes[k] == b'_') {
+                k += 1;
+            }
+            let name_len = k - i - 1;
+            ((1..=30).contains(&name_len) && matches!(bytes.get(k), Some(b';'))).then_some(k + 1)
+        }
+    }
+
+    let mut out = String::with_capacity(content.len());
+    let mut i = 0usize;
+    while i < n {
+        if bytes[i] != b'&' {
+            out.push(bytes[i] as char);
+            i += 1;
+            continue;
+        }
+        match reference_end(bytes, i) {
+            Some(end) => {
+                out.push_str(&content[i..end]);
+                i = end;
+            }
+            None => {
+                out.push_str("&amp;");
+                i += 1;
+            }
+        }
+    }
+    out
+}
+
 /// Syntax gate: reparse `content` and report whether any ERROR-kind node is
 /// present (tree-sitter error recovery). Presence means the content is
 /// malformed. Used by [`ast_replace`] for its rollback decision and by
 /// [`validate_file_syntax`] to gate `edit_file` writes when the `ast` feature
 /// is enabled.
+///
+/// For HTML, the content is validated through [`html_validation_text`], which
+/// escapes bare `&` to `&amp;` first, so valid HTML containing an unescaped
+/// ampersand is not rejected as malformed.
 pub fn syntax_gate(content: &str, lang: SupportLang) -> bool {
-    let doc = lang.ast_grep(content);
+    let source = if lang == SupportLang::Html {
+        html_validation_text(content)
+    } else {
+        content.to_string()
+    };
+    let doc = lang.ast_grep(&source);
     let mut has_error = false;
     walk_for_errors(&doc.root(), &mut has_error);
     has_error
@@ -773,5 +854,80 @@ mod tests {
         let path = std::path::Path::new("notes.txt");
         let content = "let x = ;;;\n";
         assert!(validate_file_syntax(path, content).is_ok());
+    }
+
+    #[test]
+    fn infer_lang_by_extension_maps_html() {
+        // `.html` maps to the HTML grammar (and `.htm`/`.xhtml` do not), which
+        // is what makes the bare-`&` escape below apply to HTML files only.
+        assert_eq!(
+            infer_lang_by_extension(std::path::Path::new("a.html")),
+            Some(SupportLang::Html)
+        );
+    }
+
+    #[test]
+    fn html_validation_text_escapes_bare_ampersand_only() {
+        // A bare `&` (not part of a character reference) becomes `&amp;`.
+        assert_eq!(
+            html_validation_text("Model Rationale & Intent"),
+            "Model Rationale &amp; Intent"
+        );
+        // Multiple bare `&` are all escaped.
+        assert_eq!(
+            html_validation_text("A & B & C"),
+            "A &amp; B &amp; C"
+        );
+    }
+
+    #[test]
+    fn html_validation_text_preserves_valid_references() {
+        // Existing character references (named and numeric) are left intact, so
+        // the escape is idempotent and never double-escapes a valid reference.
+        assert_eq!(
+            html_validation_text("A &amp; B"),
+            "A &amp; B"
+        );
+        assert_eq!(
+            html_validation_text("C &nbsp; &copy;"),
+            "C &nbsp; &copy;"
+        );
+        assert_eq!(
+            html_validation_text("D &#65; &#x41;"),
+            "D &#65; &#x41;"
+        );
+    }
+
+    #[test]
+    fn validate_file_syntax_accepts_valid_html_with_bare_ampersand() {
+        // The motivating case: valid HTML with a bare `&` (no character
+        // reference) must NOT be rejected as malformed. The gate escapes the
+        // bare `&` before parsing, so the HTML grammar sees a valid reference.
+        let path = std::path::Path::new("index.html");
+        let content = "<!DOCTYPE html>\n<html><head><title>T</title></head>\
+                       <body><h1>Model Rationale &amp; Intent</h1>\
+                       <p>Model Rationale &amp; Intent</p></body></html>\n";
+        assert!(validate_file_syntax(path, content).is_ok());
+
+        // The exact headline from the bug report, with a *bare* ampersand in
+        // the source, is what this fix is for.
+        let bare = "<!DOCTYPE html>\n<html><body><h1>Model Rationale & Intent</h1></body></html>\n";
+        assert!(
+            validate_file_syntax(path, bare).is_ok(),
+            "a bare & in valid HTML must not be a SyntaxFailure"
+        );
+    }
+
+    #[test]
+    fn validate_file_syntax_still_rejects_invalid_html() {
+        // Genuinely malformed HTML must still fail the gate — the bare-`&`
+        // escape must not mask a real structural error. `<<<` is a construct the
+        // tree-sitter HTML grammar recovers as an ERROR node (verified against
+        // the grammar; note that a bare `&` in *text* is accepted, so the
+        // escape cannot turn a valid doc into an invalid one or vice versa).
+        let path = std::path::Path::new("bad.html");
+        let content = "<<<\n";
+        let err = validate_file_syntax(path, content).unwrap_err();
+        assert!(matches!(err, AstError::SyntaxFailure(_)), "{err}");
     }
 }

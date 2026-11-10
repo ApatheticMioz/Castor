@@ -35,6 +35,10 @@ use crate::runner::{ToolError, ToolExecutor, ToolOutcome};
 /// The aggregate tool executor providing all built-in capabilities and extensions.
 pub struct CompositeExecutor {
     workspace_root: PathBuf,
+    /// The active task's working directory (canonicalized). Relative filesystem
+    /// paths and the `bash` child's cwd resolve against this; when unset, they
+    /// fall back to [`Self::workspace_root`].
+    cwd: Option<PathBuf>,
     fs: FsExecutor,
     web: WebClient,
     #[cfg(feature = "paper")]
@@ -77,12 +81,31 @@ impl CompositeExecutor {
         Ok(Self {
             fs,
             workspace_root: root.clone(),
+            cwd: None,
             web,
             #[cfg(feature = "paper")]
             paper: PaperClient::with_credentials(paper_email, paper_key),
             brave_api_key,
             extensions,
         })
+    }
+
+    /// Set the active task's working directory (canonicalized through the OS
+    /// symlink layer). When set, relative `read_file` / `write_file` /
+    /// `edit_file` / `list_dir` / `search_code` paths resolve against it, and
+    /// the `bash` tool spawns its child in it. When unset, all of these fall
+    /// back to the workspace root — so an omitted `cwd` preserves the prior
+    /// behavior exactly.
+    ///
+    /// The value is canonicalized so a symlinked cwd (e.g. WSL's
+    /// `/home/apath -> /mnt/c/Users/apath`) and a differently-cased WSL
+    /// `/mnt/[a-z]` mount both compare consistently against the sandbox's
+    /// allowed roots and report a stable, printable path to the model.
+    pub fn with_cwd(mut self, cwd: PathBuf) -> Self {
+        let canonical = dunce::canonicalize(&cwd).unwrap_or_else(|_| cwd.clone());
+        self.fs = self.fs.clone().with_base(Some(canonical.clone()));
+        self.cwd = Some(canonical);
+        self
     }
 
     /// Set an explicit WebClient (useful for testing with mock base URLs).
@@ -317,7 +340,15 @@ impl ToolExecutor for CompositeExecutor {
                     .unwrap_or(30_000);
                 let timeout = Duration::from_millis(timeout_ms);
 
-                match shell::run_async(cmd, &self.workspace_root, timeout).await {
+                // The active task cwd (canonicalized by `with_cwd`) is the
+                // child's working directory when set; an unset cwd falls back
+                // to the workspace root, so an omitted cwd is a no-op.
+                let cwd = self
+                    .cwd
+                    .as_ref()
+                    .map(|p| p.as_path())
+                    .unwrap_or(&self.workspace_root);
+                match shell::run_async(cmd, cwd, timeout).await {
                     Ok(out) => {
                         let mut text = String::new();
                         if out.exit_code != 0 {

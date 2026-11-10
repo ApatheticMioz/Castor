@@ -33,8 +33,17 @@ pub fn base64_encode(data: &[u8]) -> String {
     BASE64_STANDARD.encode(data)
 }
 
+/// The filesystem tool executor. Cheaply [`Clone`]able because both fields are
+/// value types: [`SandboxPolicy`] is a plain data holder (root lists + an
+/// `AccessClass`), and the resolution base is an `Option<PathBuf>`. Cloning is
+/// what lets [`super::CompositeExecutor::with_cwd`] hand a re-baselined copy to
+/// the executor without touching the caller's.
+#[derive(Clone)]
 pub struct FsExecutor {
     policy: SandboxPolicy,
+    /// Relative-path resolution base (the active task cwd). `None` = the
+    /// workspace root (the policy's primary write root).
+    base: Option<PathBuf>,
 }
 
 impl FsExecutor {
@@ -43,14 +52,31 @@ impl FsExecutor {
     /// touched.
     pub fn new(root: &Path) -> Result<Self, FsError> {
         let policy = SandboxPolicy::workspace_only(root);
-        Ok(Self { policy })
+        Ok(Self {
+            policy,
+            base: None,
+        })
     }
 
     /// Construct with an explicit [`SandboxPolicy`] (e.g. the production policy
     /// built by [`crate::tools::CompositeExecutor::with_config`], which adds the
     /// read-only state dir and, on Linux, the system read roots).
     pub fn with_policy(policy: SandboxPolicy) -> Self {
-        Self { policy }
+        Self {
+            policy,
+            base: None,
+        }
+    }
+
+    /// Set the base directory against which *relative* paths are resolved (the
+    /// active task's working directory). Absolute paths are unaffected and are
+    /// still containment-checked against the policy's roots. A base that is
+    /// outside the allowed roots makes any relative path it resolves to fall
+    /// out of the sandbox, so a caller that needs the base to be an allowed
+    /// location must validate it separately.
+    pub fn with_base(mut self, base: Option<PathBuf>) -> Self {
+        self.base = base;
+        self
     }
 
     /// Access the underlying [`SandboxPolicy`] (used by the filesystem and
@@ -59,14 +85,19 @@ impl FsExecutor {
         &self.policy
     }
 
-    /// The primary write root (the workspace), used as the cwd and as the base
-    /// for relative-path resolution / relative display.
+    /// The base directory for relative-path resolution and relative display:
+    /// the active task cwd when one is set, otherwise the primary write root
+    /// (the workspace).
     fn root(&self) -> &Path {
-        self.policy
-            .write_roots()
-            .first()
-            .map(|p| p.as_path())
-            .unwrap_or_else(|| Path::new("."))
+        self.base
+            .as_deref()
+            .unwrap_or_else(|| {
+                self.policy
+                    .write_roots()
+                    .first()
+                    .map(|p| p.as_path())
+                    .unwrap_or_else(|| Path::new("."))
+            })
     }
 
     /// Resolve `input` for a **read** operation (RW ∪ RO roots allowed).
@@ -80,7 +111,7 @@ impl FsExecutor {
     }
 
     fn resolve_with(&self, input: &str, required: AccessClass) -> Result<PathBuf, FsError> {
-        let resolved = self.policy.resolve(input)?;
+        let resolved = self.policy.resolve_with_base(input, self.base.as_deref())?;
         let ok = match required {
             AccessClass::ReadWrite => resolved.class == AccessClass::ReadWrite,
             AccessClass::ReadOnly => resolved.permits_read(),
