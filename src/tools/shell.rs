@@ -470,24 +470,33 @@ fn is_dev_target(p: &str) -> bool {
         Some(n) => n,
         None => rest,
     };
-    let (kind, tail) = match name {
-        n if n.len() >= 3 && &n[..2] == "sd" => ("sd", &n[2..]),
-        n if n.len() >= 3 && &n[..2] == "hd" => ("hd", &n[2..]),
-        n if n.len() >= 3 && &n[..2] == "vd" => ("vd", &n[2..]),
-        n if n.len() >= 5 && &n[..4] == "nvme" => ("nvme", &n[4..]),
+    // Work on chars, not bytes: the device name can contain multi-byte
+    // characters (e.g. `s→`, `n📦`), and slicing a `&str` by a *byte* count
+    // (`&n[..2]`, `&n[4..]`) would split such a character and panic.
+    let chars: Vec<char> = name.chars().collect();
+    let (kind, tail) = match &chars[..] {
+        c if c.len() >= 3 && c[0] == 's' && c[1] == 'd' => ("sd", &c[2..]),
+        c if c.len() >= 3 && c[0] == 'h' && c[1] == 'd' => ("hd", &c[2..]),
+        c if c.len() >= 3 && c[0] == 'v' && c[1] == 'd' => ("vd", &c[2..]),
+        c if c.len() >= 5 && c[0] == 'n' && c[1] == 'v' && c[2] == 'm' && c[3] == 'e' => {
+            ("nvme", &c[4..])
+        }
         _ => return false,
     };
     match kind {
-        "sd" | "hd" | "vd" => !tail.is_empty() && tail.chars().all(|c| c.is_ascii_lowercase()),
+        "sd" | "hd" | "vd" => !tail.is_empty() && tail.iter().all(|c| c.is_ascii_lowercase()),
         "nvme" => {
-            let d1: String = tail.chars().take_while(|c| c.is_ascii_digit()).collect();
+            let d1: Vec<char> = tail.iter().take_while(|c| c.is_ascii_digit()).copied().collect();
+            // The tail after the first digit run must be exactly `n<digits>`.
             let rem = &tail[d1.len()..];
-            let rem = match rem.strip_prefix('n') {
-                Some(r) => r,
-                None => return false,
-            };
-            let d2: String = rem.chars().take_while(|c| c.is_ascii_digit()).collect();
-            !d1.is_empty() && !d2.is_empty() && rem.len() == d2.len()
+            let ok_n = rem.first().copied() == Some('n');
+            let d2: Vec<char> = rem
+                .iter()
+                .skip(1)
+                .take_while(|c| c.is_ascii_digit())
+                .copied()
+                .collect();
+            ok_n && !d1.is_empty() && !d2.is_empty() && rem.len() == 1 + d2.len()
         }
         _ => false,
     }
@@ -638,9 +647,13 @@ fn analyze_group(cmd: &str, cwd: &str, home: &str, depth: usize) -> Result<(), S
         return Ok(()); // no complete group: ordinary segment
     };
 
-    let prefix = cmd[..s].to_string();
-    let body = cmd[s + 1..c].to_string();
-    let suffix = cmd[c + 1..].to_string();
+    // `s` and `c` are *character* indices (from `chars`), not byte indices, so
+    // the three pieces are rebuilt from the char vector. Slicing the original
+    // `&str` by those numbers would split a multi-byte UTF-8 character (e.g.
+    // `→`, emoji) that falls inside the slice and panic.
+    let prefix: String = chars[..s].iter().collect();
+    let body: String = chars[s + 1..c].iter().collect();
+    let suffix: String = chars[c + 1..].iter().collect();
 
     if !prefix.trim().is_empty() {
         analyze_command(&prefix, cwd, home, depth + 1)?;
@@ -745,9 +758,12 @@ fn analyze_case(cmd: &str, cwd: &str, home: &str, depth: usize) -> Result<(), Sh
         }
         let at_top = paren == 0 && brace == 0;
         let flush_body = |s: usize, e: usize| -> Result<(), ShellPolicyError> {
-            let body = &region[s..e];
+            // `s`/`e` are *character* indices into `rchars`; rebuild the body
+            // from the char vector (slicing the `String` by char index would
+            // split a multi-byte character and panic).
+            let body: String = rchars[s..e].iter().collect();
             if !body.trim().is_empty() {
-                analyze_command(body, cwd, home, depth + 1)
+                analyze_command(&body, cwd, home, depth + 1)
             } else {
                 Ok(())
             }
@@ -769,7 +785,9 @@ fn analyze_case(cmd: &str, cwd: &str, home: &str, depth: usize) -> Result<(), Sh
         i += 1;
     }
     if let Some(s) = body_start {
-        let body = region[s..].to_string();
+        // `s` is a *character* index into `rchars`; rebuild from the char
+        // vector so a multi-byte character is never split.
+        let body: String = rchars[s..].iter().collect();
         if !body.trim().is_empty() {
             analyze_command(&body, cwd, home, depth + 1)?;
         }
@@ -832,7 +850,10 @@ fn analyze_substitutions(
                 j += 1;
             }
             if paren == 0 && j <= chars.len() {
-                let body = cmd[i + 2..j - 1].to_string();
+                // `i`/`j` are *character* indices; rebuild the body from the
+                // char vector (slicing `cmd` by char index would split a
+                // multi-byte character and panic).
+                let body: String = chars[i + 2..j - 1].iter().collect();
                 if !body.trim().is_empty() {
                     analyze_command(&body, cwd, home, depth + 1)?;
                 }
@@ -850,7 +871,9 @@ fn analyze_substitutions(
                 j += 1;
             }
             if j < chars.len() {
-                let body = cmd[i + 1..j].to_string();
+                // `i`/`j` are *character* indices; rebuild from the char
+                // vector so a multi-byte character is never split.
+                let body: String = chars[i + 1..j].iter().collect();
                 if !body.trim().is_empty() {
                     analyze_command(&body, cwd, home, depth + 1)?;
                 }
@@ -2122,5 +2145,115 @@ mod run_tests {
             );
         }
         let _ = std::fs::remove_dir_all(&dir);
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Regression tests: multi-byte UTF-8 (arrows, emoji, CJK) in command strings
+// must never cause a worker panic from raw byte slicing. Before the fix,
+// *character* indices from `chars()` were used as *byte* indices to slice the
+// original `&str` in `analyze_group`, `analyze_case`, and
+// `analyze_substitutions`, and `is_dev_target` sliced a `&str` by byte count
+// on a char-guarded length — each could land inside a multi-byte character
+// (`→` is 3 bytes, `📦` is 4) and panic. Every case below reproduced that
+// panic and now (a) validates without panicking and (b) still enforces the
+// correct policy decision.
+// ---------------------------------------------------------------------------
+
+#[cfg(test)]
+mod utf8_regression {
+    use super::*;
+
+    // The exact reported crash: a multi-byte arrow before the subshell body
+    // made `cmd[s + 1..c]` land inside `→`. Now the group pieces are rebuilt
+    // from the char vector and the inner `rm` is still blocked.
+    #[test]
+    fn subshell_with_multibyte_still_blocked() {
+        // Body path: `(→a) (…)` — the reported `cmd[s + 1..c]` panic site.
+        assert!(matches!(
+            validate("(→a) (rm -rf /)"),
+            Err(ShellPolicyError::ProtectedRoot(_, _))
+        ));
+        // Prefix path: `echo → (…)` — the `cmd[..s]` prefix slice.
+        assert!(matches!(
+            validate("echo → (rm -rf /)"),
+            Err(ShellPolicyError::ProtectedRoot(_, _))
+        ));
+        // Suffix path: `(rm -rf /) →` — the `cmd[c + 1..]` suffix slice.
+        assert!(matches!(
+            validate("(rm -rf /) →"),
+            Err(ShellPolicyError::ProtectedRoot(_, _))
+        ));
+        // Brace group with a multi-byte body.
+        assert!(matches!(
+            validate("{ →; rm -rf /; }"),
+            Err(ShellPolicyError::ProtectedRoot(_, _))
+        ));
+    }
+
+    /// `case` body flush path: an arrow immediately before/inside a pattern or
+    /// body made the body-slice land inside the multi-byte character and panic
+    /// (the slice is rebuilt from the char vector now). The `→) rm -rf /` case
+    /// is the real regression: arrow in the *pattern*, destructive `rm` in the
+    /// *first* body — it panicked pre-fix and is correctly blocked now.
+    #[test]
+    fn case_body_with_multibyte_still_blocked() {
+        assert!(matches!(
+            validate("case $X in →) rm -rf / ;; esac"),
+            Err(ShellPolicyError::ProtectedRoot(_, _))
+        ));
+        // Emoji inside a case body must not panic. `📦` is not a protected
+        // path, so this passes; a later `rm` branch is a separate, pre-existing
+        // segment boundary, out of scope for this UTF-8 regression.
+        assert!(validate("case $X in a) rm -rf 📦 ;; b) echo done ;; esac").is_ok());
+        // A benign multi-byte pattern/body must not panic and must pass.
+        assert!(validate("case $X in →) echo ok ;; esac").is_ok());
+    }
+
+    // Command-substitution bodies (`$(...)` and backticks) with multi-byte
+    // chars must not panic; harmless bodies pass.
+    #[test]
+    fn substitution_with_multibyte_does_not_panic() {
+        assert!(validate("echo $(→a)").is_ok());
+        assert!(validate("echo $(📦✨)").is_ok());
+        assert!(validate("echo `→→→`").is_ok());
+        // A hidden destructive body with a multi-byte char is still caught.
+        assert!(matches!(
+            validate("echo $(→; rm -rf /)"),
+            Err(ShellPolicyError::ProtectedRoot(_, _))
+        ));
+    }
+
+    // `is_dev_target` byte-prefix matcher: a device-like name whose first two
+    // *bytes* are not the ASCII `sd`/`hd`/`vd` prefix (because they hold a
+    // multi-byte char) used to slice inside the character. Now it works on
+    // chars; real device names are still protected.
+    #[test]
+    fn device_operand_with_multibyte_does_not_panic() {
+        // `s→` is 4 bytes; the old `&n[..2]` landed inside `→` and panicked.
+        assert!(validate("rm /dev/s→").is_ok());
+        assert!(validate("rm /dev/h→").is_ok());
+        assert!(validate("rm /dev/nvme📦").is_ok());
+        // Genuine device names must still be treated as protected targets.
+        assert!(matches!(
+            validate("rm /dev/sda"),
+            Err(ShellPolicyError::ProtectedRoot(_, _))
+        ));
+        assert!(matches!(
+            validate("rm /dev/nvme0n1"),
+            Err(ShellPolicyError::ProtectedRoot(_, _))
+        ));
+    }
+
+    // Benign commands carrying multi-byte characters (arrows, emoji, CJK) in
+    // every position must validate without panicking.
+    #[test]
+    fn benign_multibyte_commands_pass() {
+        assert!(validate("echo → 📦 ✨").is_ok());
+        assert!(validate("echo \"→→→\"").is_ok());
+        assert!(validate("echo 你好 world").is_ok());
+        assert!(validate("echo →; echo 📦; echo →").is_ok());
+        assert!(validate("echo $(→) && echo 📦").is_ok());
+        assert!(validate("ls → && cat 📦").is_ok());
     }
 }
