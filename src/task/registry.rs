@@ -22,7 +22,7 @@ use serde::{Deserialize, Serialize};
 use tokio::sync::{Mutex, broadcast};
 
 use crate::state::StateDir;
-use crate::task::semaphore::pid_alive;
+use crate::task::semaphore::{pid_alive, TaskSemaphore};
 
 /// Hard cap on the elastic turn budget.
 pub const MAX_ELASTIC_TURNS: u32 = 200;
@@ -564,6 +564,23 @@ impl TaskRegistry {
         reaped
     }
 
+    /// Reap orphaned **slot** leases: delete any `<state>/tasks/slots/slot_N.json`
+    /// whose owner pid is dead (including zombies) or whose bound task has
+    /// reached a terminal state (completed / failed / cancelled).
+    ///
+    /// This is the zombie-slot reaper. A worker that dies (panic, kill, crash)
+    /// after marking its task terminal but before releasing its slot leaves the
+    /// lease file on disk; while that worker's pid still exists the plain
+    /// dead-owner check would not reclaim the slot, deadlocking every other
+    /// tenant. Checking the bound task's terminal state reclaims such slots
+    /// promptly. A live worker whose task is still active is never reaped, so a
+    /// healthy long-running task is never false-positived.
+    ///
+    /// Returns the number of slot leases removed. Idempotent.
+    pub async fn reap_slots(&self) -> usize {
+        TaskSemaphore::new(&self.state, 1).reap_slots()
+    }
+
     /// Extend the turn budget of an active task by `n` turns.
     ///
     /// Fails fast with [`RegistryError::NotFound`] if the task does not exist
@@ -904,6 +921,105 @@ mod tests {
 
         // Idempotent: a second pass reaps nothing new.
         assert_eq!(reg.reap_orphans_disk().await, 0, "a second boot pass must be a no-op");
+    }
+
+    /// The slot reaper must reclaim orphaned slot leases two ways:
+    /// (a) the bound task has reached a terminal state (a worker that died
+    /// after marking its task terminal but before releasing its slot), and
+    /// (b) the owner pid is dead. A live worker whose task is still active must
+    /// never be reclaimed.
+    #[tokio::test]
+    async fn reap_slots_reclaims_terminal_task_and_dead_owner_leases() {
+        use crate::task::semaphore::{Lease, TaskSemaphore};
+
+        let state = tmp_state();
+        let reg = TaskRegistry::new(&state);
+        let sem = TaskSemaphore::new(&state, 4);
+        let now = now_ms();
+        let me = std::process::id() as u32;
+        let dead = dead_pid();
+
+        // Create a real completed task (disk mirror present + terminal).
+        let done = reg.create("p", "/tmp", "s").await.unwrap();
+        let _ = reg
+            .transition(&done, TaskStatus::Executing, None)
+            .await
+            .unwrap();
+        let _ = reg
+            .transition(&done, TaskStatus::Completed, None)
+            .await
+            .unwrap();
+
+        // Slot 0: bound to a *terminal* task, owned by a LIVE pid (ourself).
+        // The dead-owner rule alone would NOT reclaim this, but the
+        // terminal-task rule must.
+        fs::write(
+            sem.slot_path(0),
+            serde_json::to_string(&Lease {
+                tenant: me,
+                task_id: done.clone(),
+                at: now,
+                hb: now,
+                context_tokens: 0,
+            })
+            .unwrap(),
+        )
+        .unwrap();
+
+        // Slot 1: bound to an *active* (executing) task, owned by a live pid.
+        // Must NOT be reclaimed (the live-worker invariant).
+        let active = reg.create("p", "/tmp", "s").await.unwrap();
+        let _ = reg
+            .transition(&active, TaskStatus::Executing, None)
+            .await
+            .unwrap();
+        let _ = reg.update(&active, |r| r.pid = Some(me)).await.unwrap();
+        fs::write(
+            sem.slot_path(1),
+            serde_json::to_string(&Lease {
+                tenant: me,
+                task_id: active.clone(),
+                at: now,
+                hb: now,
+                context_tokens: 0,
+            })
+            .unwrap(),
+        )
+        .unwrap();
+
+        // Slot 2: bound to a *nonexistent* task, owned by a DEAD pid.
+        // The dead-owner rule must reclaim it (and the missing task record
+        // must not be mistaken for terminal).
+        fs::write(
+            sem.slot_path(2),
+            serde_json::to_string(&Lease {
+                tenant: dead,
+                task_id: "task_ghost_never_created".into(),
+                at: now,
+                hb: now,
+                context_tokens: 0,
+            })
+            .unwrap(),
+        )
+        .unwrap();
+
+        let reaped = reg.reap_slots().await;
+        assert_eq!(reaped, 2, "only slot 0 (terminal task) and slot 2 (dead owner) should be reclaimed");
+        assert!(
+            !sem.slot_path(0).exists(),
+            "terminal-task slot must be reclaimed"
+        );
+        assert!(
+            sem.slot_path(1).exists(),
+            "live-worker / active-task slot must be kept"
+        );
+        assert!(
+            !sem.slot_path(2).exists(),
+            "dead-owner slot must be reclaimed"
+        );
+
+        // Idempotent: a second pass reaps nothing.
+        assert_eq!(reg.reap_slots().await, 0);
     }
 
     #[tokio::test]

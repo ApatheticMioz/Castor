@@ -388,6 +388,10 @@ pub async fn run_job_with_engine(
                 .await;
             let guard = shared_lease.lock().unwrap();
             let _ = sem.release(&guard);
+            // Defensive sweep: reclaim any orphaned slot (our lease is bound
+            // to a now-terminal task; the reaper also covers the case where
+            // this worker dies before releasing).
+            sem.clear_reclaimable();
             return Err(err_msg);
         }
     };
@@ -451,6 +455,9 @@ pub async fn run_job_with_engine(
                 .await;
             let guard = shared_lease.lock().unwrap();
             let _ = sem.release(&guard);
+            // Defensive sweep: our lease is bound to a now-terminal task, so
+            // the reaper reclaims any orphaned slot this worker left behind.
+            sem.clear_reclaimable();
             Ok(session_res.final_text)
         }
         Err(e) => {
@@ -460,6 +467,9 @@ pub async fn run_job_with_engine(
                 .await;
             let guard = shared_lease.lock().unwrap();
             let _ = sem.release(&guard);
+            // Defensive sweep: our lease is bound to a now-terminal task, so
+            // the reaper reclaims any orphaned slot this worker left behind.
+            sem.clear_reclaimable();
             Err(err_msg)
         }
     }

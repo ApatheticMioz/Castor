@@ -345,8 +345,7 @@ impl ToolExecutor for CompositeExecutor {
                 // to the workspace root, so an omitted cwd is a no-op.
                 let cwd = self
                     .cwd
-                    .as_ref()
-                    .map(|p| p.as_path())
+                    .as_deref()
                     .unwrap_or(&self.workspace_root);
                 match shell::run_async(cmd, cwd, timeout).await {
                     Ok(out) => {
@@ -458,7 +457,7 @@ impl ToolExecutor for CompositeExecutor {
                 let category = args.get("category").and_then(|v| v.as_str());
                 match self
                     .web
-                    .web_search(query, self.brave_api_key.as_deref(), category)
+                    .web_search(query, self.brave_api_key.as_deref(), category, Some(limit))
                     .await
                 {
                     Ok(outcome) => {

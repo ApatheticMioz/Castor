@@ -37,6 +37,10 @@ const MAX_OUTPUT_BYTES: usize = 20_000;
 /// memory.
 const MAX_FETCH_BYTES: usize = 10 * 1024 * 1024;
 
+/// Hard cap on `num_results` for a single search (protects the engine from
+/// pathological values). The caller's value is clamped into `[1, MAX_SEARCH_RESULTS]`.
+const MAX_SEARCH_RESULTS: usize = 50;
+
 /// User-Agent sent on every request.
 const USER_AGENT: &str = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36 Castor/0.1.0";
 
@@ -154,20 +158,29 @@ impl Default for WebClient {
 
 impl WebClient {
     /// Run the strict provider chain: SearXNG → Brave.
+    ///
+    /// `num_results` is the requested result count, or `None` for the default
+    /// (10). It is clamped to `[1, MAX_SEARCH_RESULTS]` and honored
+    /// per-provider: Brave's API accepts a `count` query parameter (set on the
+    /// request, so the provider returns at most that many), while SearXNG's
+    /// JSON API has no per-request count parameter, so its result array is
+    /// truncated to the requested count after the call.
     pub async fn web_search(
         &self,
         query: &str,
         brave_api_key: Option<&str>,
         category: Option<&str>,
+        num_results: Option<usize>,
     ) -> Result<SearchOutcome, WebError> {
         let q = query.trim();
         if q.is_empty() {
             return Err(WebError::InvalidQuery);
         }
+        let limit = num_results.unwrap_or(10).clamp(1, MAX_SEARCH_RESULTS);
 
         // 1. SearXNG (only when configured).
         if let Some(base) = self.searxng_base.as_deref() {
-            match self.search_searxng(q, base, category).await {
+            match self.search_searxng(q, base, category, limit).await {
                 Ok(results) if !results.is_empty() => {
                     return Ok(SearchOutcome {
                         query: q.to_string(),
@@ -177,7 +190,7 @@ impl WebClient {
                 }
                 Ok(results) => {
                     if let Some(key) = brave_api_key.filter(|k| !k.is_empty()) {
-                        let brave_results = self.search_brave(q, key).await?;
+                        let brave_results = self.search_brave(q, key, limit).await?;
                         return Ok(SearchOutcome {
                             query: q.to_string(),
                             provider: "brave".into(),
@@ -192,7 +205,7 @@ impl WebClient {
                 }
                 Err(e) => {
                     if let Some(key) = brave_api_key.filter(|k| !k.is_empty()) {
-                        let brave_results = self.search_brave(q, key).await?;
+                        let brave_results = self.search_brave(q, key, limit).await?;
                         return Ok(SearchOutcome {
                             query: q.to_string(),
                             provider: "brave".into(),
@@ -208,7 +221,7 @@ impl WebClient {
         if let Some(key) = brave_api_key
             && !key.is_empty()
         {
-            let results = self.search_brave(q, key).await?;
+            let results = self.search_brave(q, key, limit).await?;
             return Ok(SearchOutcome {
                 query: q.to_string(),
                 provider: "brave".into(),
@@ -225,6 +238,7 @@ impl WebClient {
         q: &str,
         base: &str,
         category: Option<&str>,
+        limit: usize,
     ) -> Result<Vec<SearchResult>, WebError> {
         let base = base.trim_end_matches('/');
         let mut url = reqwest::Url::parse(&format!("{base}/search")).map_err(|e| {
@@ -283,15 +297,21 @@ impl WebClient {
                 }
             }
         }
+        // SearXNG's JSON API has no per-request count parameter, so truncate
+        // the result set to the requested number of results here.
+        out.truncate(limit);
         Ok(out)
     }
 
-    async fn search_brave(&self, q: &str, key: &str) -> Result<Vec<SearchResult>, WebError> {
+    async fn search_brave(&self, q: &str, key: &str, limit: usize) -> Result<Vec<SearchResult>, WebError> {
         let mut url = reqwest::Url::parse(&self.brave_base)
             .map_err(|e| WebError::Brave(format!("invalid base url: {e}")))?;
+        // Brave's Search API accepts a `count` query parameter (1..=20). Set it
+        // on the request so the provider returns at most `limit` results —
+        // this is honored by the provider rather than truncated post-hoc.
         url.query_pairs_mut()
             .append_pair("q", q)
-            .append_pair("count", "10");
+            .append_pair("count", &limit.min(20).to_string());
 
         let resp = self
             .client
@@ -831,7 +851,7 @@ pub(crate) mod tests {
     async fn searxng_results() {
         let base = start(router()).await;
         let c = WebClient::with_base_urls(Some(format!("{base}/searxng")), None);
-        let out = c.web_search("rust async", None, None).await.unwrap();
+        let out = c.web_search("rust async", None, None, None).await.unwrap();
         assert_eq!(out.provider, "searxng");
         assert_eq!(out.query, "rust async");
         assert_eq!(out.results.len(), 1);
@@ -840,12 +860,99 @@ pub(crate) mod tests {
         assert_eq!(out.results[0].snippet, "sx snippet");
     }
 
+    /// SearXNG's JSON API has no per-request `count` parameter, so the client
+    /// truncates the returned array to `num_results`. This handler returns a
+    /// fixed 5-result set (SearXNG-style) so the test can prove the client-side
+    /// truncation is driven by the requested limit (5 returned, 2 requested →
+    /// 2 surfaced).
+    async fn searxng_count_echo_handler(
+        axum::extract::Query(_params): axum::extract::Query<
+            std::collections::HashMap<String, String>,
+        >,
+    ) -> axum::response::Response {
+        let results: Vec<String> = (0..5)
+            .map(|i| {
+                format!(
+                    r#"{{"title":"SearXNG #{i}","url":"https://sx.example/{i}","content":"{i}"}}"#
+                )
+            })
+            .collect();
+        json_body(&format!(r#"{{"results":[{}]}}"#, results.join(",")))
+    }
+
+    /// Brave's Search API honors a `count` query parameter, so the client sets
+    /// it on the request (clamped to 20) instead of truncating post-hoc. This
+    /// handler returns exactly `count` results so a mismatch would show up in
+    /// the result length.
+    async fn brave_count_handler(
+        axum::extract::Query(params): axum::extract::Query<
+            std::collections::HashMap<String, String>,
+        >,
+    ) -> axum::response::Response {
+        let n: usize = params
+            .get("count")
+            .and_then(|s| s.parse().ok())
+            .unwrap_or(10);
+        let results: Vec<String> = (0..n)
+            .map(|i| {
+                format!(
+                    r#"{{"title":"Brave #{i}","url":"https://brave.example/{i}","description":"{i}"}}"#
+                )
+            })
+            .collect();
+        json_body(&format!(r#"{{"web":{{"results":[{}]}}}}"#, results.join(",")))
+    }
+
+    #[tokio::test]
+    async fn searxng_num_results_truncates_result_set() {
+        let app = Router::new().route("/searxng/search", get(searxng_count_echo_handler));
+        let base = start(app).await;
+        let c = WebClient::with_base_urls(Some(format!("{base}/searxng")), None);
+        // Request 2 → only 2 of the returned results are surfaced.
+        let out = c
+            .web_search("rust", None, None, Some(2))
+            .await
+            .unwrap();
+        assert_eq!(out.results.len(), 2, "expected the limit to cap results");
+        assert_eq!(out.results[0].url, "https://sx.example/0");
+        assert_eq!(out.results[1].url, "https://sx.example/1");
+    }
+
+    #[tokio::test]
+    async fn num_results_threads_to_brave_count_param() {
+        let app = Router::new().route("/brave", get(brave_count_handler));
+        let base = start(app).await;
+        let c = WebClient::with_base_urls(None, Some(format!("{base}/brave")));
+        // Request 5 → Brave's `count=5` yields exactly 5 results.
+        let out = c
+            .web_search("tokio", Some("bkey"), None, Some(5))
+            .await
+            .unwrap();
+        assert_eq!(out.results.len(), 5, "expected the provider count to cap results");
+        assert_eq!(out.results[0].url, "https://brave.example/0");
+        assert_eq!(out.results[4].url, "https://brave.example/4");
+    }
+
+    #[tokio::test]
+    async fn num_results_clamped_to_max() {
+        let app = Router::new().route("/brave", get(brave_count_handler));
+        let base = start(app).await;
+        let c = WebClient::with_base_urls(None, Some(format!("{base}/brave")));
+        // A pathological limit is clamped to MAX_SEARCH_RESULTS (50), and
+        // Brave's `count` is itself clamped to 20 → at most 20 results.
+        let out = c
+            .web_search("tokio", Some("bkey"), None, Some(500))
+            .await
+            .unwrap();
+        assert_eq!(out.results.len(), 20, "Brave count is clamped to 20");
+    }
+
     #[tokio::test]
     async fn searxng_category_routing() {
         let base = start(router()).await;
         let c = WebClient::with_base_urls(Some(format!("{base}/searxng")), None);
         let out = c
-            .web_search("network verification", None, Some("science"))
+            .web_search("network verification", None, Some("science"), None)
             .await
             .unwrap();
         assert_eq!(out.provider, "searxng");
@@ -865,7 +972,7 @@ pub(crate) mod tests {
         drop(listener);
         let expected_url = format!("http://127.0.0.1:{port}");
         let c = WebClient::with_base_urls(Some(expected_url.clone()), None);
-        let err = c.web_search("rust", None, None).await.unwrap_err();
+        let err = c.web_search("rust", None, None, None).await.unwrap_err();
         match &err {
             WebError::SearxngUnreachable { url, reason } => {
                 assert_eq!(url, &expected_url);
@@ -889,7 +996,7 @@ pub(crate) mod tests {
     async fn brave_with_key_path() {
         let base = start(router()).await;
         let c = WebClient::with_base_urls(None, Some(format!("{base}/brave")));
-        let out = c.web_search("tokio", Some("bkey"), None).await.unwrap();
+        let out = c.web_search("tokio", Some("bkey"), None, None).await.unwrap();
         assert_eq!(out.provider, "brave");
         assert_eq!(out.results.len(), 1);
         assert_eq!(out.results[0].title, "Brave Result");
@@ -904,7 +1011,7 @@ pub(crate) mod tests {
             Some(format!("{base}/searxng")),
             Some(format!("{base}/brave")),
         );
-        let out = c.web_search("empty", Some("bkey"), None).await.unwrap();
+        let out = c.web_search("empty", Some("bkey"), None, None).await.unwrap();
         assert_eq!(out.provider, "brave");
         assert_eq!(out.results.len(), 1);
         assert_eq!(out.results[0].title, "Brave Result");
@@ -920,7 +1027,7 @@ pub(crate) mod tests {
             Some(format!("http://127.0.0.1:{port}")),
             Some(format!("{base}/brave")),
         );
-        let out = c.web_search("rust", Some("bkey"), None).await.unwrap();
+        let out = c.web_search("rust", Some("bkey"), None, None).await.unwrap();
         assert_eq!(out.provider, "brave");
         assert_eq!(out.results.len(), 1);
         assert_eq!(out.results[0].title, "Brave Result");
@@ -929,7 +1036,7 @@ pub(crate) mod tests {
     #[tokio::test]
     async fn unconfigured_searxng_yields_typed_actionable_error() {
         let c = WebClient::with_base_urls(None, None);
-        let err = c.web_search("serde", None, None).await.unwrap_err();
+        let err = c.web_search("serde", None, None, None).await.unwrap_err();
         match &err {
             WebError::SearxngNotConfigured => {}
             other => panic!("expected SearxngNotConfigured, got {other:?}"),

@@ -462,6 +462,8 @@ impl CastorMcpServer {
                         count += 1;
                     }
                 }
+                // Reap any slots whose bound tasks just became terminal.
+                sem.clear_reclaimable();
                 CallToolResult::success(vec![ContentBlock::text(format!(
                     "Cancelled {count} active/queued task(s)."
                 ))])
@@ -546,6 +548,9 @@ impl CastorMcpServer {
                         Some("Cancelled by request.".into()),
                     )
                     .await;
+                // Reap any slot whose bound task just became terminal (the
+                // killed worker's own slot, left unreleased).
+                sem.clear_reclaimable();
                 CallToolResult::success(vec![ContentBlock::text(format!(
                     "Task '{task_id}' cancelled."
                 ))])

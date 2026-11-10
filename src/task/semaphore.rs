@@ -184,6 +184,9 @@ pub struct TaskSemaphore {
 
 struct Inner {
     slots_dir: PathBuf,
+    /// Owning state dir (kept so callers can build a registry / read task
+    /// records without re-deriving the path).
+    state: StateDir,
     max_slots: usize,
     poll_interval: Duration,
     waiters: Mutex<Waiters>,
@@ -200,6 +203,7 @@ impl TaskSemaphore {
         Self {
             inner: Arc::new(Inner {
                 slots_dir: state.task_slots(),
+                state: state.clone(),
                 max_slots: max_slots.max(1),
                 poll_interval: Duration::from_millis(DEFAULT_POLL_MS),
                 waiters: Mutex::new(Waiters::default()),
@@ -215,6 +219,7 @@ impl TaskSemaphore {
         Self {
             inner: Arc::new(Inner {
                 slots_dir: state.task_slots(),
+                state: state.clone(),
                 max_slots: max_slots.max(1),
                 poll_interval: Duration::from_millis(poll_ms.max(1)),
                 waiters: Mutex::new(Waiters::default()),
@@ -253,7 +258,8 @@ impl TaskSemaphore {
         &self.inner.slots_dir
     }
 
-    fn slot_path(&self, i: usize) -> PathBuf {
+    /// Path of slot index `i` (`<state>/tasks/slots/slot_{i}.json`).
+    pub fn slot_path(&self, i: usize) -> PathBuf {
         self.inner.slots_dir.join(format!("slot_{i}.json"))
     }
 
@@ -269,6 +275,53 @@ impl TaskSemaphore {
         match lease {
             None => true,
             Some(l) => !pid_alive(l.tenant),
+        }
+    }
+
+    /// Resolve the state dir this semaphore's slots live under (so callers can
+    /// build a [`TaskRegistry`] / read task records without re-plumbing state).
+    pub fn state_dir(&self) -> StateDir {
+        self.inner.state.clone()
+    }
+
+    /// Read the on-disk status of the task a lease is bound to.
+    ///
+    /// Returns `true` when the bound task has reached a **terminal** state
+    /// (`completed` / `failed` / `cancelled`), `false` when it is active
+    /// (`queued` / `executing`), and `None` when the bound task id is empty or
+    /// the task record is absent / unparseable.
+    pub fn bound_task_terminal(&self, lease: &Lease) -> Option<bool> {
+        let task_id = lease.task_id.trim();
+        if task_id.is_empty() {
+            return None;
+        }
+        let path = self.state_dir().tasks().join(format!("{task_id}.json"));
+        let raw = fs::read_to_string(&path).ok()?;
+        let rec: crate::task::registry::TaskRecord = serde_json::from_str(&raw).ok()?;
+        Some(rec.status.is_terminal())
+    }
+
+    /// Full reclamation decision for a lease, combining owner-pid liveness
+    /// with the bound task's terminal state.
+    ///
+    /// A lease is reclaimable when:
+    /// - it is absent / unparseable (a crashed mid-write), OR
+    /// - its owner pid is dead (including zombies — see [`pid_alive`]), OR
+    /// - its bound task has reached a **terminal** state.
+    ///
+    /// The third rule is the zombie-slot safeguard: a worker that dies (panic,
+    /// kill, crash) after marking its task terminal but *before* releasing its
+    /// slot leaves the lease file on disk. While that worker's pid still exists
+    /// (e.g. a short-lived process reusing a low pid, or a supervisor that
+    /// outlives the worker) the plain dead-owner check would not reclaim the
+    /// slot, deadlocking every other tenant. Checking the bound task's terminal
+    /// state reclaims such slots promptly. A *live* worker whose task is still
+    /// active is never reclaimed, and a terminal lease whose bound task record
+    /// is absent (`None`) is left alone unless the owner is dead.
+    fn lease_reclaimable_full(&self, lease: Option<&Lease>) -> bool {
+        match lease {
+            None => true,
+            Some(l) => !pid_alive(l.tenant) || matches!(self.bound_task_terminal(l), Some(true)),
         }
     }
 
@@ -690,8 +743,12 @@ impl TaskSemaphore {
         }
     }
 
-    /// Clear reclaimable slot leases (dead owners or unreadable). Used at boot
-    /// and after a crash.
+    /// Clear reclaimable slot leases. Used at boot, after a crash, and after
+    /// every task terminal transition.
+    ///
+    /// A lease is reclaimed when it is unreadable, owned by a dead pid, or
+    /// bound to a task that has already reached a terminal state — see
+    /// [`Self::lease_reclaimable_full`] for the full rule.
     pub fn clear_reclaimable(&self) {
         let _ = fs::create_dir_all(&self.inner.slots_dir);
         let entries = match fs::read_dir(&self.inner.slots_dir) {
@@ -710,10 +767,51 @@ impl TaskSemaphore {
             let lease: Option<Lease> = fs::read_to_string(&path)
                 .ok()
                 .and_then(|s| serde_json::from_str(&s).ok());
-            if self.lease_reclaimable(lease.as_ref()) {
+            if self.lease_reclaimable_full(lease.as_ref()) {
                 let _ = fs::remove_file(&path);
             }
         }
+    }
+
+    /// Reap (delete) orphaned slot leases and return how many were removed.
+    ///
+    /// This is the dedicated zombie-slot reaper: it deletes any `slot_N.json`
+    /// that is unreadable, owned by a dead (or zombie) pid, or bound to a task
+    /// that has already reached a terminal state (completed / failed /
+    /// cancelled). It is idempotent and safe to call repeatedly — a live
+    /// worker's lease is never removed, so a healthy long-running task is
+    /// never false-positived.
+    ///
+    /// Used at boot and by the status server's periodic reaper; the worker also
+    /// releases its own slot on every terminal transition (the primary path),
+    /// so this is a backstop for workers that die between marking their task
+    /// terminal and releasing the slot (panic / kill / crash).
+    pub fn reap_slots(&self) -> usize {
+        let _ = fs::create_dir_all(&self.inner.slots_dir);
+        let entries = match fs::read_dir(&self.inner.slots_dir) {
+            Ok(e) => e,
+            Err(_) => return 0,
+        };
+        let mut reaped = 0;
+        for entry in entries.flatten() {
+            let path = entry.path();
+            let name = path
+                .file_name()
+                .map(|s| s.to_string_lossy().into_owned())
+                .unwrap_or_default();
+            if !name.starts_with("slot_") || !name.ends_with(".json") {
+                continue;
+            }
+            let lease: Option<Lease> = fs::read_to_string(&path)
+                .ok()
+                .and_then(|s| serde_json::from_str(&s).ok());
+            if self.lease_reclaimable_full(lease.as_ref())
+                && fs::remove_file(&path).is_ok()
+            {
+                reaped += 1;
+            }
+        }
+        reaped
     }
 }
 
@@ -1342,6 +1440,141 @@ mod tests {
         sem.release(&l2);
         sem.release(&l3);
         assert_eq!(sem.list_slots().len(), 0);
+    }
+
+    /// `lease_reclaimable_full` combines the dead-owner rule with the
+    /// terminal-task rule. A terminal task bound to a LIVE owner is the zombie
+    /// case the plain dead-owner check would miss; it must be reclaimable.
+    #[test]
+    fn lease_reclaimable_full_terminal_task_live_owner() {
+        use crate::task::registry::{TaskRegistry, TaskStatus};
+        let state = tmp_state();
+        let reg = TaskRegistry::new(&state);
+        let sem = TaskSemaphore::new(&state, 2);
+        let me = std::process::id() as u32;
+
+        let done = rt().block_on(reg.create("p", "/tmp", "s")).unwrap();
+        let _ = rt()
+            .block_on(reg.transition(&done, TaskStatus::Completed, None))
+            .unwrap();
+
+        let lease = Lease {
+            tenant: me, // live owner
+            task_id: done,
+            at: 0,
+            hb: 0,
+            context_tokens: 0,
+        };
+        assert!(
+            sem.lease_reclaimable_full(Some(&lease)),
+            "a live owner whose task is terminal must be reclaimable"
+        );
+    }
+
+    /// A LIVE owner whose task is still ACTIVE (or unknown) must not be
+    /// reclaimed, even though the plain dead-owner check would also say no.
+    #[test]
+    fn lease_reclaimable_full_active_task_live_owner_not_reclaimable() {
+        use crate::task::registry::{TaskRegistry, TaskStatus};
+        let state = tmp_state();
+        let reg = TaskRegistry::new(&state);
+        let sem = TaskSemaphore::new(&state, 2);
+        let me = std::process::id() as u32;
+
+        let active = rt().block_on(reg.create("p", "/tmp", "s")).unwrap();
+        let _ = rt()
+            .block_on(reg.update(&active, |r| r.pid = Some(me)))
+            .unwrap();
+        let _ = rt()
+            .block_on(reg.transition(&active, TaskStatus::Executing, None))
+            .unwrap();
+
+        // Active task, live owner → NOT reclaimable.
+        let lease = Lease {
+            tenant: me,
+            task_id: active.clone(),
+            at: 0,
+            hb: 0,
+            context_tokens: 0,
+        };
+        assert!(
+            !sem.lease_reclaimable_full(Some(&lease)),
+            "a live owner with an active task must NOT be reclaimable"
+        );
+
+        // Unknown task id, live owner → NOT reclaimable (no terminal signal).
+        let ghost = Lease {
+            tenant: me,
+            task_id: "task_ghost".into(),
+            at: 0,
+            hb: 0,
+            context_tokens: 0,
+        };
+        assert!(
+            !sem.lease_reclaimable_full(Some(&ghost)),
+            "a live owner with an unknown task must NOT be reclaimable"
+        );
+
+        // Dead owner is always reclaimable, regardless of task state.
+        let dead = Lease {
+            tenant: 4_999_999, // almost certainly not alive
+            task_id: active,
+            at: 0,
+            hb: 0,
+            context_tokens: 0,
+        };
+        assert!(
+            sem.lease_reclaimable_full(Some(&dead)),
+            "a dead owner must be reclaimable regardless of task state"
+        );
+    }
+
+    /// `bound_task_terminal` reports the on-disk terminal state of a lease's
+    /// bound task (`Some(true)` / `Some(false)` / `None`).
+    #[test]
+    fn bound_task_terminal_reads_disk_status() {
+        use crate::task::registry::{TaskRegistry, TaskStatus};
+        let state = tmp_state();
+        let reg = TaskRegistry::new(&state);
+        let sem = TaskSemaphore::new(&state, 2);
+
+        let done = rt().block_on(reg.create("p", "/tmp", "s")).unwrap();
+        let _ = rt()
+            .block_on(reg.transition(&done, TaskStatus::Failed, Some("x".into())))
+            .unwrap();
+        assert_eq!(
+            sem.bound_task_terminal(&Lease {
+                tenant: 1,
+                task_id: done,
+                at: 0,
+                hb: 0,
+                context_tokens: 0,
+            }),
+            Some(true)
+        );
+
+        let active = rt().block_on(reg.create("p", "/tmp", "s")).unwrap();
+        assert_eq!(
+            sem.bound_task_terminal(&Lease {
+                tenant: 1,
+                task_id: active,
+                at: 0,
+                hb: 0,
+                context_tokens: 0,
+            }),
+            Some(false)
+        );
+
+        assert_eq!(
+            sem.bound_task_terminal(&Lease {
+                tenant: 1,
+                task_id: "task_ghost".into(),
+                at: 0,
+                hb: 0,
+                context_tokens: 0,
+            }),
+            None
+        );
     }
 
     // ------------------------------------------------------------------

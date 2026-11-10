@@ -563,7 +563,7 @@ impl SandboxPolicy {
         // task cwd) when one is supplied, otherwise the primary write root
         // (the workspace). An absolute path is used as-is.
         let base = base
-            .map(|b| normalize_lexical(b))
+            .map(normalize_lexical)
             .unwrap_or_else(|| self.write_roots.first().cloned().unwrap_or_default());
         let p = if Path::new(&posix).is_absolute() {
             PathBuf::from(posix)

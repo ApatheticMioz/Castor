@@ -30,7 +30,6 @@ use serde_json::json;
 
 use crate::state::{AcquireResult, Locks, StateDir};
 use crate::task::registry::{DiskRead, TaskRecord, TaskRegistry, TaskStatus};
-use crate::task::semaphore::TaskSemaphore;
 
 /// Disk-mirror poll interval for cross-instance waiters (500 ms).
 const DISK_POLL_MS: u64 = 500;
@@ -91,6 +90,27 @@ impl StatusServer {
         // Boot reaper: reconcile orphans left behind by a reboot/crash before
         // serving, guarded by the `task_reap` lock so only one instance does it.
         boot_reap(self.inner.registry.state_dir()).await;
+
+        // Periodic slot/task reaper: while the status server runs, every 30 s
+        // reclaim orphaned slot leases (dead owner or bound task terminal) and
+        // reconcile orphaned tasks. This is what keeps slots from staying
+        // locked indefinitely after a worker that died without releasing them.
+        {
+            let registry = self.inner.registry.clone();
+            tokio::spawn(async move {
+                let mut ticker = tokio::time::interval(Duration::from_secs(30));
+                ticker.tick().await; // skip the first (immediate) tick
+                loop {
+                    ticker.tick().await;
+                    let _ = registry.reap_orphans().await;
+                    let reclaimed = registry.reap_slots().await;
+                    if reclaimed > 0 {
+                        eprintln!("[castor-status] reaper reclaimed {reclaimed} orphaned slot(s)");
+                    }
+                }
+            });
+        }
+
         let addr = SocketAddr::from(([127, 0, 0, 1], port));
         let listener = tokio::net::TcpListener::bind(addr).await?;
         eprintln!("[castor-status] listening on {addr}");
@@ -394,9 +414,10 @@ pub async fn ensure_status_server(state: &StateDir, port: u16) {
 /// 1. runs [`TaskRegistry::reap_orphans_disk`] — reaps `executing` tasks whose
 ///    worker died (reboot / crash) and stale `queued` tasks whose worker never
 ///    started, persisting honest terminal states to the disk mirror;
-/// 2. clears reclaimable slot leases (dead owners) via
-///    [`TaskSemaphore::clear_reclaimable`] so freed slots are immediately
-///    reusable.
+/// 2. reclaims orphaned slot leases via [`TaskRegistry::reap_slots`] — deletes
+///    any `slot_N.json` whose owner pid is dead (including zombies) or whose
+///    bound task is terminal, so a worker that died before releasing its slot
+///    cannot keep the slot locked (and deadlocking other tenants) indefinitely.
 ///
 /// All steps are best-effort and never block the caller: a failure is logged
 /// to stderr and swallowed.
@@ -416,7 +437,10 @@ pub async fn boot_reap(state: &StateDir) {
             if reaped > 0 {
                 eprintln!("[castor] boot reaper: reconciled {reaped} orphaned task(s)");
             }
-            TaskSemaphore::new(state, 1).clear_reclaimable();
+            let slots = registry.reap_slots().await;
+            if slots > 0 {
+                eprintln!("[castor] boot reaper: reclaimed {slots} orphaned slot(s)");
+            }
             let _ = locks.release("task_reap");
         }
         Ok(AcquireResult::HeldBy { .. }) => {
