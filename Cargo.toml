@@ -36,7 +36,7 @@ path = "src/main.rs"
 # one shot, so `SupportLang::from_path` can resolve any of them.
 ast-grep-core = { version = "0.45", optional = true }
 ast-grep-language = { version = "0.45", default-features = false, features = ["builtin-parser"], optional = true }
-rmcp = { version = "3.5.0", features = ["server", "client", "transport-child-process", "transport-io"] }
+rmcp = { version = "3.9.0", features = ["server", "client", "transport-child-process", "transport-io"] }
 tokio = { version = "1.53.1", features = ["full"] }
 axum = "0.8.9"
 serde = { version = "1.0.229", features = ["derive"] }
@@ -70,6 +70,7 @@ similar = "2.6"
 # Pure-Rust PDF parsing (no C bindings). 0.42+ carries the RUSTSEC-2026-0187
 # recursion-depth fix. Default features disabled to keep the dep lightweight.
 lopdf = { version = "0.42", default-features = false }
+mimalloc = { version = "0.1", default-features = false }
 
 [target.'cfg(target_os = "linux")'.dependencies]
 # Kernel-level filesystem confinement for the sandboxed shell child.
