@@ -285,7 +285,6 @@ leases); no manual context-size rules or human-rationing tables apply.
 - **ALWAYS** actively monitor CI/CD workflow runs to terminal completion (`gh run watch` or Actions console) when dispatching a release tag; never fire-and-forget.
 
 ### 4.2 ASK FIRST
-- **ASK** before adding a new dependency.
 - **ASK** before changing any constant in `src/config.rs` (ports, timeouts, budgets).
 - **ASK** before touching the security sandbox, the semaphore, or the wedge detector.
 - **ASK** before committing anything under `.evo/`, `.scratch/`, or `*.log`.
