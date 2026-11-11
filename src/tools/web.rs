@@ -821,10 +821,12 @@ pub(crate) mod tests {
     }
 
     async fn fetch_big_handler() -> axum::response::Response {
+        use std::fmt::Write as _;
         let para = "lorem ipsum dolor sit amet ";
-        let mut body = String::from("<html><body>");
+        let mut body = String::with_capacity(para.len() * 1000 + 1000 * 7 + 30);
+        body.push_str("<html><body>");
         for _ in 0..1000 {
-            body.push_str(&format!("<p>{para}</p>"));
+            let _ = write!(body, "<p>{para}</p>");
         }
         body.push_str("</body></html>");
         html_body(&body)
