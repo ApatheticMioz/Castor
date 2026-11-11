@@ -23,7 +23,7 @@ npx -y mcp-castor install --client all
 <br>
 
 <div align="center">
-  <video src="[docs/assets/final.mp4](https://github.com/user-attachments/assets/c4111e31-e8f5-4d3b-b139-b4a1ff46a48c)" autoplay loop muted playsinline width="100%"></video>
+  <video src="https://github.com/user-attachments/assets/c4111e31-e8f5-4d3b-b139-b4a1ff46a48c" autoplay loop muted playsinline width="100%"></video>
   <p>
     <sub>
       <b>Plate I — The Dioscuri Ring Cavity (<code>18020 // 0.08ms</code>).</b> Upper sapphire arc (Pollux): high-reasoning cloud supervision. Lower sodium-amber arc (Castor): high-frequency local execution on port <code>:18020</code> with sub-<code>0.08 ms</code> in-process Rust tool dispatch.
