@@ -500,7 +500,8 @@ impl TaskRegistry {
     ///   `cancelled` / `"worker never started / process terminated"`.
     ///
     /// Returns the number of tasks reaped.
-    pub async fn reap_orphans_disk(&self) -> usize {
+    /// Synchronous disk scan reaping orphan task files.
+    pub fn reap_orphans_disk_sync(&self) -> usize {
         const STALE_HEARTBEAT_MS: u64 = 60_000; // 60 s
         const STALE_QUEUE_MS: u64 = 5 * 60 * 1000; // 5 min
         let now = now_ms();
@@ -564,6 +565,16 @@ impl TaskRegistry {
         reaped
     }
 
+    /// Asynchronous wrapper dispatching the blocking filesystem scan to
+    /// [`tokio::task::spawn_blocking`] so the Tokio reactor worker threads are
+    /// never stalled.
+    pub async fn reap_orphans_disk(&self) -> usize {
+        let this = self.clone();
+        tokio::task::spawn_blocking(move || this.reap_orphans_disk_sync())
+            .await
+            .unwrap_or(0)
+    }
+
     /// Reap orphaned **slot** leases: delete any `<state>/tasks/slots/slot_N.json`
     /// whose owner pid is dead (including zombies) or whose bound task has
     /// reached a terminal state (completed / failed / cancelled).
@@ -578,7 +589,10 @@ impl TaskRegistry {
     ///
     /// Returns the number of slot leases removed. Idempotent.
     pub async fn reap_slots(&self) -> usize {
-        TaskSemaphore::new(&self.state, 1).reap_slots()
+        let state = self.state.clone();
+        tokio::task::spawn_blocking(move || TaskSemaphore::new(&state, 1).reap_slots())
+            .await
+            .unwrap_or(0)
     }
 
     /// Extend the turn budget of an active task by `n` turns.
