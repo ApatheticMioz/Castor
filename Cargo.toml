@@ -2,7 +2,7 @@
 name = "castor"
 version = "1.5.0"
 edition = "2024"
-license = "AGPL-3.0"
+license = "AGPL-3.0-only"
 description = "Castor: Rust MCP toolchain, proxy, and evo engine"
 repository = "https://github.com/ApatheticMioz/Castor"
 homepage = "https://github.com/ApatheticMioz/Castor#readme"
