@@ -234,10 +234,10 @@ fn case_insensitive_form(p: &Path) -> String {
 /// re-cased spelling to test — a conservative default that only ever narrows,
 /// never widens, the set of matched spellings.
 #[cfg(any(windows, target_os = "linux"))]
-fn volume_is_case_insensitive(root: &Path) -> bool {
+fn volume_is_case_insensitive(#[cfg_attr(windows, allow(unused_variables))] root: &Path) -> bool {
     #[cfg(windows)]
     {
-        return true;
+        true
     }
     #[cfg(not(windows))]
     {
