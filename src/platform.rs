@@ -167,8 +167,23 @@ pub fn wsl_normalize(cmd: &str) -> String {
     if !is_wsl() {
         return cmd.to_string();
     }
+    normalize_launch_command(cmd)
+}
+
+/// Normalizes a command string for execution under POSIX `sh -c`.
+///
+/// Prevents command-not-found failures (exit 127) when commands carry Windows backslashes
+/// in path segments (e.g. `scripts\wsl\start.sh` or `D:\models\llama.exe`):
+/// - Strips leading `wsl` / `wsl.exe` wrappers.
+/// - Rewrites `cmd` / `taskkill` to their `.exe` forms under WSL.
+/// - Converts Windows backslashes in path segments to forward slashes.
+/// - Translates Windows drive letter paths (e.g. `D:\...`) to `/mnt/d/...` under WSL/Linux.
+pub fn normalize_launch_command(cmd: &str) -> String {
     let stripped = strip_wsl_wrapper(cmd);
     let trimmed = stripped.trim();
+    if trimmed.is_empty() {
+        return String::new();
+    }
     let first_end = trimmed
         .find(|c: char| c.is_whitespace())
         .unwrap_or(trimmed.len());
@@ -176,25 +191,77 @@ pub fn wsl_normalize(cmd: &str) -> String {
     let rest = trimmed[first_end..].trim_start();
     match first {
         "cmd" | "cmd.exe" => {
-            // Under WSL, Windows paths with backslashes get mangled by POSIX sh
-            // (e.g. \b becomes backspace). Convert backslashes to forward slashes so
-            // the command survives POSIX shell evaluation intact.
             let safe_rest = rest.replace('\\', "/");
+            let cmd_bin = if is_wsl() { "cmd.exe" } else { first };
             if safe_rest.is_empty() {
-                "cmd.exe".to_string()
+                cmd_bin.to_string()
             } else {
-                format!("cmd.exe {safe_rest}")
+                format!("{cmd_bin} {safe_rest}")
             }
         }
         "taskkill" => {
+            let tk_bin = if is_wsl() { "taskkill.exe" } else { first };
             if rest.is_empty() {
-                "taskkill.exe".to_string()
+                tk_bin.to_string()
             } else {
-                format!("taskkill.exe {rest}")
+                format!("{tk_bin} {rest}")
             }
         }
-        _ => stripped,
+        _ => normalize_command_string(&stripped),
     }
+}
+
+/// Helper that converts Windows path separators to forward slashes in command strings
+/// while preserving intentional shell escape characters (`\"`, `\'`, `\ `).
+pub fn normalize_command_string(cmd: &str) -> String {
+    let mut out = String::with_capacity(cmd.len());
+    let mut chars = cmd.chars().peekable();
+    while let Some(ch) = chars.next() {
+        if ch == '\\' {
+            match chars.peek() {
+                Some(&next)
+                    if next == ' '
+                        || next == '"'
+                        || next == '\''
+                        || next == '$'
+                        || next == '`' =>
+                {
+                    out.push('\\');
+                    out.push(next);
+                    chars.next();
+                }
+                Some(&'\\') => {
+                    chars.next();
+                    out.push('/');
+                }
+                Some(_) => {
+                    out.push('/');
+                }
+                None => {
+                    out.push('\\');
+                }
+            }
+        } else {
+            out.push(ch);
+        }
+    }
+    to_wsl_command_paths(&out)
+}
+
+fn to_wsl_command_paths(cmd: &str) -> String {
+    let words: Vec<&str> = cmd.split(' ').collect();
+    let mut normalized_words = Vec::new();
+    for word in words {
+        let b = word.as_bytes();
+        if b.len() >= 3 && b[0].is_ascii_alphabetic() && b[1] == b':' && b[2] == b'/' {
+            let drive = (b[0] as char).to_ascii_lowercase();
+            let path_part = &word[3..];
+            normalized_words.push(format!("/mnt/{drive}/{path_part}"));
+        } else {
+            normalized_words.push(word.to_string());
+        }
+    }
+    normalized_words.join(" ")
 }
 
 #[cfg(test)]
@@ -321,5 +388,29 @@ mod tests {
             "bash -lc \"pkill vllm\""
         );
         assert_eq!(strip_wsl_wrapper("nvidia-smi"), "nvidia-smi");
+    }
+
+    #[test]
+    fn test_normalize_launch_command_paths() {
+        let cmd = r"bash scripts\wsl\start_swarm.sh";
+        let norm = normalize_launch_command(cmd);
+        assert_eq!(norm, "bash scripts/wsl/start_swarm.sh");
+
+        let cmd2 = r"scripts\wsl\start_swarm.sh";
+        let norm2 = normalize_launch_command(cmd2);
+        assert_eq!(norm2, "scripts/wsl/start_swarm.sh");
+
+        let cmd3 = r"cmd.exe /c scripts\bonsai\start.bat";
+        let norm3 = normalize_launch_command(cmd3);
+        assert_eq!(norm3, "cmd.exe /c scripts/bonsai/start.bat");
+
+        let cmd4 = r#"echo "hello \"world\"""#;
+        let norm4 = normalize_launch_command(cmd4);
+        assert_eq!(norm4, r#"echo "hello \"world\"""#);
+
+        let cmd5 = r"D:\LLM_Ecosystem\scripts\start.sh";
+        let norm5 = normalize_launch_command(cmd5);
+        assert!(norm5.contains("LLM_Ecosystem/scripts/start.sh"));
+        assert!(!norm5.contains('\\'));
     }
 }

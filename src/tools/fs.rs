@@ -250,6 +250,23 @@ impl FsExecutor {
                 )));
             }
         }
+
+        // AST gate: when the `ast` feature is enabled, parse the candidate
+        // content in memory before committing it to disk. If the resolved
+        // grammar flags an ERROR/UNDEFINED/MISSING node, the write is refused
+        // and the file is not created or modified. Without the feature,
+        // `write_file` performs a direct write.
+        #[cfg(feature = "ast")]
+        if let Err(e) = super::ast::validate_file_syntax(&resolved, content) {
+            let detail = match e {
+                super::ast::AstError::SyntaxFailure(detail) => detail,
+                other => other.to_string(),
+            };
+            return Err(FsError::EditError(format!(
+                "SyntaxValidationError: write introduces syntax errors in {path}. No write performed. {detail}"
+            )));
+        }
+
         self.atomic_write(&resolved, content)?;
         Ok(format!(
             "Wrote {} bytes to {}",
@@ -1265,6 +1282,115 @@ mod tests {
         let after = fs::read_to_string(&file).unwrap();
         assert!(after.contains("fn add_two("));
         assert!(after.contains("a + b"));
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[cfg(feature = "ast")]
+    #[test]
+    fn write_file_rejects_syntax_errors_without_creating_file() {
+        let root = test_root("write_syntax_gate");
+        let ex = executor(&root);
+
+        // 1. Python with broken syntax
+        let py_err = ex
+            .write_file("bad.py", "def broken(x y):\n    pass\n", true)
+            .unwrap_err();
+        assert!(
+            py_err.to_string().contains("SyntaxValidationError"),
+            "expected SyntaxValidationError, got: {py_err}"
+        );
+        assert!(
+            py_err.to_string().contains("No write performed"),
+            "expected 'No write performed', got: {py_err}"
+        );
+        assert!(!root.join("bad.py").exists(), "file must not be created on disk");
+
+        // 2. TypeScript with broken syntax
+        let ts_err = ex
+            .write_file("bad.ts", "interface User { name: string age: number; }", true)
+            .unwrap_err();
+        assert!(ts_err.to_string().contains("SyntaxValidationError"));
+        assert!(!root.join("bad.ts").exists(), "file must not be created on disk");
+
+        // 3. JSON with broken syntax
+        let json_err = ex
+            .write_file("bad.json", "{\"key\": ,}", true)
+            .unwrap_err();
+        assert!(json_err.to_string().contains("SyntaxValidationError"));
+        assert!(!root.join("bad.json").exists(), "file must not be created on disk");
+
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[cfg(feature = "ast")]
+    #[test]
+    fn write_file_allows_valid_code_across_languages() {
+        let root = test_root("write_syntax_ok");
+        let ex = executor(&root);
+
+        ex.write_file("good.rs", "pub fn sum(a: i32, b: i32) -> i32 { a + b }\n", true)
+            .unwrap();
+        assert!(root.join("good.rs").exists());
+
+        ex.write_file("good.py", "def sum(a, b):\n    return a + b\n", true)
+            .unwrap();
+        assert!(root.join("good.py").exists());
+
+        ex.write_file("good.ts", "export const sum = (a: number, b: number): number => a + b;\n", true)
+            .unwrap();
+        assert!(root.join("good.ts").exists());
+
+        ex.write_file("good.go", "package main\nfunc sum(a, b int) int { return a + b }\n", true)
+            .unwrap();
+        assert!(root.join("good.go").exists());
+
+        ex.write_file("good.json", "{\"status\": \"ok\", \"count\": 42}\n", true)
+            .unwrap();
+        assert!(root.join("good.json").exists());
+
+        ex.write_file("good.html", "<!DOCTYPE html><html><body><h1>Title</h1></body></html>\n", true)
+            .unwrap();
+        assert!(root.join("good.html").exists());
+
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[cfg(feature = "ast")]
+    #[test]
+    fn edit_file_rejects_syntax_errors_across_languages() {
+        let root = test_root("edit_multilang_gate");
+        let ex = executor(&root);
+
+        // Python
+        let py_file = root.join("app.py");
+        let py_orig = "def compute(x):\n    return x * 2\n";
+        fs::write(&py_file, py_orig).unwrap();
+        let err = ex
+            .edit_file("app.py", "return x * 2", "return x * *", false)
+            .unwrap_err();
+        assert!(err.to_string().contains("SyntaxValidationError"));
+        assert_eq!(fs::read_to_string(&py_file).unwrap(), py_orig);
+
+        // TypeScript
+        let ts_file = root.join("app.ts");
+        let ts_orig = "export function compute(x: number): number {\n    return x * 2;\n}\n";
+        fs::write(&ts_file, ts_orig).unwrap();
+        let err = ex
+            .edit_file("app.ts", "return x * 2;", "return x * ;", false)
+            .unwrap_err();
+        assert!(err.to_string().contains("SyntaxValidationError"));
+        assert_eq!(fs::read_to_string(&ts_file).unwrap(), ts_orig);
+
+        // Go
+        let go_file = root.join("app.go");
+        let go_orig = "package main\nfunc compute(x int) int {\n    return x * 2\n}\n";
+        fs::write(&go_file, go_orig).unwrap();
+        let err = ex
+            .edit_file("app.go", "return x * 2", "return x * *", false)
+            .unwrap_err();
+        assert!(err.to_string().contains("SyntaxValidationError"));
+        assert_eq!(fs::read_to_string(&go_file).unwrap(), go_orig);
+
         let _ = std::fs::remove_dir_all(&root);
     }
 

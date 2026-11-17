@@ -39,9 +39,8 @@ pub const TOOL_BASE_NAMES: [&str; 3] = [TOOL_COWORKER, TOOL_TASK, TOOL_SERVER];
 pub struct CoworkerParams {
     /// Task, inquiry, or architectural instruction (supports code, diagnostics, and image inspection via read_file).
     pub prompt: String,
-    /// Working directory for filesystem and shell tools (defaults to current workspace).
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub cwd: Option<String>,
+    /// Working directory for filesystem and shell tools (must be an explicit, valid directory).
+    pub cwd: String,
     /// Named persistent session ID (maintains KV-cache and conversation context across turns).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub session_id: Option<String>,
@@ -254,11 +253,12 @@ impl CastorMcpServer {
             ))]);
         }
 
-        let cwd = params.cwd.unwrap_or_else(|| {
-            std::env::current_dir()
-                .map(|p| p.to_string_lossy().into_owned())
-                .unwrap_or_else(|_| ".".to_string())
-        });
+        let cwd = params.cwd.trim().to_string();
+        if cwd.is_empty() {
+            return CallToolResult::error(vec![ContentBlock::text(
+                "Missing required parameter: cwd (working directory must be an explicit path)"
+            )]);
+        }
 
         let session_id = params
             .session_id
@@ -377,7 +377,7 @@ impl CastorMcpServer {
             }
         }
 
-        let status_port = loaded.config.ports.status;
+        let status_port = crate::task::wait::active_status_port(&state, loaded.config.ports.status);
         let (wait_cmd_win, wait_cmd_wsl) = wait_commands(status_port, &task_id);
         let status_cmd = format!(
             "{}_task(action: \"status\", task_id: \"{task_id}\")",
@@ -862,8 +862,7 @@ pub fn format_live_turn_status(
         .unwrap_or_else(|| "-".into());
     let lt = last_tool.unwrap_or_else(|| "-".into());
     Some(format!(
-        "Live: elapsed={elapsed_s}s turn={turn}/{} prompt_tokens={pt} cached_tokens={ct} ttft_ms={ttft} tok_per_s={tps} last_tool={lt}",
-        rec.turns_budget
+        "Live: elapsed={elapsed_s}s turn={turn} prompt_tokens={pt} cached_tokens={ct} ttft_ms={ttft} tok_per_s={tps} last_tool={lt}"
     ))
 }
 
@@ -1012,8 +1011,8 @@ mod tests {
                 .collect::<Vec<_>>()
         });
         assert!(
-            required.as_deref() == Some(&["prompt"]),
-            "coworker schema must require `prompt`, got {required:?}"
+            required.as_ref().is_some_and(|r| r.contains(&"prompt") && r.contains(&"cwd")),
+            "coworker schema must require `prompt` and `cwd`, got {required:?}"
         );
 
         let task = &tools[1];
@@ -1169,7 +1168,7 @@ mod tests {
         send_line(
             &mut stdin,
             &format!(
-                r#"{{"jsonrpc":"2.0","id":3,"method":"tools/call","params":{{"name":"{}","arguments":{{"prompt":"hello test"}}}}}}"#,
+                r#"{{"jsonrpc":"2.0","id":3,"method":"tools/call","params":{{"name":"{}","arguments":{{"prompt":"hello test","cwd":"/tmp"}}}}}}"#,
                 expected[0]
             ),
         )
@@ -1272,7 +1271,7 @@ mod tests {
         // 1. Dispatch a task
         send_line(
             &mut stdin,
-            r#"{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"castor_coworker","arguments":{"prompt":"check task test"}}}"#,
+            r#"{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"castor_coworker","arguments":{"prompt":"check task test","cwd":"/tmp"}}}"#,
         )
         .await;
         let call_resp = read_jsonrpc_line(&mut reader).await;
@@ -1392,7 +1391,7 @@ mod tests {
         assert!(line.starts_with("Live: "), "line: {line}");
         assert!(line.contains("elapsed="), "line: {line}");
         // Latest dispatch wins (turn 3, prompt 250, cached 180, ttft 95).
-        assert!(line.contains("turn=3/8"), "line: {line}");
+        assert!(line.contains("turn=3 "), "line: {line}");
         assert!(line.contains("prompt_tokens=250"), "line: {line}");
         assert!(line.contains("cached_tokens=180"), "line: {line}");
         assert!(line.contains("ttft_ms=95"), "line: {line}");

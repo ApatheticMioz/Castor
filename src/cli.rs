@@ -176,6 +176,9 @@ fn format_plan(plan: &pruner::PrunePlan) -> String {
     for p in &plan.scratch {
         out.push_str(&format!("scratch   {}\n", p.display()));
     }
+    for p in &plan.tombstones {
+        out.push_str(&format!("tombstone {}\n", p.display()));
+    }
     out
 }
 
@@ -193,6 +196,7 @@ pub fn run_clean(state_dir: &std::path::Path, yes: bool) -> Result<String, Strin
     }
 
     let deleted = pruner::apply(state_dir, &mut plan).map_err(|e| e.to_string())?;
+    let _ = pruner::record_last_prune(state_dir, pruner::PrunePolicy::default().max_age_ms);
 
     let mut out = String::new();
     for p in &plan.sessions {
@@ -209,6 +213,9 @@ pub fn run_clean(state_dir: &std::path::Path, yes: bool) -> Result<String, Strin
     }
     for p in &plan.scratch {
         out.push_str(&format!("deleted scratch   {}\n", p.display()));
+    }
+    for p in &plan.tombstones {
+        out.push_str(&format!("deleted tombstone {}\n", p.display()));
     }
     let cwd_scratch = std::path::Path::new(".scratch");
     if cwd_scratch.is_dir()
@@ -568,6 +575,8 @@ pub async fn run_with(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
             let loaded = config::load().map_err(|e| format!("config: {e}"))?;
             let state = state::StateDir::from_config(&loaded.config);
             let _ = state.ensure();
+            // Non-blocking auto-pruning pass on boot if .last_prune is older than 24h.
+            pruner::maybe_auto_prune(state.root());
             // Boot reaper (lock-guarded, runs once): reconcile orphans left by a
             // reboot/crash and reclaim stale slots before anything else serves.
             task::wait::boot_reap(&state).await;
@@ -615,7 +624,7 @@ pub async fn run_with(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
             let _ = state.ensure();
             let port = port.unwrap_or(loaded.config.ports.status);
             let server = task::wait::StatusServer::new(&state);
-            if !server.try_acquire_lock() {
+            if !server.try_acquire_lock_with_retry(20, 50).await {
                 // Another live process holds the singleton lock: exit 0 with a
                 // single stderr line (never fight a live keeper).
                 eprintln!("status server already running");
@@ -784,6 +793,13 @@ pub async fn run_with(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
             .await?;
         }
         Command::__Worker { spec_path } => {
+            let _ = tracing_subscriber::fmt()
+                .with_writer(std::io::stderr)
+                .with_env_filter(
+                    tracing_subscriber::EnvFilter::try_from_default_env()
+                        .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("info")),
+                )
+                .try_init();
             let loaded = config::load().map_err(|e| format!("config: {e}"))?;
             let state = state::StateDir::from_config(&loaded.config);
             let _ = state.ensure();
@@ -800,8 +816,13 @@ pub async fn run_with(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
                 if let Ok(raw) = std::fs::read_to_string(&task_file)
                     && let Ok(mut rec) = serde_json::from_str::<serde_json::Value>(&raw)
                 {
+                    let now = std::time::SystemTime::now()
+                        .duration_since(std::time::UNIX_EPOCH)
+                        .map(|d| d.as_millis() as u64)
+                        .unwrap_or(0);
                     rec["status"] = serde_json::json!("failed");
                     rec["reason"] = serde_json::json!(err_msg);
+                    rec["ended_at"] = serde_json::json!(now);
                     let _ = std::fs::write(&task_file, serde_json::to_string_pretty(&rec).unwrap_or_default());
                 }
                 prev_hook(info);

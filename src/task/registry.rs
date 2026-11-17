@@ -76,13 +76,15 @@ pub struct TaskRecord {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub pid: Option<u32>,
     /// Epoch ms of the last heartbeat.
+    #[serde(default)]
     pub heartbeat: u64,
+    #[serde(default)]
     pub turns_budget: u32,
     /// Epoch ms.
     pub created_at: u64,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub started_at: Option<u64>,
-    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(alias = "completed_at", skip_serializing_if = "Option::is_none")]
     pub ended_at: Option<u64>,
 }
 
@@ -503,7 +505,8 @@ impl TaskRegistry {
     /// Synchronous disk scan reaping orphan task files.
     pub fn reap_orphans_disk_sync(&self) -> usize {
         const STALE_HEARTBEAT_MS: u64 = 60_000; // 60 s
-        const STALE_QUEUE_MS: u64 = 5 * 60 * 1000; // 5 min
+        pub const STALE_QUEUED_MS: u64 = 5 * 60 * 1000; // 5 min
+        const STALE_QUEUE_MS: u64 = STALE_QUEUED_MS;
         let now = now_ms();
         let dir = self.state.tasks();
         let Ok(entries) = fs::read_dir(&dir) else {
@@ -540,6 +543,10 @@ impl TaskRegistry {
                         // Live worker: never reap (avoids false-positiving a
                         // healthy long-running task).
                         Some(p) if pid_alive(p) => continue,
+                        // Cross-OS / PID namespace grace: if the heartbeat is still
+                        // fresh, do not reap even if pid_alive is false (e.g. PID
+                        // belongs to another namespace or OS boundary).
+                        Some(_) if now.saturating_sub(rec.heartbeat) < STALE_HEARTBEAT_MS => continue,
                         Some(_) => {
                             rec.status = TaskStatus::Failed;
                             rec.reason = Some("process terminated / system reboot".into());
@@ -547,7 +554,12 @@ impl TaskRegistry {
                         }
                     }
                 }
-                TaskStatus::Queued if rec.pid.is_none() => {
+                TaskStatus::Queued => {
+                    if let Some(p) = rec.pid
+                        && pid_alive(p)
+                    {
+                        continue;
+                    }
                     if now.saturating_sub(rec.created_at) < STALE_QUEUE_MS {
                         continue;
                     }
@@ -935,6 +947,97 @@ mod tests {
 
         // Idempotent: a second pass reaps nothing new.
         assert_eq!(reg.reap_orphans_disk().await, 0, "a second boot pass must be a no-op");
+    }
+
+    #[tokio::test]
+    async fn reap_orphans_grace_period_protects_cross_os_executing_task() {
+        let state = tmp_state();
+        let reg = TaskRegistry::new(&state);
+        let now = now_ms();
+        let dead = dead_pid();
+
+        let task_id = generate_task_id("sess_grace", "p");
+        // Task has dead pid (simulate cross-OS / foreign namespace where pid_alive == false),
+        // but has a FRESH heartbeat (heartbeat = now).
+        write_raw_task(
+            &state,
+            &task_id,
+            &TaskRecord {
+                id: task_id.clone(),
+                status: TaskStatus::Executing,
+                reason: None,
+                prompt: "p".into(),
+                cwd: "/tmp".into(),
+                session_id: "grace".into(),
+                pid: Some(dead),
+                heartbeat: now,
+                turns_budget: 10,
+                created_at: now,
+                started_at: Some(now),
+                ended_at: None,
+            },
+        );
+
+        // Even though pid_alive is false for `dead`, the fresh heartbeat protects it!
+        assert_eq!(reg.reap_orphans_disk().await, 0);
+        let rec = reg.get(&task_id).await.unwrap();
+        assert_eq!(rec.status, TaskStatus::Executing);
+
+        // Now advance time so heartbeat is stale (> 60s).
+        let stale = now - 120_000;
+        write_raw_task(
+            &state,
+            &task_id,
+            &TaskRecord {
+                id: task_id.clone(),
+                status: TaskStatus::Executing,
+                reason: None,
+                prompt: "p".into(),
+                cwd: "/tmp".into(),
+                session_id: "grace".into(),
+                pid: Some(dead),
+                heartbeat: stale,
+                turns_budget: 10,
+                created_at: stale,
+                started_at: Some(stale),
+                ended_at: None,
+            },
+        );
+
+        // Now that heartbeat is stale AND pid is dead, it is reaped.
+        assert_eq!(reg.reap_orphans_disk().await, 1);
+        let reaped_rec = reg.get(&task_id).await.unwrap();
+        assert_eq!(reaped_rec.status, TaskStatus::Failed);
+    }
+
+    #[tokio::test]
+    async fn reap_orphans_reaps_legacy_october_queued_task_missing_turns_budget() {
+        let state = tmp_state();
+        let reg = TaskRegistry::new(&state);
+        let task_id = "task_comment_hygiene_task_and_state_1792868815446";
+        let raw = r#"{
+  "id": "task_comment_hygiene_task_and_state_1792868815446",
+  "session_id": "comment_hygiene_task_and_state",
+  "status": "queued",
+  "created_at": 1792868815446,
+  "started_at": null,
+  "completed_at": null,
+  "heartbeat": 1792868815446,
+  "pid": null,
+  "reason": null,
+  "prompt": "Audit and rewrite comments/docstrings in src/task/semaphore.rs...",
+  "cwd": "/mnt/d/LLM_Ecosystem"
+}"#;
+        let task_file = state.tasks().join(format!("{task_id}.json"));
+        std::fs::create_dir_all(state.tasks()).unwrap();
+        std::fs::write(&task_file, raw).unwrap();
+
+        let reaped = reg.reap_orphans_disk().await;
+        assert_eq!(reaped, 1);
+        let rec = reg.get(task_id).await.unwrap();
+        assert!(rec.status.is_terminal());
+        assert_eq!(rec.reason.as_deref(), Some("worker never started / process terminated"));
+        assert!(rec.ended_at.is_some());
     }
 
     /// The slot reaper must reclaim orphaned slot leases two ways:

@@ -68,6 +68,10 @@ impl StateDir {
         self.root.join("locks")
     }
 
+    pub fn ports(&self) -> PathBuf {
+        self.root.join("ports")
+    }
+
     pub fn evo(&self) -> PathBuf {
         self.root.join("evo")
     }
@@ -80,10 +84,12 @@ impl StateDir {
             self.sessions(),
             self.telemetry(),
             self.locks(),
+            self.ports(),
             self.evo(),
         ] {
             fs::create_dir_all(&p)?;
         }
+        let _ = Locks::from_state(self).cleanup_expired_tombstones(now_millis());
         Ok(())
     }
 }
@@ -203,6 +209,9 @@ impl Locks {
             .map(|s| s.to_string_lossy().into_owned())
             .unwrap_or_else(|| format!("{name}.lock"));
         let tombstone = self.dir.join(format!("{fname}.tombstone"));
+        if tombstone.exists() {
+            let _ = fs::remove_file(&tombstone);
+        }
         let _ = fs::rename(&path, &tombstone);
 
         match OpenOptions::new().create_new(true).write(true).open(&path) {
@@ -237,6 +246,30 @@ impl Locks {
                 name: name.to_string(),
             }),
         }
+    }
+
+    /// Remove any tombstone files in the locks directory whose TTL has expired.
+    pub fn cleanup_expired_tombstones(&self, now: u64) -> usize {
+        let mut cleaned = 0;
+        let Ok(entries) = fs::read_dir(&self.dir) else {
+            return 0;
+        };
+        for entry in entries.flatten() {
+            let name = entry.file_name().to_string_lossy().into_owned();
+            if !name.ends_with(".tombstone") {
+                continue;
+            }
+            let p = entry.path();
+            let is_expired = if let Ok(Some(info)) = read_lock(&p) {
+                now.saturating_sub(info.held_at) > info.ttl_ms
+            } else {
+                true
+            };
+            if is_expired && fs::remove_file(&p).is_ok() {
+                cleaned += 1;
+            }
+        }
+        cleaned
     }
 }
 

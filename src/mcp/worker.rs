@@ -409,7 +409,6 @@ pub async fn run_job_with_engine(
     };
 
     let tools = executor.tool_schemas();
-    let turns_budget = spec.turns_budget.unwrap_or(runner::budget::DEFAULT_TURNS_BUDGET);
 
     // Terminal artifacts (the reasoning-ceiling salvage report) are persisted
     // under the state dir's `.scratch/`. The per-session reasoning-effort
@@ -445,7 +444,6 @@ pub async fn run_job_with_engine(
         &system_prompt,
         &spec.prompt,
         &tools,
-        turns_budget,
         Some(&options),
     )
     .await;
@@ -453,16 +451,21 @@ pub async fn run_job_with_engine(
     // 9. Transition terminal status and release slot.
     match outcome {
         Ok(session_res) => {
-            let terminal_status = if session_res.status == "failed" {
-                TaskStatus::Failed
-            } else {
+            let terminal_status = if session_res.status == "completed" {
                 TaskStatus::Completed
+            } else {
+                TaskStatus::Failed
+            };
+            let reason = if terminal_status == TaskStatus::Failed && session_res.final_text.is_empty() {
+                format!("[Task ended with status: {}]", session_res.status)
+            } else {
+                session_res.final_text.clone()
             };
             let _ = registry
                 .transition(
                     &spec.task_id,
                     terminal_status,
-                    Some(session_res.final_text.clone()),
+                    Some(reason),
                 )
                 .await;
             let guard = shared_lease.lock().unwrap();
@@ -865,5 +868,77 @@ mod tests {
             .expect("invariant present");
         let p_workspace = prompt.find("[Workspace]").expect("workspace present");
         assert!(p_inv < p_workspace, "invariant must sit in the static block, before [Workspace]");
+    }
+
+    #[tokio::test]
+    async fn status_simplification_exhausted_reasoning_marks_task_failed() {
+        let (state, dir) = tmp_state();
+        let registry = TaskRegistry::new(&state);
+        let task_id = registry
+            .create("task reasoning fail", dir.to_str().unwrap(), "sess_fail")
+            .await
+            .unwrap();
+
+        let spec = JobSpec {
+            task_id: task_id.clone(),
+            prompt: "solve task".to_string(),
+            cwd: dir.to_str().unwrap().to_string(),
+            session_id: "sess_fail".to_string(),
+            reasoning_effort: None,
+            extensions: None,
+            skills: None,
+            test_command: None,
+            turns_budget: None,
+            timeout_ms: None,
+        };
+
+        let engine = ScriptedEngine {
+            responses: tokio::sync::Mutex::new(VecDeque::from(vec![
+                Completion {
+                    content: "".to_string(),
+                    reasoning_content: Some("infinite thoughts...".into()),
+                    tool_calls: Vec::new(),
+                    finish_reason: Some("length".to_string()),
+                    metrics: Metrics {
+                        ttft_ms: None,
+                        total_ms: 10.0,
+                        tokens_per_sec: None,
+                        prompt_tokens: None,
+                        cached_tokens: None,
+                        completion_tokens: None,
+                        reasoning_tokens: None,
+                    },
+                },
+                Completion {
+                    content: "Salvage summary: reasoning ceiling hit".to_string(),
+                    reasoning_content: None,
+                    tool_calls: Vec::new(),
+                    finish_reason: Some("stop".to_string()),
+                    metrics: Metrics {
+                        ttft_ms: None,
+                        total_ms: 10.0,
+                        tokens_per_sec: None,
+                        prompt_tokens: None,
+                        cached_tokens: None,
+                        completion_tokens: None,
+                        reasoning_tokens: None,
+                    },
+                },
+            ])),
+        };
+
+        let loaded = crate::config::load().expect("load default config");
+        let mut config = loaded.config;
+        config.state_dir = dir.clone();
+
+        let res = run_job_with_engine(&spec, &state, &config, &engine)
+            .await
+            .unwrap();
+        assert!(res.contains("Salvage summary: reasoning ceiling hit"));
+
+        let rec = registry.get(&task_id).await.unwrap();
+        assert_eq!(rec.status, TaskStatus::Failed);
+
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

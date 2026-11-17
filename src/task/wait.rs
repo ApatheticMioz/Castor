@@ -68,6 +68,20 @@ impl StatusServer {
         }
     }
 
+    /// Acquire the singleton lock, retrying up to `retries` times with `delay_ms`
+    /// backoff to avoid TOCTOU startup races when spawned by `ensure_status_server`.
+    pub async fn try_acquire_lock_with_retry(&self, retries: usize, delay_ms: u64) -> bool {
+        for i in 0..=retries {
+            if self.try_acquire_lock() {
+                return true;
+            }
+            if i < retries {
+                tokio::time::sleep(Duration::from_millis(delay_ms)).await;
+            }
+        }
+        false
+    }
+
     /// Release the singleton lock (best-effort).
     pub fn release_lock(&self) {
         let _ = self.inner.locks.release("status");
@@ -111,9 +125,35 @@ impl StatusServer {
             });
         }
 
-        let addr = SocketAddr::from(([127, 0, 0, 1], port));
-        let listener = tokio::net::TcpListener::bind(addr).await?;
-        eprintln!("[castor-status] listening on {addr}");
+        let candidate_ports = [port, 18023, 18024, 18025, 0];
+        let mut bound_listener = None;
+        for &p in &candidate_ports {
+            let addr = SocketAddr::from(([127, 0, 0, 1], p));
+            match tokio::net::TcpListener::bind(addr).await {
+                Ok(l) => {
+                    bound_listener = Some(l);
+                    break;
+                }
+                Err(e) if e.kind() == std::io::ErrorKind::AddrInUse => {
+                    eprintln!("[castor-status] port {p} in use, trying next candidate");
+                    continue;
+                }
+                Err(e) => return Err(e),
+            }
+        }
+        let listener = bound_listener.ok_or_else(|| {
+            std::io::Error::new(std::io::ErrorKind::AddrInUse, "all candidate status ports in use")
+        })?;
+        let bound_addr = listener.local_addr()?;
+        let bound_port = bound_addr.port();
+        eprintln!("[castor-status] listening on {bound_addr}");
+
+        // Record active port into <state>/ports/status.port
+        let ports_dir = self.inner.registry.state_dir().ports();
+        let _ = std::fs::create_dir_all(&ports_dir);
+        let port_file = ports_dir.join("status.port");
+        let _ = std::fs::write(&port_file, bound_port.to_string());
+
         axum::serve(listener, self.router()).await
     }
 
@@ -360,20 +400,28 @@ fn now_ms() -> u64 {
 // Spawn helper (used by the `mcp` subcommand)
 // ---------------------------------------------------------------------------
 
+/// Read the active status port recorded by a running status server, falling back
+/// to `default_port` if absent or invalid.
+pub fn active_status_port(state: &StateDir, default_port: u16) -> u16 {
+    let port_file = state.ports().join("status.port");
+    std::fs::read_to_string(&port_file)
+        .ok()
+        .and_then(|s| s.trim().parse::<u16>().ok())
+        .unwrap_or(default_port)
+}
+
 /// Best-effort, non-blocking bring-up of the status server, invoked by the
 /// `mcp` subcommand before it starts serving.
 ///
-/// The sequence is **lock → probe → spawn if down → release**:
+/// The sequence is **lock → probe → release & spawn if down**:
 ///
 /// 1. **lock** — try to acquire the `status` singleton lock. If another live
 ///    process already holds it, a status server is running; we do not spawn.
-/// 2. **probe** — check whether something is already listening on the status
+/// 2. **probe** — check whether something is already listening on the active status
 ///    port (a live keeper may hold a stale lock, or a foreign process may own
 ///    the port). If the port is already serving, we do not spawn.
-/// 3. **spawn** — only when we own the lock *and* the port is dark do we spawn
-///    a detached `castor status` child.
-/// 4. **release** — release the lock we acquired so the spawned child can
-///    acquire it itself.
+/// 3. **release & spawn** — release the lock first so the child process can acquire
+///    it without a TOCTOU race, then spawn a detached `castor status` child.
 ///
 /// Before any of that, the lock-guarded **boot reaper** runs once (reconcile
 /// orphans + reclaim stale slots) so a reboot immediately heals stuck tasks.
@@ -387,13 +435,15 @@ pub async fn ensure_status_server(state: &StateDir, port: u16) {
     let acquired = server.try_acquire_lock();
 
     // 2. probe: is a status server already listening on the port?
-    let already_up = probe_status_port(port).await;
+    let target_port = active_status_port(state, port);
+    let already_up = probe_status_port(target_port).await;
 
     if acquired && !already_up {
+        // Release our lock before spawning so the child process can acquire
+        // it cleanly without a TOCTOU race.
+        server.release_lock();
         // 3. spawn (detached child re-acquires the lock).
         spawn_detached(state, port);
-        // 4. release so the child can take the lock.
-        server.release_lock();
     } else {
         // We either don't own the lock (another live process does) or the
         // port is already serving. Release our lock if we hold it; do not
@@ -401,7 +451,7 @@ pub async fn ensure_status_server(state: &StateDir, port: u16) {
         if acquired {
             server.release_lock();
         }
-        eprintln!("[castor] status server already up (port {port}); not spawning");
+        eprintln!("[castor] status server already up (port {target_port}); not spawning");
     }
 }
 
@@ -487,6 +537,12 @@ fn spawn_detached(state: &StateDir, port: u16) {
     {
         use std::os::unix::process::CommandExt;
         cmd.process_group(0);
+    }
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        // CREATE_NO_WINDOW (0x08000000) | CREATE_NEW_PROCESS_GROUP (0x00000200) | DETACHED_PROCESS (0x00000008)
+        cmd.creation_flags(0x08000208);
     }
     match cmd.spawn() {
         Ok(_) => {
@@ -763,5 +819,44 @@ mod tests {
         server.release_lock();
         assert!(server2.try_acquire_lock());
         server2.release_lock();
+    }
+
+    #[tokio::test]
+    async fn status_server_port_fallback_and_active_port_file() {
+        let state = tmp_state();
+        let server = StatusServer::new(&state);
+
+        // Bind an ephemeral listener to simulate a port conflict.
+        let blocker = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let blocked_port = blocker.local_addr().unwrap().port();
+
+        // Spawn server on the blocked port. The server should hit AddrInUse on blocked_port
+        // and fall back to one of candidate ports [port, 18023, 18024, 18025, 0],
+        // then write the bound port to <state>/ports/status.port.
+        let server_clone = server.clone();
+        tokio::spawn(async move {
+            let _ = server_clone.serve(blocked_port).await;
+        });
+
+        // Give server a moment to bind and record port.
+        let mut active_port = 0;
+        for _ in 0..50 {
+            tokio::time::sleep(Duration::from_millis(50)).await;
+            let p = active_status_port(&state, 0);
+            if p > 0 && p != blocked_port {
+                active_port = p;
+                break;
+            }
+        }
+
+        assert_ne!(active_port, 0, "status server must bind to fallback port and write status.port");
+        assert_ne!(active_port, blocked_port, "status server must have fallen back away from blocked port");
+
+        // Verify the server responds on the active port.
+        let reg = server.inner.registry.clone();
+        let id = reg.create("status test", "/tmp", "s1").await.unwrap();
+        let addr = SocketAddr::from(([127, 0, 0, 1], active_port));
+        let (code, _) = http_get(&addr, &format!("/task/{id}/status")).await;
+        assert_eq!(code, 200, "status server should respond on active port");
     }
 }

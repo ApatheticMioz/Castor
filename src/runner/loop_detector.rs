@@ -30,7 +30,7 @@ pub struct LoopDetector {
 
 impl LoopDetector {
     pub fn new(window: usize, threshold: usize) -> Self {
-        let threshold = threshold.max(1);
+        let threshold = threshold.max(2);
         let window = window.max(threshold * 3);
         Self {
             window,

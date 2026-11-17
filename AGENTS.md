@@ -148,21 +148,24 @@ The exact list below is the present-state inventory from
 Use structural AST tools, not string matching, for syntactic discovery and refactoring:
 - `ast_search` — find code by pattern with metavariables via native `ast-grep` (`function $NAME($$$ARGS) { $$$BODY }`).
 - `ast_replace` — multi-file structural AST refactoring with automatic rollback on syntax error.
-- With the `ast` feature enabled, code edits made via `edit_file` are also
-  validated by an in-memory AST syntax gate before disk commit; without it,
-  `edit_file` performs the plain exact-substring replacement only.
+- With the `ast` feature enabled (default), code edits and writes made via
+  `edit_file` and `write_file` are validated by an in-memory AST syntax gate
+  before disk commit; without it, `edit_file` performs the plain exact-substring
+  replacement and `write_file` writes directly.
 
 ### 3.3 Edit primitives
 - `edit_file` — exact-substring, uniqueness-guarded, per-region line-ending
   preservation. Under the `ast` feature the rewritten content additionally passes
   an in-memory AST syntax gate before commit; without the feature there is no
   syntax validation and the edit is a plain substring replacement.
+- `write_file` — full file write, atomic via temporary file swap, guarded by
+  the in-memory AST syntax gate when `ast` is active.
 - Fuzzy matching is not supported; modifications use exact substrings.
 
 ### 3.4 Module layout
 
-Feature flags (`Cargo.toml`): `default = ["mcp"]`; `mcp`, `evals`,
-`evo` (= `evals`), `ast` (structural AST surgery), `paper` (OpenAlex
+Feature flags (`Cargo.toml`): `default = ["mcp", "ast"]`; `mcp`, `evals`,
+`evo` (= `evals`), `ast` (structural AST surgery & syntax gate), `paper` (OpenAlex
 `paper_lookup`), `full` (= `mcp` + `evo` + `evals` + `ast` + `paper`).
 
 ```
@@ -251,9 +254,12 @@ leases); no manual context-size rules or human-rationing tables apply.
   with the turn's actual footprint after every turn
   (`TaskSemaphore::update_context_tokens`), so a growing session defers further
   admissions automatically.
-- **Overcommit recovery** is the cooperative yield gate (`should_yield`): a
-  younger lease yields its slot to older leases on physical pool overcommit or
-  empirical cache eviction, then re-acquires through the same FIFO queue.
+- **Overcommit recovery & KV Cache Priority**: Concurrency priority under
+  aggregate KV pool pressure is ranked strictly by in-flight KV cache fill
+  (`context_tokens` descending), prioritizing heavier sessions to complete and
+  liberate their GPU memory. Lighter sessions pause asynchronously before their turn
+  (via async `wait_backpressure`) without dropping disk leases, killing tasks, or
+  thrashing the filesystem.
 - **Stall/timeout retries are zero-invalidation**: the runner re-sends the
   unchanged message prefix with the **original** reasoning effort and appends a
   nudge as the final user message *after* the shared prefix, so the request's
@@ -336,11 +342,12 @@ explicit `ALLOW_ENGINE_INTERRUPT=1` opt-in before they execute.
   unexpanded `$` references) before anything is spawned. It is a *command-string*
   policy check, not a code AST parser.
 - **In-memory AST syntax validation** is a third, distinct concern and is
-  **feature-gated under `ast`**: on `edit_file` and `ast_replace` the fully
-  rewritten content is reparsed in memory and any `ERROR`/`UNDEFINED` tree-sitter
-  node blocks the write (or triggers rollback). It validates *source-file edits
-  only* (via extension-resolved grammar) and applies to neither path access nor
-  the shell command scanner.
+  **feature-gated under `ast` (enabled by default)**: on `write_file`,
+  `edit_file`, and `ast_replace` candidate content is reparsed in memory across
+  27 bundled grammars, and any `ERROR`/`UNDEFINED`/`MISSING` tree-sitter node
+  blocks the write with descriptive diagnostics (or triggers rollback). It validates
+  *source-file edits only* (via extension-resolved grammar) and applies to neither
+  path access nor the shell command scanner.
 - **Never** open a public issue for a security vulnerability. Report
   privately per [`SECURITY.md`](SECURITY.md).
 - The sandbox containment test suite (`src/tools/sandbox.rs`) is the regression net for the boundary.

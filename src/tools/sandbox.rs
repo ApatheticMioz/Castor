@@ -643,11 +643,11 @@ impl SandboxPolicy {
         if after.is_empty() {
             return join(""); // "~"
         }
-        if let Some(sub) = after.strip_prefix('/') {
-            return join(sub); // "~/sub/..."
+        if let Some(sub) = after.strip_prefix('/').or_else(|| after.strip_prefix('\\')) {
+            return join(sub); // "~/sub/..." or "~\sub\..."
         }
         // "~user" or "~user/sub": drop the `user` segment, keep the rest.
-        let sub = after.split('/').skip(1).collect::<Vec<_>>().join("/");
+        let sub = after.split(['/', '\\']).skip(1).collect::<Vec<_>>().join("/");
         join(&sub)
     }
 

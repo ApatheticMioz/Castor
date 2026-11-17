@@ -187,7 +187,6 @@ pub fn run_task(task_dir: &Path, variant: Variant) -> EvalReport {
             "You are a precise, sandboxed coding agent.",
             &config.prompt,
             &[],
-            0, // use the default turn budget
             Some(&crate::runner::SessionOptions::with_workspace(
                 workspace.clone(),
             )),

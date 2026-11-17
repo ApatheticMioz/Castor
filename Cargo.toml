@@ -14,14 +14,15 @@ name = "castor"
 path = "src/lib.rs"
 
 [features]
-default = ["mcp"]
+default = ["mcp", "ast"]
 mcp = []
 evals = []
 evo = ["evals"]
-# Opt-in capability gates. The default build exposes a lean 8-tool surface
-# (file I/O, search, shell, web). `ast` adds structural AST surgery
-# (ast_search / ast_replace) and its `ast-grep-core` dependency; `paper` adds
-# the OpenAlex `paper_lookup` tool. `full` enables everything.
+# Capability gates. The default build enables `mcp` and `ast` out of the box
+# (opt-out via `--no-default-features`), providing in-memory AST syntax
+# validation guards for file writes and structural AST surgery (ast_search /
+# ast_replace). `paper` adds the OpenAlex `paper_lookup` tool. `full` enables
+# everything.
 ast = ["dep:ast-grep-core", "dep:ast-grep-language"]
 paper = []
 full = ["mcp", "evo", "evals", "ast", "paper"]

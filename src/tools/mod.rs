@@ -147,14 +147,18 @@ impl CompositeExecutor {
 /// `bash`, `web_search`, `web_fetch`). `ast` appends the structural AST
 /// surgery tools; `paper` appends OpenAlex `paper_lookup`.
 pub fn builtin_tool_schemas() -> Vec<ToolSchema> {
-    // The `edit_file` description depends on the `ast` feature gate: with
-    // `ast`, edits pass an in-memory AST syntax gate before commit; without it,
-    // `edit_file` is a plain exact-substring replacement and must NOT promise
-    // AST validation.
+    // The `edit_file` and `write_file` descriptions depend on the `ast` feature gate:
+    // with `ast`, writes pass an in-memory AST syntax gate before commit; without it,
+    // they perform direct filesystem operations without AST validation.
     #[cfg(feature = "ast")]
     const EDIT_FILE_DESC: &str = "Replace an exact substring in a file, validating the rewritten content with in-memory AST syntax before committing. Target must match uniquely unless replace_all is true.";
     #[cfg(not(feature = "ast"))]
     const EDIT_FILE_DESC: &str = "Replace an exact substring in a file. Target must match uniquely unless replace_all is true.";
+
+    #[cfg(feature = "ast")]
+    const WRITE_FILE_DESC: &str = "Create or overwrite a file on disk, validating code syntax with an in-memory AST gate before committing (creates parent directories automatically). Prefer edit_file for surgical changes to existing files.";
+    #[cfg(not(feature = "ast"))]
+    const WRITE_FILE_DESC: &str = "Create or overwrite a file on disk (creates parent directories automatically). Prefer edit_file for surgical changes to existing files.";
 
     // `mut` is needed only for the feature-gated `push` blocks below (`ast`,
     // `paper`); allow the warning on builds where both are off.
@@ -175,7 +179,7 @@ pub fn builtin_tool_schemas() -> Vec<ToolSchema> {
         },
         ToolSchema {
             name: "write_file".to_string(),
-            description: "Create or overwrite a file on disk (creates parent directories automatically). Prefer edit_file for surgical changes to existing files.".to_string(),
+            description: WRITE_FILE_DESC.to_string(),
             parameters: json!({
                 "type": "object",
                 "properties": {

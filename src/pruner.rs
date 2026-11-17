@@ -29,6 +29,12 @@ use thiserror::Error;
 /// Default TTL for scratch directory artifacts (4 days in milliseconds).
 pub const DEFAULT_SCRATCH_TTL_MS: u64 = 4 * 86_400_000;
 
+/// State file recording epoch milliseconds of the last successful prune.
+pub const LAST_PRUNE_FILE: &str = ".last_prune";
+
+/// Background auto-pruning interval (24 hours in milliseconds).
+pub const AUTO_PRUNE_INTERVAL_MS: u64 = 24 * 60 * 60 * 1000;
+
 /// Retention policy.
 #[derive(Debug, Clone)]
 pub struct PrunePolicy {
@@ -83,6 +89,8 @@ pub struct PrunePlan {
     pub evo: Vec<PathBuf>,
     /// Scratch directories or files to remove.
     pub scratch: Vec<PathBuf>,
+    /// Stale or expired lock tombstones to remove.
+    pub tombstones: Vec<PathBuf>,
     /// Set to `true` by [`apply`] once the plan has been executed.
     pub applied: bool,
 }
@@ -95,6 +103,7 @@ impl PrunePlan {
             + self.telemetry.len()
             + self.evo.len()
             + self.scratch.len()
+            + self.tombstones.len()
     }
 
     pub fn is_empty(&self) -> bool {
@@ -142,8 +151,17 @@ pub fn plan(state_dir: &Path, policy: &PrunePolicy) -> PrunePlan {
     let telemetry = plan_telemetry(state_dir, policy, now);
     let evo = plan_evo(state_dir, policy, now);
     let scratch = plan_scratch(&state_dir.join(".scratch"), policy.scratch_ttl_ms, now);
+    let tombstones = plan_tombstones(state_dir, policy, now);
 
-    let fingerprint = compute_fingerprint(state_dir, &sessions, &tasks, &telemetry, &evo, &scratch);
+    let fingerprint = compute_fingerprint(
+        state_dir,
+        &sessions,
+        &tasks,
+        &telemetry,
+        &evo,
+        &scratch,
+        &tombstones,
+    );
 
     PrunePlan {
         state_dir: state_dir.to_path_buf(),
@@ -153,6 +171,7 @@ pub fn plan(state_dir: &Path, policy: &PrunePolicy) -> PrunePlan {
         telemetry,
         evo,
         scratch,
+        tombstones,
         applied: false,
     }
 }
@@ -181,6 +200,7 @@ pub fn apply(state_dir: &Path, plan: &mut PrunePlan) -> Result<usize, PruneError
         &plan.telemetry,
         &plan.evo,
         &plan.scratch,
+        &plan.tombstones,
     );
     if fp != plan.fingerprint {
         return Err(PruneError::NotFromPlan);
@@ -210,6 +230,10 @@ pub fn apply(state_dir: &Path, plan: &mut PrunePlan) -> Result<usize, PruneError
         } else {
             fs::remove_file(p)?;
         }
+        deleted += 1;
+    }
+    for p in &plan.tombstones {
+        fs::remove_file(p)?;
         deleted += 1;
     }
 
@@ -650,6 +674,7 @@ fn compute_fingerprint(
     telemetry: &[PathBuf],
     evo: &[PathBuf],
     scratch: &[PathBuf],
+    tombstones: &[PathBuf],
 ) -> u64 {
     let mut h: u64 = 0xcbf29ce484222325;
     let prime: u64 = 0x00000100000001b3;
@@ -701,7 +726,113 @@ fn compute_fingerprint(
     for p in scratch {
         hash_bytes(p.to_string_lossy().as_bytes());
     }
+    for p in tombstones {
+        hash_bytes(p.to_string_lossy().as_bytes());
+    }
     h
+}
+
+// ---------------------------------------------------------------------------
+// Tombstone planning
+// ---------------------------------------------------------------------------
+
+fn plan_tombstones(state_dir: &Path, policy: &PrunePolicy, now: u64) -> Vec<PathBuf> {
+    let locks_dir = state_dir.join("locks");
+    if !locks_dir.is_dir() {
+        return Vec::new();
+    }
+    let entries = match fs::read_dir(&locks_dir) {
+        Ok(e) => e,
+        Err(_) => return Vec::new(),
+    };
+
+    let mut out = Vec::new();
+    for entry in entries.flatten() {
+        let name = entry.file_name().to_string_lossy().into_owned();
+        if !name.ends_with(".tombstone") {
+            continue;
+        }
+        let path = entry.path();
+        if !path.is_file() {
+            continue;
+        }
+
+        // Try reading lock metadata { pid, held_at, ttl_ms }
+        let is_expired = if let Ok(raw) = fs::read_to_string(&path)
+            && let Ok(v) = serde_json::from_str::<serde_json::Value>(&raw)
+            && let Some(held_at) = v.get("held_at").and_then(|h| h.as_u64())
+            && let Some(ttl_ms) = v.get("ttl_ms").and_then(|t| t.as_u64())
+        {
+            now.saturating_sub(held_at) > ttl_ms
+        } else {
+            // Unreadable or non-JSON: check mtime against max_age or default 1 hour
+            let mtime = mtime_of(&path);
+            now.saturating_sub(mtime) > policy.max_age_ms.min(3_600_000)
+        };
+
+        if is_expired {
+            out.push(path);
+        }
+    }
+    out
+}
+
+// ---------------------------------------------------------------------------
+// Auto-prune lifecycle
+// ---------------------------------------------------------------------------
+
+/// Check if `.last_prune` in `state_dir` is older than 24 hours (or missing).
+pub fn needs_auto_prune(state_dir: &Path, now_ms: u64) -> bool {
+    let last_prune_path = state_dir.join(LAST_PRUNE_FILE);
+    if !last_prune_path.exists() {
+        return true;
+    }
+    match fs::read_to_string(&last_prune_path) {
+        Ok(s) => match s.trim().parse::<u64>() {
+            Ok(last_ms) => now_ms.saturating_sub(last_ms) >= AUTO_PRUNE_INTERVAL_MS,
+            Err(_) => {
+                let mtime = mtime_of(&last_prune_path);
+                now_ms.saturating_sub(mtime) >= AUTO_PRUNE_INTERVAL_MS
+            }
+        },
+        Err(_) => true,
+    }
+}
+
+/// Record the current timestamp in `.last_prune`.
+pub fn record_last_prune(state_dir: &Path, now_ms: u64) -> std::io::Result<()> {
+    let last_prune_path = state_dir.join(LAST_PRUNE_FILE);
+    fs::write(last_prune_path, now_ms.to_string())
+}
+
+/// Spawns an automatic, non-blocking background pruning pass on boot if `.last_prune`
+/// is older than 24 hours.
+/// Returns a `JoinHandle` if a thread was spawned, or `None` if pruning was not needed.
+pub fn maybe_auto_prune(state_dir: &Path) -> Option<std::thread::JoinHandle<()>> {
+    let now = now_millis();
+    if !needs_auto_prune(state_dir, now) {
+        return None;
+    }
+    let state_dir_buf = state_dir.to_path_buf();
+    std::thread::Builder::new()
+        .name("castor-auto-prune".into())
+        .spawn(move || {
+            let locks = crate::state::Locks::new(state_dir_buf.join("locks"));
+            let lock_name = "pruner";
+            if let Ok(crate::state::AcquireResult::Acquired) = locks.acquire(lock_name, 300_000) {
+                let now_inner = now_millis();
+                if needs_auto_prune(&state_dir_buf, now_inner) {
+                    let policy = PrunePolicy::default();
+                    let mut p = plan(&state_dir_buf, &policy);
+                    if !p.is_empty() {
+                        let _ = apply(&state_dir_buf, &mut p);
+                    }
+                    let _ = record_last_prune(&state_dir_buf, now_inner);
+                }
+                let _ = locks.release(lock_name);
+            }
+        })
+        .ok()
 }
 
 /// mtime of a path in epoch ms (0 if unavailable).
@@ -1223,6 +1354,102 @@ mod tests {
         assert_eq!(count, 1);
         assert!(!another_old.exists());
         assert!(new_file.exists());
+
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn tombstone_pruning_and_fresh_retention() {
+        let root = tmp_dir();
+        make_state(&root);
+        let now = 10_000_000u64;
+
+        // Old tombstone: held_at = 1_000_000, ttl = 60_000 (expired 8+ million ms ago)
+        let locks_dir = root.join("locks");
+        let old_tombstone = locks_dir.join("worker.lock.tombstone");
+        let old_json = serde_json::json!({
+            "pid": 1234,
+            "held_at": 1_000_000,
+            "ttl_ms": 60_000,
+        });
+        fs::write(&old_tombstone, serde_json::to_string(&old_json).unwrap()).unwrap();
+
+        // Fresh tombstone: held_at = 9_990_000, ttl = 60_000 (expires at 10_050_000)
+        let fresh_tombstone = locks_dir.join("fresh.lock.tombstone");
+        let fresh_json = serde_json::json!({
+            "pid": 5678,
+            "held_at": 9_990_000,
+            "ttl_ms": 60_000,
+        });
+        fs::write(&fresh_tombstone, serde_json::to_string(&fresh_json).unwrap()).unwrap();
+
+        let mut p = plan(&root, &policy_now(now));
+        assert!(
+            p.tombstones.contains(&old_tombstone),
+            "expired tombstone must be planned for deletion"
+        );
+        assert!(
+            !p.tombstones.contains(&fresh_tombstone),
+            "fresh tombstone must NOT be planned for deletion"
+        );
+
+        let n = apply(&root, &mut p).unwrap();
+        assert!(n >= 1);
+        assert!(!old_tombstone.exists(), "expired tombstone must be deleted");
+        assert!(fresh_tombstone.exists(), "fresh tombstone must survive");
+
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn auto_prune_last_prune_lifecycle() {
+        let root = tmp_dir();
+        make_state(&root);
+        let now = 10_000_000u64;
+
+        // 1. Missing .last_prune -> needs auto prune
+        assert!(needs_auto_prune(&root, now));
+
+        // 2. Record last prune at now
+        record_last_prune(&root, now).unwrap();
+        assert!(!needs_auto_prune(&root, now));
+        assert!(!needs_auto_prune(&root, now + 1000));
+        assert!(!needs_auto_prune(&root, now + AUTO_PRUNE_INTERVAL_MS - 1));
+
+        // 3. Older than 24h -> needs auto prune
+        assert!(needs_auto_prune(&root, now + AUTO_PRUNE_INTERVAL_MS));
+        assert!(needs_auto_prune(&root, now + AUTO_PRUNE_INTERVAL_MS + 5000));
+
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn auto_prune_background_pass() {
+        let root = tmp_dir();
+        make_state(&root);
+
+        // Put an old tombstone in locks
+        let locks_dir = root.join("locks");
+        let old_tombstone = locks_dir.join("stale.lock.tombstone");
+        let old_json = serde_json::json!({
+            "pid": 1234,
+            "held_at": 1000,
+            "ttl_ms": 1000,
+        });
+        fs::write(&old_tombstone, serde_json::to_string(&old_json).unwrap()).unwrap();
+
+        // Background pass triggers because .last_prune is missing
+        let handle = maybe_auto_prune(&root);
+        assert!(handle.is_some(), "thread must be spawned when prune is needed");
+        handle.unwrap().join().unwrap();
+
+        // .last_prune should now exist
+        assert!(root.join(LAST_PRUNE_FILE).exists());
+        // Old tombstone should be pruned
+        assert!(!old_tombstone.exists());
+
+        // Subsequent call returns None immediately (since .last_prune is fresh)
+        assert!(maybe_auto_prune(&root).is_none());
 
         let _ = fs::remove_dir_all(&root);
     }

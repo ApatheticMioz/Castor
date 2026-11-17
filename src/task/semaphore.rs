@@ -103,12 +103,15 @@ pub fn pid_alive(pid: u32) -> bool {
     unsafe {
         use windows_sys::Win32::Foundation::CloseHandle;
         use windows_sys::Win32::System::Threading::{
-            OpenProcess, PROCESS_QUERY_LIMITED_INFORMATION,
+            GetExitCodeProcess, OpenProcess, PROCESS_QUERY_LIMITED_INFORMATION,
         };
+        const STILL_ACTIVE: u32 = 259;
         let handle = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, 0, pid);
         if !handle.is_null() {
+            let mut exit_code: u32 = 0;
+            let success = GetExitCodeProcess(handle, &mut exit_code);
             CloseHandle(handle);
-            true
+            success != 0 && exit_code == STILL_ACTIVE
         } else {
             false
         }
@@ -194,6 +197,19 @@ struct Inner {
     /// Total token budget for the pool. `0` means the token-budget check is
     /// disabled (original slot-count-only semantics).
     pool_capacity_tokens: u32,
+}
+
+fn lease_rank(a: &Lease, b: &Lease) -> std::cmp::Ordering {
+    // 1. Higher context_tokens is heavier, prioritized to finish and free its large memory
+    if a.context_tokens != b.context_tokens {
+        return a.context_tokens.cmp(&b.context_tokens);
+    }
+    // 2. Older task (smaller timestamp `at`) is senior
+    if a.at != b.at {
+        return b.at.cmp(&a.at);
+    }
+    // 3. Deterministic tie-breaker
+    b.task_id.cmp(&a.task_id)
 }
 
 impl TaskSemaphore {
@@ -510,26 +526,38 @@ impl TaskSemaphore {
     ///
     /// When `pool_capacity_tokens == 0` the token-budget check is bypassed
     /// entirely (original slot-count-only semantics).
+    /// Soft limit for the pool's token budget (90% of capacity).
+    pub fn soft_pool_limit(&self) -> u64 {
+        (self.inner.pool_capacity_tokens as u64 * 90) / 100
+    }
+
+    /// Aggregate committed context tokens across all active leases.
+    pub fn committed_tokens(&self) -> u64 {
+        self.list_slots().iter().map(|l| l.context_tokens as u64).sum()
+    }
+
+    /// Whether the aggregate KV pool is exhausted (committed >= capacity).
+    pub fn is_pool_exhausted(&self) -> bool {
+        if self.inner.pool_capacity_tokens == 0 {
+            return false;
+        }
+        self.committed_tokens() >= self.inner.pool_capacity_tokens as u64
+    }
+
     /// DRY token-budget admission gate.
     ///
-    /// Returns `true` when a new lease with `initial_tokens` context tokens
-    /// may be admitted without pushing the committed pool total over
-    /// `pool_capacity_tokens`. The gate is disabled (always admits) when no
-    /// budget is configured (`pool_capacity_tokens == 0`).
-    ///
-    /// It is evaluated over ALL live leases, so it also holds when the pool
-    /// is currently empty — a single oversized claim can never overcommit the
-    /// pool.
+    /// Halts new task admission if aggregate committed tokens exceed the soft limit,
+    /// or if the new task's initial tokens would push the pool over total capacity.
     fn token_budget_admits(&self, initial_tokens: u32) -> bool {
         let capacity = self.inner.pool_capacity_tokens;
         if capacity == 0 {
             return true; // token-budget gate disabled
         }
-        let committed: u64 = self
-            .list_slots()
-            .iter()
-            .map(|l| l.context_tokens as u64)
-            .sum();
+        let committed = self.committed_tokens();
+        let soft_limit = self.soft_pool_limit();
+        if committed > soft_limit {
+            return false;
+        }
         let new_total = committed + initial_tokens as u64;
         new_total <= (capacity as u64)
     }
@@ -668,43 +696,42 @@ impl TaskSemaphore {
         out
     }
 
-    /// Decide whether a held [`SlotLease`] should yield its slot back to the
-    /// pool so the pool's committed token total can come back within budget.
-    ///
-    /// The gate is self-contained in the pool (no per-turn threshold knobs are
-    /// injected by the caller):
-    ///
-    /// - **Solo** (`slots.len() <= 1`): no one to yield to — never yields.
-    /// - **Pool overcommit**: when the pool's token budget is enabled
-    ///   (`pool_capacity_tokens > 0`) and the committed total
-    ///   `sum(lease.context_tokens)` exceeds it, the lease yields. There is no
-    ///   "oldest never yields" immunity — under overcommit the heaviest /
-    ///   oldest sessions yield too, because a growing in-flight context is
-    ///   exactly what must give way for the pool to come back within budget.
-    ///
-    /// A yielding worker is expected to release the slot and re-enter the
-    /// standard [`Self::acquire_with_tokens`] (unified admission rule + FIFO
-    /// queue): with the pool overcommitted the re-acquire waits for capacity
-    /// rather than winning its own slot back immediately.
-    ///
-    /// The held [`SlotLease`] is passed for call-site symmetry (the runner
-    /// consults the gate against its own lease); the decision itself is a
-    /// pool-level property, so the argument is intentionally unused.
-    pub fn should_yield(&self, _lease: &SlotLease) -> bool {
+    /// Decide whether a held [`SlotLease`] should yield (pause) to allow
+    /// a heavier or senior active task to finish and free its KV cache.
+    pub fn should_yield(&self, lease: &SlotLease) -> bool {
         let slots = self.list_slots();
         if slots.len() <= 1 {
             // Solo worker: no one to yield to, and no contention.
             return false;
         }
-
-        // Pool overcommit is the only yield trigger: when the pool's token
-        // budget is enabled and the committed total exceeds it, any held lease
-        // (including the heaviest / oldest) yields so the pool can recover.
         if self.inner.pool_capacity_tokens == 0 {
             return false;
         }
-        let committed: u64 = slots.iter().map(|l| l.context_tokens as u64).sum();
-        committed > (self.inner.pool_capacity_tokens as u64)
+        let committed = self.committed_tokens();
+        if committed <= self.soft_pool_limit() {
+            return false;
+        }
+
+        let our_lease = slots
+            .iter()
+            .find(|l| l.task_id == lease.task_id && l.tenant == lease.tenant);
+        let Some(ours) = our_lease else {
+            return false;
+        };
+
+        // If there exists ANY other active lease with higher rank (heavier context or senior),
+        // we yield (pause) so that task can finish and release its KV footprint.
+        slots.iter().any(|other| {
+            other.task_id != ours.task_id && lease_rank(other, ours) == std::cmp::Ordering::Greater
+        })
+    }
+
+    /// Asynchronously wait (pause) before a turn while the pool is under pressure
+    /// and another heavier session has higher priority.
+    pub async fn wait_backpressure(&self, lease: &SlotLease) {
+        while self.should_yield(lease) {
+            tokio::time::sleep(self.inner.poll_interval).await;
+        }
     }
 
     /// Deterministic slot status distinguishing same-tenant vs alien-tenant
@@ -972,6 +999,29 @@ mod tests {
         // Reap so nothing is left around; after reaping the pid is gone.
         let _ = child.wait();
         assert!(!pid_alive(pid), "reaped pid {pid} must be dead");
+    }
+
+    #[test]
+    fn pid_alive_reports_current_and_dead_accurately() {
+        assert!(pid_alive(std::process::id()), "current process must be alive");
+        assert!(!pid_alive(0), "pid 0 must never be alive");
+        #[cfg(windows)]
+        {
+            let mut c = std::process::Command::new("cmd")
+                .args(["/c", "exit", "0"])
+                .spawn()
+                .unwrap();
+            let pid = c.id();
+            let _ = c.wait();
+            assert!(!pid_alive(pid), "exited process on Windows must be dead (GetExitCodeProcess != STILL_ACTIVE)");
+        }
+        #[cfg(unix)]
+        {
+            let mut c = std::process::Command::new("true").spawn().unwrap();
+            let pid = c.id();
+            let _ = c.wait();
+            assert!(!pid_alive(pid), "reaped process must be dead");
+        }
     }
 
     #[test]
@@ -1880,21 +1930,21 @@ mod tests {
         assert!(!sem.should_yield(&a));
     }
 
-    /// Under pool overcommit there is no "oldest never yields" immunity: the
-    /// oldest active lease yields too when its (heaviest) context pushes the
-    /// pool over the budget, so a growing session can give way and let the pool
-    /// recover.
+    /// Under pool overcommit, the task with the higher KV cache footprint is
+    /// prioritized to complete and free its memory without KV cache thrashing.
+    /// The lighter task yields/pauses.
     #[test]
-    fn should_yield_oldest_yields_when_overcommitted() {
+    fn should_yield_prioritizes_higher_context_task_when_overcommitted() {
         let state = tmp_state();
         let sem = TaskSemaphore::with_poll_interval(&state, 2, 50).with_token_budget(100);
         // Both admitted up front (40 + 40 = 80 <= 100).
-        let a = rt().block_on(sem.acquire_with_tokens("a", 40)); // oldest
-        let _b = rt().block_on(sem.acquire_with_tokens("b", 40));
-        // Grow the *oldest* lease to 80 → committed = 80 + 40 = 120 > 100.
+        let a = rt().block_on(sem.acquire_with_tokens("a", 40));
+        let b = rt().block_on(sem.acquire_with_tokens("b", 40));
+        // Grow lease `a` to 80 → committed = 80 + 40 = 120 > 90 (soft limit).
         sem.update_context_tokens("a", 80);
-        // The oldest (heaviest) lease yields — no right-of-way immunity.
-        assert!(sem.should_yield(&a));
+        // `a` has higher context (80 vs 40), so `a` does NOT yield; `b` yields to let `a` finish.
+        assert!(!sem.should_yield(&a));
+        assert!(sem.should_yield(&b));
     }
 
     /// A younger lease with a low cache-hit ratio but a pool that is NOT
@@ -1906,20 +1956,36 @@ mod tests {
         let sem = TaskSemaphore::with_poll_interval(&state, 2, 50).with_token_budget(1000);
         let _a = rt().block_on(sem.acquire_with_tokens("a", 10));
         let b = rt().block_on(sem.acquire_with_tokens("b", 50)); // younger
-        // committed = 60 <= 1000 → no overcommit → no yield.
+        // committed = 60 <= 900 → no overcommit → no yield.
         assert!(!sem.should_yield(&b));
     }
 
-    /// A younger lease that overcommits the physical token pool yields.
+    /// When a younger task grows into the heavier session, it is prioritized
+    /// to finish and the lighter task yields.
     #[test]
     fn should_yield_younger_pool_overcommit_yields() {
         let state = tmp_state();
         let sem = TaskSemaphore::with_poll_interval(&state, 2, 50).with_token_budget(50);
-        let _a = rt().block_on(sem.acquire_with_tokens("a", 5));
+        let a = rt().block_on(sem.acquire_with_tokens("a", 5));
         let b = rt().block_on(sem.acquire_with_tokens("b", 5)); // younger
-        // Grow `b`'s context so committed = 5 + 100 = 105 > 50.
+        // Grow `b`'s context so committed = 5 + 100 = 105 > 45 (soft limit).
         sem.update_context_tokens("b", 100);
-        // committed = 105 > 50 → yield.
+        // `b` is the heavy task (100 > 5), so `b` does not yield and `a` yields.
+        assert!(!sem.should_yield(&b));
+        assert!(sem.should_yield(&a));
+    }
+
+    /// When context sizes are tied under overcommit, senior task wins tie-breaker.
+    #[test]
+    fn should_yield_tie_breaker_senior_task_wins() {
+        let state = tmp_state();
+        let sem = TaskSemaphore::with_poll_interval(&state, 2, 50).with_token_budget(100);
+        let a = rt().block_on(sem.acquire_with_tokens("a", 50));
+        std::thread::sleep(Duration::from_millis(5));
+        let b = rt().block_on(sem.acquire_with_tokens("b", 50));
+        // committed = 100 > 90 (soft limit). Contexts are equal (50 == 50).
+        // `a` is senior (acquired first), so `a` does not yield and `b` yields.
+        assert!(!sem.should_yield(&a));
         assert!(sem.should_yield(&b));
     }
 

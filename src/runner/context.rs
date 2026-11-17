@@ -1,4 +1,4 @@
-//! Token counting, in-flight ceilings, and session message persistence.
+//! Token counting and session message persistence.
 
 use std::fs;
 use std::path::PathBuf;
@@ -11,9 +11,6 @@ use crate::state::StateDir;
 
 use super::messages::strip_think_tags;
 
-pub(crate) const CONTEXT_CEILING_DIRECTIVE: &str =
-    "[System: Working context budget has reached 90%. Do not execute further tools. \
-     Synthesize your final conclusions and response immediately.]";
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub(crate) struct PersistedMessage {
@@ -122,10 +119,6 @@ pub(crate) fn history_tokens(messages: &[Message]) -> usize {
 
 pub(crate) fn watermark_tokens(max_context: usize) -> usize {
     (max_context as u64 * 75 / 100) as usize
-}
-
-pub(crate) fn in_flight_ceiling_tokens(max_context: usize) -> usize {
-    (max_context as u64 * 90 / 100) as usize
 }
 
 pub fn resumed_history_tokens(state: &StateDir, session_id: &str, max_context: Option<u32>) -> u32 {

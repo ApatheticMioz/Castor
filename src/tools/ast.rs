@@ -83,20 +83,63 @@ pub struct ReplaceSummary {
 }
 
 /// Resolve a file path to its canonical `SupportLang` via
-/// `SupportLang::from_path`, which knows the full 27-language extension map
-/// (e.g. `.go` → Go, `.sh` → Bash, `.json` → Json, `.rs` → Rust). Returns
-/// `None` for unrecognized extensions (the file is skipped on directory scans).
-fn infer_lang_by_extension(path: &Path) -> Option<SupportLang> {
-    SupportLang::from_path(path)
+/// `SupportLang::from_path` with comprehensive extension fallbacks covering
+/// all 27 bundled tree-sitter grammars (including `.htm`, `.yml`, `.bash`,
+/// `.mjs`, `.cjs`, `.jsx`, `.mts`, `.cts`, `.pyi`, `.cc`, `.hpp`, `.jsonc`,
+/// etc.). Returns `None` for unrecognized extensions (e.g. `.txt`, `.md`, or
+/// arbitrary non-code files).
+pub fn infer_lang_by_extension(path: &Path) -> Option<SupportLang> {
+    if let Some(lang) = SupportLang::from_path(path) {
+        return Some(lang);
+    }
+    let ext = path.extension()?.to_str()?.to_ascii_lowercase();
+    match ext.as_str() {
+        "rs" => Some(SupportLang::Rust),
+        "py" | "pyi" => Some(SupportLang::Python),
+        "js" | "mjs" | "cjs" | "jsx" => Some(SupportLang::JavaScript),
+        "ts" | "mts" | "cts" => Some(SupportLang::TypeScript),
+        "tsx" => Some(SupportLang::Tsx),
+        "go" => Some(SupportLang::Go),
+        "c" | "h" => Some(SupportLang::C),
+        "cpp" | "cc" | "cxx" | "hpp" | "hh" | "hxx" => Some(SupportLang::Cpp),
+        "java" => Some(SupportLang::Java),
+        "cs" => Some(SupportLang::CSharp),
+        "lua" => Some(SupportLang::Lua),
+        "html" | "htm" | "xhtml" => Some(SupportLang::Html),
+        "css" | "scss" => Some(SupportLang::Css),
+        "json" | "jsonc" => Some(SupportLang::Json),
+        "yaml" | "yml" => Some(SupportLang::Yaml),
+        "sh" | "bash" | "zsh" => Some(SupportLang::Bash),
+        "rb" => Some(SupportLang::Ruby),
+        "php" => Some(SupportLang::Php),
+        "swift" => Some(SupportLang::Swift),
+        "kt" | "kts" => Some(SupportLang::Kotlin),
+        "scala" => Some(SupportLang::Scala),
+        "dart" => Some(SupportLang::Dart),
+        "sol" => Some(SupportLang::Solidity),
+        "hs" => Some(SupportLang::Haskell),
+        "ex" | "exs" => Some(SupportLang::Elixir),
+        "nix" => Some(SupportLang::Nix),
+        _ => None,
+    }
 }
 
 /// Parse a language alias (e.g. `"js"`, `"ts"`, `"py"`, `"rs"`) into a
 /// `SupportLang`. All 27 canonical aliases from `SupportLang::all_langs` are
-/// accepted (case-insensitively).
+/// accepted (case-insensitively), along with standard common aliases.
 fn parse_lang(alias: &str) -> Result<SupportLang, AstError> {
-    alias
-        .parse::<SupportLang>()
-        .map_err(|e| AstError::Language(format!("unsupported language '{alias}': {e}")))
+    if let Ok(lang) = alias.parse::<SupportLang>() {
+        return Ok(lang);
+    }
+    let lower = alias.to_ascii_lowercase();
+    match lower.as_str() {
+        "sh" | "shell" => Ok(SupportLang::Bash),
+        "yml" => Ok(SupportLang::Yaml),
+        "c++" => Ok(SupportLang::Cpp),
+        "htm" => Ok(SupportLang::Html),
+        "csharp" => Ok(SupportLang::CSharp),
+        _ => Err(AstError::Language(format!("unsupported language '{alias}'"))),
+    }
 }
 
 /// Recursively collect candidate files under `dir`, skipping ignored
@@ -422,16 +465,92 @@ pub fn html_validation_text(content: &str) -> String {
     out
 }
 
+/// Diagnostic details for a detected syntax error.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SyntaxErrorDetail {
+    pub line: usize,
+    pub col: usize,
+    pub snippet: String,
+}
+
+/// Convert a byte offset in `source` to a 1-indexed (line, column) tuple.
+/// Safely handles UTF-8 multi-byte boundaries.
+pub fn byte_to_line_col(source: &str, mut byte_offset: usize) -> (usize, usize) {
+    byte_offset = byte_offset.min(source.len());
+    while byte_offset > 0 && !source.is_char_boundary(byte_offset) {
+        byte_offset -= 1;
+    }
+    let prefix = &source[..byte_offset];
+    let line = prefix.matches('\n').count() + 1;
+    let col = match prefix.rfind('\n') {
+        Some(idx) => byte_offset - idx,
+        None => byte_offset + 1,
+    };
+    (line, col)
+}
+
+/// Recursively walk the AST to collect syntax errors (`ERROR`, `UNDEFINED`, `MISSING` nodes).
+/// Does not descend into child nodes of an error node to avoid duplicate cascading reports.
+fn collect_syntax_errors(
+    node: &Node<ast_grep_core::tree_sitter::StrDoc<SupportLang>>,
+    source: &str,
+    errors: &mut Vec<SyntaxErrorDetail>,
+    limit: usize,
+) {
+    if errors.len() >= limit {
+        return;
+    }
+    let kind = node.kind();
+    if node.is_error()
+        || node.is_missing()
+        || kind == "ERROR"
+        || kind == "UNDEFINED"
+        || kind == "MISSING"
+    {
+        let range = node.range();
+        let (line, col) = byte_to_line_col(source, range.start);
+        let line_content = source.lines().nth(line.saturating_sub(1)).unwrap_or("");
+        let text = node.text();
+        let trimmed_text = text.trim();
+        let raw_snippet = if !trimmed_text.is_empty() {
+            trimmed_text
+        } else if !line_content.trim().is_empty() {
+            line_content.trim()
+        } else {
+            "<end of file>"
+        };
+        let snippet = if raw_snippet.chars().count() > 60 {
+            let s: String = raw_snippet.chars().take(60).collect();
+            format!("{s}...")
+        } else {
+            raw_snippet.to_string()
+        };
+        errors.push(SyntaxErrorDetail {
+            line,
+            col,
+            snippet,
+        });
+        return;
+    }
+    for child in node.children() {
+        collect_syntax_errors(&child, source, errors, limit);
+        if errors.len() >= limit {
+            break;
+        }
+    }
+}
+
 /// Syntax gate: reparse `content` and report whether any ERROR-kind node is
 /// present (tree-sitter error recovery). Presence means the content is
-/// malformed. Used by [`ast_replace`] for its rollback decision and by
-/// [`validate_file_syntax`] to gate `edit_file` writes when the `ast` feature
-/// is enabled.
+/// malformed. Used by [`ast_replace`] for its rollback decision.
 ///
 /// For HTML, the content is validated through [`html_validation_text`], which
 /// escapes bare `&` to `&amp;` first, so valid HTML containing an unescaped
 /// ampersand is not rejected as malformed.
 pub fn syntax_gate(content: &str, lang: SupportLang) -> bool {
+    if content.trim().is_empty() {
+        return false;
+    }
     let source = if lang == SupportLang::Html {
         html_validation_text(content)
     } else {
@@ -446,25 +565,49 @@ pub fn syntax_gate(content: &str, lang: SupportLang) -> bool {
 /// Validate that `content` parses cleanly as the language that
 /// [`infer_lang_by_extension`] resolves for `path`.
 ///
-/// Returns `Ok(())` when the extension does not map to any supported
-/// grammar (nothing to validate, so no language is assumed) or when the
-/// content parses without any ERROR/UNDEFINED node. Returns
-/// [`AstError::SyntaxFailure`] when the resolved grammar flags the content as
-/// malformed — this is what lets `FsExecutor::edit_file` refuse a write that
-/// would introduce syntax errors into a source file.
+/// Returns `Ok(())` when:
+/// - The content is empty (e.g. creating blank files), or
+/// - The extension does not map to any supported grammar (non-code files like `.txt`/`.md`), or
+/// - The content parses without any ERROR/UNDEFINED/MISSING nodes.
+///
+/// Returns [`AstError::SyntaxFailure`] with descriptive line, column, and snippet
+/// diagnostics when the resolved grammar flags the content as malformed.
+/// This acts as an invisible barrier preventing `edit_file` and `write_file`
+/// from committing syntax errors to disk.
 pub fn validate_file_syntax(path: &Path, content: &str) -> Result<(), AstError> {
+    if content.trim().is_empty() {
+        return Ok(());
+    }
     let Some(lang) = infer_lang_by_extension(path) else {
         // Unrecognized extension: no bundled grammar, so there is no syntax to
         // validate. (This also keeps non-code edits like `.txt`/`.md` free.)
         return Ok(());
     };
-    if syntax_gate(content, lang) {
-        return Err(AstError::SyntaxFailure(format!(
-            "in-memory {lang} parse of {} found ERROR/UNDEFINED nodes",
-            path.display()
-        )));
+    let source = if lang == SupportLang::Html {
+        html_validation_text(content)
+    } else {
+        content.to_string()
+    };
+    let doc = lang.ast_grep(&source);
+    let mut errors = Vec::new();
+    collect_syntax_errors(&doc.root(), &source, &mut errors, 3);
+    if errors.is_empty() {
+        return Ok(());
     }
-    Ok(())
+
+    let mut msg = format!(
+        "in-memory {lang} parse of {} found ERROR/UNDEFINED nodes ({} syntax error(s)):",
+        path.display(),
+        errors.len()
+    );
+    for err in &errors {
+        msg.push_str(&format!(
+            "\n  - line {}, col {}: syntax error near `{}`",
+            err.line, err.col, err.snippet
+        ));
+    }
+    msg.push_str("\nPlease verify syntax, matching delimiters, and brackets before saving.");
+    Err(AstError::SyntaxFailure(msg))
 }
 
 fn walk_for_errors(node: &Node<ast_grep_core::tree_sitter::StrDoc<SupportLang>>, out: &mut bool) {
@@ -472,7 +615,12 @@ fn walk_for_errors(node: &Node<ast_grep_core::tree_sitter::StrDoc<SupportLang>>,
         return;
     }
     let kind = node.kind();
-    if kind == "ERROR" || kind == "UNDEFINED" {
+    if node.is_error()
+        || node.is_missing()
+        || kind == "ERROR"
+        || kind == "UNDEFINED"
+        || kind == "MISSING"
+    {
         *out = true;
         return;
     }
@@ -877,12 +1025,182 @@ mod tests {
 
     #[test]
     fn infer_lang_by_extension_maps_html() {
-        // `.html` maps to the HTML grammar (and `.htm`/`.xhtml` do not), which
-        // is what makes the bare-`&` escape below apply to HTML files only.
         assert_eq!(
             infer_lang_by_extension(std::path::Path::new("a.html")),
             Some(SupportLang::Html)
         );
+        assert_eq!(
+            infer_lang_by_extension(std::path::Path::new("a.htm")),
+            Some(SupportLang::Html)
+        );
+        assert_eq!(
+            infer_lang_by_extension(std::path::Path::new("a.xhtml")),
+            Some(SupportLang::Html)
+        );
+    }
+
+    #[test]
+    fn validate_file_syntax_allows_empty_files() {
+        assert!(validate_file_syntax(std::path::Path::new("empty.rs"), "").is_ok());
+        assert!(validate_file_syntax(std::path::Path::new("empty.py"), "   \n\t").is_ok());
+        assert!(validate_file_syntax(std::path::Path::new("empty.json"), "").is_ok());
+    }
+
+    #[test]
+    fn validate_file_syntax_across_all_mainstream_languages() {
+        // Pairs of (file_path, valid_content, invalid_content)
+        let cases: &[(&str, &str, &str)] = &[
+            (
+                "app.rs",
+                "fn main() { println!(\"ok\"); }",
+                "fn main() { let x = ;;; }",
+            ),
+            (
+                "script.py",
+                "def greet(name):\n    return f\"hi {name}\"\n",
+                "def broken(x y):\n    return x + y\n",
+            ),
+            (
+                "web.js",
+                "function add(a, b) { return a + b; }",
+                "function broken( { return; }",
+            ),
+            (
+                "component.jsx",
+                "function Comp() { return <div>Hello</div>; }",
+                "function Comp() { return <div><span></div>; }",
+            ),
+            (
+                "module.mjs",
+                "export const x = 42;",
+                "export const x = ;",
+            ),
+            (
+                "legacy.cjs",
+                "module.exports = { x: 42 };",
+                "module.exports = { x: };",
+            ),
+            (
+                "types.ts",
+                "interface User { name: string; age: number; }",
+                "interface User { name: string age: number; }",
+            ),
+            (
+                "view.tsx",
+                "export const View = (): JSX.Element => <div>Ok</div>;",
+                "export const View = (): JSX.Element => <div><span></div>;",
+            ),
+            (
+                "server.go",
+                "package main\nfunc main() {}\n",
+                "package main\nfunc broken( { return }\n",
+            ),
+            (
+                "native.c",
+                "int add(int a, int b) { return a + b; }",
+                "int broken( { return 0; }",
+            ),
+            (
+                "native.h",
+                "int add(int a, int b);",
+                "int broken( ;",
+            ),
+            (
+                "native.cpp",
+                "int add(int a, int b) { return a + b; }",
+                "int broken( { return 0; }",
+            ),
+            (
+                "native.cc",
+                "int add(int a, int b) { return a + b; }",
+                "int broken( { return 0; }",
+            ),
+            (
+                "native.hpp",
+                "template<typename T> T add(T a, T b) { return a + b; }",
+                "template<typename T> T broken( { return 0; }",
+            ),
+            (
+                "App.java",
+                "public class App { public static void main(String[] args) {} }",
+                "public class App { public static void broken( {} }",
+            ),
+            (
+                "Program.cs",
+                "class Program { static void Main() {} }",
+                "class Program { static void Broken( {} }",
+            ),
+            (
+                "script.lua",
+                "function add(a, b) return a + b end",
+                "function broken( return end",
+            ),
+            (
+                "page.html",
+                "<!DOCTYPE html><html><body><h1>Title</h1></body></html>",
+                "<<<\n",
+            ),
+            (
+                "page.htm",
+                "<!DOCTYPE html><html><body><h1>Title</h1></body></html>",
+                "<<<\n",
+            ),
+            (
+                "style.css",
+                "body { margin: 0; padding: 0; color: #fff; }",
+                "body { margin: ;;; }",
+            ),
+            (
+                "data.json",
+                "{\"name\": \"castor\", \"valid\": true}",
+                "{\"name\": \"castor\", \"broken\": ,}",
+            ),
+            (
+                "config.yaml",
+                "server:\n  port: 8080\n  host: 127.0.0.1\n",
+                "server: [unclosed list\n",
+            ),
+            (
+                "config.yml",
+                "server:\n  port: 8080\n  host: 127.0.0.1\n",
+                "server: [unclosed list\n",
+            ),
+            (
+                "run.sh",
+                "#!/bin/bash\necho \"hello\"\n",
+                "if [ -f file ]; then\n  echo \"no fi\"\n",
+            ),
+            (
+                "run.bash",
+                "#!/bin/bash\necho \"hello\"\n",
+                "if [ -f file ]; then\n  echo \"no fi\"\n",
+            ),
+        ];
+
+        for (file_name, valid, invalid) in cases {
+            let path = std::path::Path::new(file_name);
+            // 1. Valid syntax must pass cleanly
+            assert!(
+                validate_file_syntax(path, valid).is_ok(),
+                "language for '{file_name}' should accept valid syntax:\n{valid}"
+            );
+
+            // 2. Invalid syntax must fail and return descriptive diagnostics
+            let err = validate_file_syntax(path, invalid).unwrap_err();
+            assert!(
+                matches!(err, AstError::SyntaxFailure(_)),
+                "language for '{file_name}' should return SyntaxFailure for invalid syntax"
+            );
+            let msg = err.to_string();
+            assert!(
+                msg.contains("syntax error"),
+                "error message for '{file_name}' should mention syntax error, got: {msg}"
+            );
+            assert!(
+                msg.contains("line ") && msg.contains("col "),
+                "error message for '{file_name}' should include line and column numbers, got: {msg}"
+            );
+        }
     }
 
     #[test]

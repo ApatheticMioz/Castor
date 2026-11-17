@@ -28,12 +28,11 @@ use crate::engine::{EngineClient, EngineError, Message, ToolSchema};
 use crate::state::StateDir;
 
 use budget::{
-    DEFAULT_PROBE_BUDGET, DEFAULT_TURNS_BUDGET, LANDING_WINDOW, LOOP_THRESHOLD, LOOP_WINDOW,
+    DEFAULT_PROBE_BUDGET, LOOP_THRESHOLD, LOOP_WINDOW,
 };
 use skeleton::spill_tool_output;
 use context::{
-    CONTEXT_CEILING_DIRECTIVE, history_tokens, in_flight_ceiling_tokens, load_messages,
-    save_messages,
+    history_tokens, load_messages, save_messages,
 };
 use events::EventLogger;
 use loop_detector::{LoopDetector, LoopState};
@@ -93,10 +92,7 @@ impl ChatEngine for EngineClient {
 pub struct SessionResult {
     pub final_text: String,
     pub turns: u32,
-    /// The effective turn budget that was applied.
-    pub budget: u32,
-    /// Terminal status: `"completed"`, `"completed_budget_exhausted"`,
-    /// `"reasoning_budget_exhausted"`, or `"failed"`.
+    /// Terminal status: `"completed"`, `"reasoning_budget_exhausted"`, or `"failed"`.
     ///
     /// `"reasoning_budget_exhausted"` is the honest terminal status for a
     /// session that stopped at its reasoning ceiling. It is *never* masked as a
@@ -157,22 +153,16 @@ pub struct SessionOptions {
     /// Consecutive non-mutating bash probes before the probe-budget advisory
     /// is injected. Defaults to 4.
     pub probe_budget: usize,
-    /// The engine's max context (in tokens). Drives two in-session gates
+    /// The engine's max context (in tokens). Drives the in-session resume watermark
     /// (tokens approximated as `chars / 4`):
     ///
     /// - **75% resume watermark** — a resumed session rolls to a fresh
     ///   `[system, user]` pair when the loaded history plus the new prompt
     ///   would exceed 75% of this budget (checked once, at resume, in
     ///   [`should_resume`]).
-    /// - **90% in-flight ceiling** — while a session runs, [`run_session`]
-    ///   re-checks the accumulated history against 90% of this budget at the
-    ///   top of every turn; when reached, it disables further tool dispatch,
-    ///   appends [`CONTEXT_CEILING_DIRECTIVE`], and lands the final completion
-    ///   in the remaining 10% headroom.
     ///
-    /// `0` (the default) disables both gates — history always resumes when
-    /// present and the in-flight ceiling never trips (zero behavior change for
-    /// callers that don't set it).
+    /// `0` (the default) disables the gate — history always resumes when
+    /// present (zero behavior change for callers that don't set it).
     pub max_context: usize,
     /// Reasoning open tag the runner strips from assistant content and
     /// sanitizes inside tool results. `None` means "use the reserved default"
@@ -441,15 +431,6 @@ async fn chat_with_watchdog(
 /// salvage pass writes a plain-text report to
 /// `<state_or_workspace>/.scratch/salvage_<session_id>.md` (see
 /// [`SessionOptions`] and the deliberation-ceiling salvage path below).
-///
-/// **In-flight 90% context ceiling**: with `options.max_context > 0`, each
-/// turn first checks the accumulated [`history_tokens`] against the 90%
-/// [`in_flight_ceiling_tokens`]. When reached, that turn disables tool
-/// dispatch (the engine is called with no tool schemas), appends
-/// [`CONTEXT_CEILING_DIRECTIVE`], and the loop breaks after the turn so the
-/// model completes in the remaining 10% headroom. The session then lands on
-/// a clean `Completed` terminal status instead of growing into an
-/// over-window request that the engine rejects with an HTTP 400.
 #[allow(clippy::too_many_arguments)] // each argument is a distinct session dependency
 pub async fn run_session(
     engine: &dyn ChatEngine,
@@ -458,14 +439,8 @@ pub async fn run_session(
     system_prompt: &str,
     user_prompt: &str,
     tools: &[ToolSchema],
-    turns_budget: u32,
     options: Option<&SessionOptions>,
 ) -> Result<SessionResult, RunnerError> {
-    let budget = if turns_budget == 0 {
-        DEFAULT_TURNS_BUDGET
-    } else {
-        turns_budget
-    };
     let session_id = logger.session_id();
 
     // Wall-clock start: the `final` event reports `duration_ms` (the total
@@ -495,10 +470,8 @@ pub async fn run_session(
     messages.push(msg("user", user_prompt));
     let mut loop_detector = LoopDetector::new(LOOP_WINDOW, LOOP_THRESHOLD);
     let mut turns: u32 = 0;
-    let mut final_text = String::new();
-    let mut final_produced = false;
+    let mut final_text;
     let mut tool_activity = false;
-    let mut landing_injected = false;
     let mut status = "completed".to_string();
 
     // Per-session reasoning-effort override, applied uniformly to every
@@ -531,78 +504,31 @@ pub async fn run_session(
         .map(|o| o.effective_close_tag())
         .unwrap_or_else(|| concat!("</th", "ink>").to_string());
 
-    // In-flight 90% context ceiling (re-checked every turn, not only at
-    // resume). When the session's accumulated history reaches 90% of
-    // `max_context`, the next turn disables tool dispatch, appends the ceiling
-    // directive, and lands the final completion in the remaining 10% headroom.
-    // `0` disables the gate (callers that don't configure a budget are
-    // unchanged).
-    let ceiling_tokens = in_flight_ceiling_tokens(
-        options
-            .map(|o| o.max_context)
-            .unwrap_or(0)
-    );
-    let mut ceiling_triggered = false;
-    let mut break_after_turn = false;
-
-    while turns < budget {
-        // In-flight 90% context ceiling: before building the request, check
-        // the accumulated history against the 90% budget. When it is reached
-        // for the first time, append the directive (forcing a final, tool-free
-        // completion in the remaining headroom) and mark this as the last turn.
-        if !ceiling_triggered
-            && ceiling_tokens > 0
-            && history_tokens(&messages) >= ceiling_tokens
-        {
-            tracing::info!(
-                session = %session_id,
-                history_tokens = history_tokens(&messages),
-                ceiling_tokens,
-                "in-flight 90% context ceiling reached; disabling tool dispatch and \
-                 landing a final completion in the remaining headroom"
-            );
-            let _ = logger.append(serde_json::json!({
-                "type": "context_ceiling",
-                "turn": turns,
-                "history_tokens": history_tokens(&messages),
-                "max_context": ceiling_tokens,
-            }));
-            messages.push(msg("user", CONTEXT_CEILING_DIRECTIVE));
-            ceiling_triggered = true;
-            break_after_turn = true;
-        }
-
-        // Cooperative landing: in the last ~5 turns, inject a budget notice.
-        // The ceiling turn already forces a terminal landing (tool dispatch
-        // disabled and the loop breaks after it), so the landing notice is
-        // skipped on that turn — the ceiling directive itself is the "land
-        // now" directive and must remain the final user message the model sees.
-        let remaining = budget - turns;
-        if !ceiling_triggered && remaining <= LANDING_WINDOW && !landing_injected {
-            let notice = format!(
-                "[System: Lease Extension] You have {remaining} turns left in your budget. Land now: \
-                 synthesize your final deliverable, findings, and grounded conclusions. \
-                 Do not start new tool calls."
-            );
-            messages.push(msg("user", notice));
-            landing_injected = true;
-        }
-
+    loop {
         turns += 1;
 
-        // Build the request: messages first, tool schemas last (APC contract).
-        // On the ceiling turn (90% of `max_context` reached) tool dispatch is
-        // disabled: the model is called with an empty tool list and the
-        // ceiling directive already in `messages`, so it cannot emit further
-        // tool calls and must produce its final response in the remaining
-        // 10% headroom. The per-turn stall watchdog wraps the call when a
-        // timeout or reasoning-token budget is configured; otherwise the call
-        // is issued directly (zero behavior change for unconfigured callers).
-        let active_tools: &[ToolSchema] = if break_after_turn {
-            &[]
-        } else {
-            tools
-        };
+        // Pre-turn backpressure: if the aggregate KV pool is under pressure
+        // and another heavier or senior active task has priority, pause asynchronously
+        // until that task finishes and frees its KV footprint.
+        if let Some(ctx) = options.and_then(|o| o.lease_context.as_ref()) {
+            let lease = match ctx.lease.lock() {
+                Ok(guard) => Some(guard.clone()),
+                Err(_) => None,
+            };
+            if let Some(l) = lease
+                && ctx.sem.should_yield(&l)
+            {
+                let _ = logger.append(serde_json::json!({
+                    "type": "cooperative_yield",
+                    "turn": turns,
+                    "task_id": ctx.task_id,
+                    "reason": "pool_backpressure",
+                }));
+                ctx.sem.wait_backpressure(&l).await;
+            }
+        }
+
+        let active_tools: &[ToolSchema] = tools;
         let watchdog = wd_timeout > 0 || wd_max_reasoning > 0;
         let completion = if watchdog {
             let primary = chat_with_watchdog(
@@ -677,30 +603,6 @@ pub async fn run_session(
         });
 
         if completion.tool_calls.is_empty() {
-            // In-flight 90% ceiling landed: the directive already forced a
-            // final, tool-free completion in the remaining headroom. Record
-            // it and break immediately — skipping the severed-stop
-            // continuation, the reasoning-ceiling salvage pass, and the
-            // degenerate-final salvage retry, all of which would issue further
-            // engine calls (and dispatch tools) that the ceiling must
-            // prevent.
-            if break_after_turn {
-                final_text = if !completion.content.trim().is_empty() {
-                    completion.content
-                } else if let Some(rc) = completion
-                    .reasoning_content
-                    .as_deref()
-                    .map(str::trim)
-                    .filter(|s| !s.is_empty())
-                {
-                    rc.to_string()
-                } else {
-                    completion.content
-                };
-                final_produced = true;
-                break;
-            }
-
             // Compute the ceiling signal before moving `completion.content`.
             let ceiling_hit = is_reasoning_ceiling(&completion);
 
@@ -732,7 +634,6 @@ pub async fn run_session(
             } else {
                 completion.content
             };
-            final_produced = true;
 
             // One-time continuation: the model deliberated (closed its reasoning
             // block) but stopped without a tool call and without a real deliverable.
@@ -765,7 +666,6 @@ pub async fn run_session(
                             } else {
                                 cont.content
                             };
-                            final_produced = !final_text.trim().is_empty() || final_produced;
                             break;
                         }
                         // The model acted: append the assistant message with its
@@ -1049,28 +949,6 @@ pub async fn run_session(
             break;
         }
 
-        // Defensive invariant on the in-flight 90% ceiling turn: we sent the
-        // model an empty tool list, so it cannot legitimately emit tool calls.
-        // If one slips through (e.g. a server that ignores the tool list),
-        // never dispatch it — land on the text the model produced and break,
-        // keeping the "no further tool dispatches" contract absolute.
-        if break_after_turn && !completion.tool_calls.is_empty() {
-            final_text = if !completion.content.trim().is_empty() {
-                completion.content
-            } else if let Some(rc) = completion
-                .reasoning_content
-                .as_deref()
-                .map(str::trim)
-                .filter(|s| !s.is_empty())
-            {
-                rc.to_string()
-            } else {
-                String::new()
-            };
-            final_produced = true;
-            break;
-        }
-
         // Execute each tool call.
         for tc in &completion.tool_calls {
             let outcome = match executor.execute(&tc.name, &tc.arguments).await {
@@ -1189,13 +1067,8 @@ impasse, state your findings and ask for alignment rather than continuing to re-
             save_messages(state, session_id, &messages);
         }
 
-        // Per-turn slot bookkeeping + cooperative yield (only runs when the
-        // worker injected a `LeaseYieldContext`). We record the turn's token
-        // footprint on the held lease, then let the pool's yield gate decide
-        // whether this worker should hand its slot to another worker. The
-        // gate is driven entirely by the pool's token-budget state (no
-        // per-turn threshold knobs). `completion` is still alive here (the
-        // next loop iteration re-binds it), so we read its metrics.
+        // Per-turn slot bookkeeping: record the turn's token footprint on the held lease
+        // so the aggregate KV pool accurately reflects all active sessions.
         if let Some(ctx) = options.and_then(|o| o.lease_context.as_ref()) {
             let prompt_tokens = completion.metrics.prompt_tokens;
             let completion_tokens = completion.metrics.completion_tokens;
@@ -1204,72 +1077,7 @@ impasse, state your findings and ask for alignment rather than continuing to re-
                 .unwrap_or_else(|| history_tokens(&messages) as u32)
                 .saturating_add(completion_tokens.map(|c| c as u32).unwrap_or(0));
             ctx.sem.update_context_tokens(&ctx.task_id, turn_tokens);
-            // Lock scope is deliberately narrowed to the synchronous decision
-            // (read lease + decide + snapshot) so no guard is held across the
-            // async re-acquire below (clippy::await_holding_lock).
-            let maybe_swap = match ctx.lease.lock() {
-                Ok(current) => {
-                    if ctx.sem.should_yield(&current) {
-                        Some(current.clone())
-                    } else {
-                        None
-                    }
-                }
-                // Poisoned lock: skip the yield and continue with the turn.
-                Err(_) => None,
-            };
-            if let Some(old) = maybe_swap {
-                let _ = logger.append(serde_json::json!({
-                    "type": "cooperative_yield",
-                    "turn": turns,
-                    "task_id": ctx.task_id,
-                    "turn_tokens": turn_tokens,
-                    "reason": "pool_yield_gate",
-                }));
-                // Cooperative yield handoff: release the held slot, then
-                // re-enter the standard token-budgeted acquire. The yield gate
-                // fired only when the pool is overcommitted, so the re-acquire
-                // naturally re-enters the FIFO queue and waits for capacity
-                // rather than winning its own slot back immediately.
-                ctx.sem.release(&old);
-                let new_lease = ctx.sem.acquire_with_tokens(&ctx.task_id, turn_tokens).await;
-                if let Ok(mut slot) = ctx.lease.lock() {
-                    *slot = new_lease;
-                }
-            }
         }
-    }
-
-    // Budget exhausted.
-    if !final_produced {
-        // Best-effort synthesis: ask the model to land one more time (tools stripped).
-        messages.push(msg(
-            "user",
-            "[System: Final Turn] Your turn budget is exhausted. Synthesize your final deliverable, findings, \
-             and grounded conclusions now.",
-        ));
-        let completion = engine.chat(&messages, &[], true, effort).await?;
-        logger
-            .append(serde_json::json!({
-                "type": "dispatch",
-                "turn": turns + 1,
-                "finish_reason": completion.finish_reason,
-                "content": completion.content,
-                "tool_calls": [],
-                "metrics": metrics_json(&completion.metrics),
-            }))
-            .map_err(RunnerError::Io)?;
-        final_text = completion.content;
-        status = "completed_budget_exhausted".to_string();
-    } else if status == "completed" && turns >= budget && !ceiling_triggered {
-        // The model landed on the last turn (cooperative landing). Only
-        // reclassify a plain "completed" result — never a more specific
-        // terminal status such as `reasoning_budget_exhausted`, which must
-        // never be masked (honest-status invariant). A break caused by the
-        // in-flight 90% context ceiling is a clean `completed` landing (the
-        // directive forced a final response), not budget exhaustion, so it is
-        // never reclassified here.
-        status = "completed_budget_exhausted".to_string();
     }
 
     // Record the final event.
@@ -1284,8 +1092,8 @@ impasse, state your findings and ask for alignment rather than continuing to re-
         }))
         .map_err(RunnerError::Io)?;
 
-    // Normal completion (and budget-exhausted landing): persist the final
-    // sanitized history so a later dispatch resumes from here.
+    // Normal completion: persist the final sanitized history so a later dispatch
+    // resumes from here.
     if let Some(state) = options.and_then(|o| o.state.as_ref()) {
         save_messages(state, session_id, &messages);
     }
@@ -1293,7 +1101,6 @@ impasse, state your findings and ask for alignment rather than continuing to re-
     Ok(SessionResult {
         final_text,
         turns,
-        budget,
         status,
     })
 }
@@ -1544,7 +1351,6 @@ mod tests {
             "sys",
             "do the thing",
             &[tool_schema("bash")],
-            80,
             None,
         )
         .await
@@ -1553,7 +1359,6 @@ mod tests {
         assert_eq!(res.final_text, "All done.");
         assert_eq!(res.status, "completed");
         assert_eq!(res.turns, 2);
-        assert_eq!(res.budget, 80);
 
         // The tool was executed.
         let calls = executor.calls().await;
@@ -1608,7 +1413,6 @@ mod tests {
             "sys",
             "look at img.png",
             &[tool_schema("read_file")],
-            80,
             None,
         )
         .await
@@ -1652,7 +1456,6 @@ mod tests {
             "sys",
             "read two files",
             &[tool_schema("read")],
-            80,
             None,
         )
         .await
@@ -1670,17 +1473,17 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn budget_exhaustion_landing_notice_and_best_effort_final() {
+    async fn multi_turn_natural_completion_without_turn_budget() {
         let state = tmp_state();
         let logger = logger_for(&state);
         let recorder = std::sync::Arc::new(CallRecorder::default());
-        // The model keeps calling tools; the budget (3) is exhausted.
+        // The model keeps calling tools and then produces its final answer naturally.
         let engine = RecordingEngine::new(
             vec![
                 comp("", vec![tc("c1", "bash", "1")]),
                 comp("", vec![tc("c2", "bash", "2")]),
                 comp("", vec![tc("c3", "bash", "3")]),
-                comp("Best-effort final.", Vec::new()),
+                comp("Final answer after multiple steps.", Vec::new()),
             ],
             recorder.clone(),
         );
@@ -1693,34 +1496,14 @@ mod tests {
             "sys",
             "work",
             &[tool_schema("bash")],
-            3,
             None,
         )
         .await
         .unwrap();
 
-        assert_eq!(res.status, "completed_budget_exhausted");
-        assert_eq!(res.final_text, "Best-effort final.");
-        assert_eq!(res.budget, 3);
-
-        // The landing notice was injected into a call's messages.
-        let calls = recorder.calls.lock().await;
-        let notice_injected = calls.iter().any(|c| {
-            c.messages
-                .iter()
-                .any(|m| m.content.contains("[System: Lease Extension]"))
-        });
-        assert!(
-            notice_injected,
-            "landing notice must be present in messages"
-        );
-
-        // The best-effort synthesis call had no tools (stripped).
-        let last_call = calls.last().unwrap();
-        assert!(
-            last_call.tools.is_empty(),
-            "final synthesis must strip tools"
-        );
+        assert_eq!(res.status, "completed");
+        assert_eq!(res.final_text, "Final answer after multiple steps.");
+        assert_eq!(res.turns, 4);
     }
 
     #[tokio::test]
@@ -1746,7 +1529,6 @@ mod tests {
             "sys",
             "work",
             &[tool_schema("bash")],
-            80,
             None,
         )
         .await
@@ -1792,7 +1574,6 @@ mod tests {
             "sys",
             "work",
             &[tool_schema("bash")],
-            80,
             None,
         )
         .await
@@ -1858,7 +1639,6 @@ mod tests {
             "sys",
             "work",
             &[tool_schema("bash")],
-            80,
             None,
         )
         .await
@@ -1886,7 +1666,7 @@ mod tests {
         let executor = MockExecutor::new(Vec::new());
 
         let tools = vec![tool_schema("bash"), tool_schema("read")];
-        let res = run_session(&engine, &executor, &logger, "sys", "work", &tools, 80, None)
+        let res = run_session(&engine, &executor, &logger, "sys", "work", &tools, None)
             .await
             .unwrap();
 
@@ -1946,7 +1726,6 @@ mod tests {
             "SYS",
             "THE-PROMPT",
             &[tool_schema("bash")],
-            1, // exactly one allowed turn
             Some(&SessionOptions::with_state(state.clone())),
         )
         .await
@@ -1957,7 +1736,6 @@ mod tests {
             res.status, "reasoning_budget_exhausted",
             "the reasoning ceiling must not be reclassified as cooperative landing"
         );
-        assert_eq!(res.budget, 1);
         assert_eq!(res.turns, 1);
 
         let _ = std::fs::remove_dir_all(state.root());
@@ -2024,7 +1802,6 @@ mod tests {
             "SYS",
             "THE-PROMPT",
             &[tool_schema("bash")],
-            80,
             Some(&SessionOptions::with_state(state.clone())),
         )
         .await
@@ -2138,7 +1915,6 @@ mod tests {
             "SYS",
             "THE-PROMPT",
             &[tool_schema("bash"), tool_schema("read")],
-            80,
             Some(&SessionOptions::with_state(state.clone())),
         )
         .await
@@ -2199,7 +1975,6 @@ mod tests {
             "SYS",
             "THE-PROMPT",
             &[tool_schema("bash")],
-            80,
             Some(&SessionOptions::with_state(state.clone())),
         )
         .await
@@ -2254,7 +2029,6 @@ mod tests {
             "SYS",
             "THE-PROMPT",
             &[tool_schema("bash")],
-            80,
             Some(&SessionOptions::with_state(state.clone())),
         )
         .await
@@ -2315,7 +2089,6 @@ mod tests {
             "sys",
             "work",
             &[tool_schema("bash")],
-            80,
             None,
         )
         .await
@@ -2366,7 +2139,6 @@ mod tests {
             "sys",
             "compile the document to PDF using tectonic",
             &[tool_schema("bash")],
-            80,
             None,
         )
         .await
@@ -2409,7 +2181,6 @@ mod tests {
             "sys",
             "work",
             &[tool_schema("bash")],
-            80,
             None,
         )
         .await
@@ -2730,7 +2501,6 @@ mod tests {
             "SYS",
             "first prompt",
             &[tool_schema("bash")],
-            80,
             Some(&opts1),
         )
         .await
@@ -2755,7 +2525,6 @@ mod tests {
             "SYS",
             "second prompt",
             &[tool_schema("bash")],
-            80,
             Some(&opts2),
         )
         .await
@@ -2811,7 +2580,6 @@ mod tests {
             "SYS",
             "first",
             &[tool_schema("bash")],
-            80,
             Some(&opts1),
         )
         .await
@@ -2834,7 +2602,6 @@ mod tests {
             "SYS",
             "second",
             &[tool_schema("bash")],
-            80,
             Some(&opts2),
         )
         .await
@@ -3194,90 +2961,6 @@ mod tests {
         );
     }
 
-    /// In-flight 90% context ceiling, end-to-end.
-    ///
-    /// With `max_context = 1000` (90% ceiling at 900), a 3_700-char prompt
-    /// (925 tokens by `chars / 4`) puts the accumulated history over the
-    /// ceiling before the *first* engine call. The runner must then append
-    /// [`CONTEXT_CEILING_DIRECTIVE`], disable tool dispatch (send an *empty*
-    /// tool list), land one final text completion in the remaining 10%
-    /// headroom, and break — emitting exactly one engine call, no further tool
-    /// dispatch, and logging a `context_ceiling` event. `max_context > 0` here
-    /// but the 75% resume watermark is irrelevant (no prior history file
-    /// exists, so the session starts fresh with the prompt).
-    #[tokio::test]
-    async fn in_flight_context_ceiling_disables_tools_and_lands_final() {
-        let state = tmp_state();
-        let state_root = state.root().to_path_buf();
-        let logger = logger_for(&state);
-
-        // 3_700 chars / 4 = 925 tokens > 900 (90% of 1000) — over the ceiling
-        // before the first turn.
-        let big_prompt = "x".repeat(3_700);
-
-        // The model answers with a final (tool-free) completion once the
-        // ceiling directive is present.
-        let engine = ScriptedEngine {
-            responses: tokio::sync::Mutex::new(vec![comp_metrics("Done.", Vec::new(), 950)].into()),
-            calls: tokio::sync::Mutex::new(Vec::new()),
-        };
-        let executor = MockExecutor::new(Vec::new());
-
-        // `max_context = 1000` → 90% ceiling at 900. No stall watchdog, no
-        // lease context — this isolates the in-flight ceiling alone.
-        let mut options = SessionOptions::with_state(state);
-        options.max_context = 1_000;
-
-        let res = run_session(
-            &engine,
-            &executor,
-            &logger,
-            "sys",
-            &big_prompt,
-            &[tool_schema("bash")],
-            5,
-            Some(&options),
-        )
-        .await
-        .unwrap();
-
-        // A ceiling landing is a clean "completed" (never reclassified to
-        // budget-exhausted, which would mask the honest ceiling status).
-        assert_eq!(res.status, "completed");
-
-        // Exactly one engine call: the ceiling turn. It must carry the
-        // ceiling directive as the final user message and an *empty* tool list
-        // (tool dispatch disabled), so the model cannot emit further calls.
-        let calls = engine.calls.lock().await.clone();
-        assert_eq!(
-            calls.len(),
-            1,
-            "the ceiling must land the session in a single final call: {calls:?}"
-        );
-        let (_, msgs, tools_sent) = &calls[0];
-        let last_user = msgs
-            .iter()
-            .rev()
-            .find(|m| m.role == "user")
-            .expect("a user message must be present");
-        assert!(
-            last_user.content.contains("Working context budget has reached 90%"),
-            "the ceiling directive must be the final user message: {last_user:?}"
-        );
-        assert!(
-            tools_sent.is_empty(),
-            "tool dispatch must be disabled on the ceiling turn, but sent {tools_sent:?}"
-        );
-
-        // And the ceiling event is logged.
-        let events = logger.read_all();
-        assert!(
-            events.iter().any(|e| e["type"] == "context_ceiling"),
-            "expected a context_ceiling event: {events:?}"
-        );
-        let _ = std::fs::remove_dir_all(&state_root);
-    }
-
     /// Finding 5 — true cooperative yield handoff, end-to-end (overcommit-only
     /// gate).
     ///
@@ -3355,16 +3038,13 @@ mod tests {
             "sys",
             "do the thing",
             &[tool_schema("bash")],
-            3,
             Some(&options),
         )
         .await
         .unwrap();
         let _ = older.await;
 
-        // The session completed its 2 turns (the final landed on turn 2, a
-        // non-last turn of the 3-turn budget, so the status is a clean
-        // "completed" — not "completed_budget_exhausted").
+        // The session completed its 2 turns.
         assert_eq!(res.status, "completed");
         assert_eq!(res.turns, 2);
 
