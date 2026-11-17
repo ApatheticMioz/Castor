@@ -77,7 +77,7 @@ allow = [
     "Unicode-3.0",
     "CC0-1.0",
     "Zlib",
-    "AGPL-3.0",
+    "AGPL-3.0-only",
     "GPL-3.0-or-later",
     "CDLA-Permissive-2.0",
 ]

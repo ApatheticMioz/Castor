@@ -33,8 +33,17 @@ pub fn base64_encode(data: &[u8]) -> String {
     BASE64_STANDARD.encode(data)
 }
 
+/// The filesystem tool executor. Cheaply [`Clone`]able because both fields are
+/// value types: [`SandboxPolicy`] is a plain data holder (root lists + an
+/// `AccessClass`), and the resolution base is an `Option<PathBuf>`. Cloning is
+/// what lets [`super::CompositeExecutor::with_cwd`] hand a re-baselined copy to
+/// the executor without touching the caller's.
+#[derive(Clone)]
 pub struct FsExecutor {
     policy: SandboxPolicy,
+    /// Relative-path resolution base (the active task cwd). `None` = the
+    /// workspace root (the policy's primary write root).
+    base: Option<PathBuf>,
 }
 
 impl FsExecutor {
@@ -43,14 +52,31 @@ impl FsExecutor {
     /// touched.
     pub fn new(root: &Path) -> Result<Self, FsError> {
         let policy = SandboxPolicy::workspace_only(root);
-        Ok(Self { policy })
+        Ok(Self {
+            policy,
+            base: None,
+        })
     }
 
     /// Construct with an explicit [`SandboxPolicy`] (e.g. the production policy
     /// built by [`crate::tools::CompositeExecutor::with_config`], which adds the
     /// read-only state dir and, on Linux, the system read roots).
     pub fn with_policy(policy: SandboxPolicy) -> Self {
-        Self { policy }
+        Self {
+            policy,
+            base: None,
+        }
+    }
+
+    /// Set the base directory against which *relative* paths are resolved (the
+    /// active task's working directory). Absolute paths are unaffected and are
+    /// still containment-checked against the policy's roots. A base that is
+    /// outside the allowed roots makes any relative path it resolves to fall
+    /// out of the sandbox, so a caller that needs the base to be an allowed
+    /// location must validate it separately.
+    pub fn with_base(mut self, base: Option<PathBuf>) -> Self {
+        self.base = base;
+        self
     }
 
     /// Access the underlying [`SandboxPolicy`] (used by the filesystem and
@@ -59,14 +85,19 @@ impl FsExecutor {
         &self.policy
     }
 
-    /// The primary write root (the workspace), used as the cwd and as the base
-    /// for relative-path resolution / relative display.
+    /// The base directory for relative-path resolution and relative display:
+    /// the active task cwd when one is set, otherwise the primary write root
+    /// (the workspace).
     fn root(&self) -> &Path {
-        self.policy
-            .write_roots()
-            .first()
-            .map(|p| p.as_path())
-            .unwrap_or_else(|| Path::new("."))
+        self.base
+            .as_deref()
+            .unwrap_or_else(|| {
+                self.policy
+                    .write_roots()
+                    .first()
+                    .map(|p| p.as_path())
+                    .unwrap_or_else(|| Path::new("."))
+            })
     }
 
     /// Resolve `input` for a **read** operation (RW ∪ RO roots allowed).
@@ -80,7 +111,7 @@ impl FsExecutor {
     }
 
     fn resolve_with(&self, input: &str, required: AccessClass) -> Result<PathBuf, FsError> {
-        let resolved = self.policy.resolve(input)?;
+        let resolved = self.policy.resolve_with_base(input, self.base.as_deref())?;
         let ok = match required {
             AccessClass::ReadWrite => resolved.class == AccessClass::ReadWrite,
             AccessClass::ReadOnly => resolved.permits_read(),
@@ -88,8 +119,9 @@ impl FsExecutor {
         };
         if !ok {
             return Err(SandboxError::PathEscape(format!(
-                "PathEscapeError: Access denied. Path '{}' does not permit this operation",
-                input
+                "PathEscapeError: Access denied. Path '{}' is read-only and does not permit this operation.{}",
+                input,
+                sandbox::BINDING_DENIAL_DIRECTIVE
             ))
             .into());
         }
@@ -218,6 +250,23 @@ impl FsExecutor {
                 )));
             }
         }
+
+        // AST gate: when the `ast` feature is enabled, parse the candidate
+        // content in memory before committing it to disk. If the resolved
+        // grammar flags an ERROR/UNDEFINED/MISSING node, the write is refused
+        // and the file is not created or modified. Without the feature,
+        // `write_file` performs a direct write.
+        #[cfg(feature = "ast")]
+        if let Err(e) = super::ast::validate_file_syntax(&resolved, content) {
+            let detail = match e {
+                super::ast::AstError::SyntaxFailure(detail) => detail,
+                other => other.to_string(),
+            };
+            return Err(FsError::EditError(format!(
+                "SyntaxValidationError: write introduces syntax errors in {path}. No write performed. {detail}"
+            )));
+        }
+
         self.atomic_write(&resolved, content)?;
         Ok(format!(
             "Wrote {} bytes to {}",
@@ -1061,6 +1110,61 @@ mod tests {
         assert!(matches!(err, FsError::Sandbox(SandboxError::PathEscape(_))));
     }
 
+    /// The tool-level refusal (runner → model) is `Error: {SandboxError}`: the
+    /// path-escape denial must reach the model carrying the binding directive
+    /// (no-bypass + escalate to the Lead Architect / user), not a bare refusal.
+    #[test]
+    fn out_of_tree_denial_reaches_model_with_directive() {
+        let root = test_root("directive_tool");
+        let ex = executor(&root);
+
+        let err = ex.read_file("/etc/passwd", 1, None).unwrap_err();
+        let msg = format!("Error: {err}");
+        assert!(msg.contains("Error: PathEscapeError"), "{msg}");
+        for needle in [
+            "binding sandbox policy decision",
+            "Do NOT attempt to bypass",
+            "report the constraint",
+            "Lead Architect / user",
+        ] {
+            assert!(msg.contains(needle), "model-facing denial missing '{needle}': {msg}");
+        }
+    }
+
+    /// A write into a read-only root is a denial too, and carries the same
+    /// binding directive (not just "not permitted").
+    #[test]
+    fn write_to_read_only_root_carries_binding_directive() {
+        let ws = test_root("directive_ro_write");
+        // An explicit RW/RO split (as the sandbox `rw_ro_policy` helper does):
+        // RW = workspace, RO = state dir. A write under the state dir is a
+        // read-only-root denial — independent of the OS `temp_dir()` write root
+        // that `for_workspace` would otherwise add.
+        let state = std::env::temp_dir().join(format!(
+            "castor_directive_ro_{}_{}",
+            std::process::id(),
+            std::process::id() * 7 + 1
+        ));
+        let _ = fs::remove_dir_all(&state);
+        fs::create_dir_all(&state).unwrap();
+        let policy = SandboxPolicy::new(
+            vec![sandbox::canonical_or_self(&ws)],
+            vec![
+                sandbox::canonical_or_self(&ws),
+                sandbox::canonical_or_self(&state),
+            ],
+        );
+        let ex = FsExecutor::with_policy(policy);
+        let target = state.join("x.txt");
+
+        let err = ex.write_file(&target.to_string_lossy(), "x\n", true).unwrap_err();
+        let msg = err.to_string();
+        assert!(msg.contains("is read-only"), "{msg}");
+        assert!(msg.contains("Do NOT attempt to bypass"), "{msg}");
+        assert!(msg.contains("Lead Architect / user"), "{msg}");
+        let _ = fs::remove_dir_all(&state);
+    }
+
     #[test]
     fn base64_rfc4648_test_vectors() {
         assert_eq!(base64_encode(b""), "");
@@ -1178,6 +1282,115 @@ mod tests {
         let after = fs::read_to_string(&file).unwrap();
         assert!(after.contains("fn add_two("));
         assert!(after.contains("a + b"));
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[cfg(feature = "ast")]
+    #[test]
+    fn write_file_rejects_syntax_errors_without_creating_file() {
+        let root = test_root("write_syntax_gate");
+        let ex = executor(&root);
+
+        // 1. Python with broken syntax
+        let py_err = ex
+            .write_file("bad.py", "def broken(x y):\n    pass\n", true)
+            .unwrap_err();
+        assert!(
+            py_err.to_string().contains("SyntaxValidationError"),
+            "expected SyntaxValidationError, got: {py_err}"
+        );
+        assert!(
+            py_err.to_string().contains("No write performed"),
+            "expected 'No write performed', got: {py_err}"
+        );
+        assert!(!root.join("bad.py").exists(), "file must not be created on disk");
+
+        // 2. TypeScript with broken syntax
+        let ts_err = ex
+            .write_file("bad.ts", "interface User { name: string age: number; }", true)
+            .unwrap_err();
+        assert!(ts_err.to_string().contains("SyntaxValidationError"));
+        assert!(!root.join("bad.ts").exists(), "file must not be created on disk");
+
+        // 3. JSON with broken syntax
+        let json_err = ex
+            .write_file("bad.json", "{\"key\": ,}", true)
+            .unwrap_err();
+        assert!(json_err.to_string().contains("SyntaxValidationError"));
+        assert!(!root.join("bad.json").exists(), "file must not be created on disk");
+
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[cfg(feature = "ast")]
+    #[test]
+    fn write_file_allows_valid_code_across_languages() {
+        let root = test_root("write_syntax_ok");
+        let ex = executor(&root);
+
+        ex.write_file("good.rs", "pub fn sum(a: i32, b: i32) -> i32 { a + b }\n", true)
+            .unwrap();
+        assert!(root.join("good.rs").exists());
+
+        ex.write_file("good.py", "def sum(a, b):\n    return a + b\n", true)
+            .unwrap();
+        assert!(root.join("good.py").exists());
+
+        ex.write_file("good.ts", "export const sum = (a: number, b: number): number => a + b;\n", true)
+            .unwrap();
+        assert!(root.join("good.ts").exists());
+
+        ex.write_file("good.go", "package main\nfunc sum(a, b int) int { return a + b }\n", true)
+            .unwrap();
+        assert!(root.join("good.go").exists());
+
+        ex.write_file("good.json", "{\"status\": \"ok\", \"count\": 42}\n", true)
+            .unwrap();
+        assert!(root.join("good.json").exists());
+
+        ex.write_file("good.html", "<!DOCTYPE html><html><body><h1>Title</h1></body></html>\n", true)
+            .unwrap();
+        assert!(root.join("good.html").exists());
+
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[cfg(feature = "ast")]
+    #[test]
+    fn edit_file_rejects_syntax_errors_across_languages() {
+        let root = test_root("edit_multilang_gate");
+        let ex = executor(&root);
+
+        // Python
+        let py_file = root.join("app.py");
+        let py_orig = "def compute(x):\n    return x * 2\n";
+        fs::write(&py_file, py_orig).unwrap();
+        let err = ex
+            .edit_file("app.py", "return x * 2", "return x * *", false)
+            .unwrap_err();
+        assert!(err.to_string().contains("SyntaxValidationError"));
+        assert_eq!(fs::read_to_string(&py_file).unwrap(), py_orig);
+
+        // TypeScript
+        let ts_file = root.join("app.ts");
+        let ts_orig = "export function compute(x: number): number {\n    return x * 2;\n}\n";
+        fs::write(&ts_file, ts_orig).unwrap();
+        let err = ex
+            .edit_file("app.ts", "return x * 2;", "return x * ;", false)
+            .unwrap_err();
+        assert!(err.to_string().contains("SyntaxValidationError"));
+        assert_eq!(fs::read_to_string(&ts_file).unwrap(), ts_orig);
+
+        // Go
+        let go_file = root.join("app.go");
+        let go_orig = "package main\nfunc compute(x int) int {\n    return x * 2\n}\n";
+        fs::write(&go_file, go_orig).unwrap();
+        let err = ex
+            .edit_file("app.go", "return x * 2", "return x * *", false)
+            .unwrap_err();
+        assert!(err.to_string().contains("SyntaxValidationError"));
+        assert_eq!(fs::read_to_string(&go_file).unwrap(), go_orig);
+
         let _ = std::fs::remove_dir_all(&root);
     }
 

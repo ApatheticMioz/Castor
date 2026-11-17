@@ -839,11 +839,18 @@ mod tests {
     fn dead_pid() -> u32 {
         // Spawn and reap an immediately-exiting child, then poll for a pid the
         // kernel is not going to reuse within the test's lifetime.
-        let mut child = std::process::Command::new("true")
+        let mut cmd = if cfg!(windows) {
+            let mut c = std::process::Command::new("cmd");
+            c.args(["/C", "exit 0"]);
+            c
+        } else {
+            std::process::Command::new("true")
+        };
+        let mut child = cmd
             .stdout(std::process::Stdio::null())
             .stderr(std::process::Stdio::null())
             .spawn()
-            .expect("spawn `true`");
+            .expect("spawn short-lived child");
         child.wait().ok();
         child.id()
     }

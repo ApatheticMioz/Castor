@@ -218,6 +218,7 @@ pub struct SseSanitizer {
     detector: RepetitionDetector,
     line_buf: String,
     done: bool,
+    last_model: Option<String>,
 }
 
 impl Default for SseSanitizer {
@@ -233,6 +234,7 @@ impl SseSanitizer {
             detector: RepetitionDetector::new(),
             line_buf: String::new(),
             done: false,
+            last_model: None,
         }
     }
 
@@ -314,6 +316,10 @@ impl SseSanitizer {
             if payload.starts_with('{')
                 && let Ok(parsed) = serde_json::from_str::<serde_json::Value>(payload)
             {
+                if let Some(m) = parsed.get("model").and_then(|v| v.as_str()) {
+                    self.last_model = Some(m.to_string());
+                }
+
                 // Mid-stream error frame: error present, no choices.
                 if parsed.get("error").is_some() && parsed.get("choices").is_none() {
                     self.done = true;
@@ -336,11 +342,16 @@ impl SseSanitizer {
                         let marker = GUARD_MARKER_TEMPLATE
                             .replace("${type}", &rep.r#type)
                             .replace("${pattern}", &pattern_json);
+                        let model = self
+                            .last_model
+                            .as_deref()
+                            .or_else(|| parsed.get("model").and_then(|v| v.as_str()))
+                            .unwrap_or("unknown");
                         let breaker = serde_json::json!({
                             "id": "chatcmpl-repetition-breaker",
                             "object": "chat.completion.chunk",
                             "created": now_secs(),
-                            "model": "qwen3.8-27b",
+                            "model": model,
                             "choices": [{
                                 "index": 0,
                                 "delta": { "content": marker },
@@ -561,6 +572,27 @@ mod tests {
         assert!(out.contains(GUARD_MARKER_PREFIX), "got: {out}");
         assert!(out.contains("finish_reason"), "got: {out}");
         assert!(out.contains("[DONE]"), "breaker must append [DONE]: {out}");
+        assert!(out.contains("\"model\":\"unknown\""), "fallback model should be unknown: {out}");
+    }
+
+    #[test]
+    fn sse_sanitizer_repetition_breaker_reflects_stream_model() {
+        let mut s = SseSanitizer::new();
+        let content = "a".repeat(100);
+        let chunk = format!(
+            "data: {{\"model\":\"custom-coder-v2\",\"choices\":[{{\"delta\":{{\"content\":\"{}\"}}}}]}}\n\n",
+            content
+        );
+        let out = s.feed(chunk.as_bytes());
+        assert!(s.is_done(), "repetition breaker must trip");
+        assert!(
+            out.contains("\"model\":\"custom-coder-v2\""),
+            "breaker frame must reflect actual model, got: {out}"
+        );
+        assert!(
+            !out.contains("qwen3.8-27b"),
+            "breaker frame must not contain hardcoded model"
+        );
     }
 
     #[test]

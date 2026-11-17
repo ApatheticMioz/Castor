@@ -35,6 +35,10 @@ use crate::runner::{ToolError, ToolExecutor, ToolOutcome};
 /// The aggregate tool executor providing all built-in capabilities and extensions.
 pub struct CompositeExecutor {
     workspace_root: PathBuf,
+    /// The active task's working directory (canonicalized). Relative filesystem
+    /// paths and the `bash` child's cwd resolve against this; when unset, they
+    /// fall back to [`Self::workspace_root`].
+    cwd: Option<PathBuf>,
     fs: FsExecutor,
     web: WebClient,
     #[cfg(feature = "paper")]
@@ -77,12 +81,31 @@ impl CompositeExecutor {
         Ok(Self {
             fs,
             workspace_root: root.clone(),
+            cwd: None,
             web,
             #[cfg(feature = "paper")]
             paper: PaperClient::with_credentials(paper_email, paper_key),
             brave_api_key,
             extensions,
         })
+    }
+
+    /// Set the active task's working directory (canonicalized through the OS
+    /// symlink layer). When set, relative `read_file` / `write_file` /
+    /// `edit_file` / `list_dir` / `search_code` paths resolve against it, and
+    /// the `bash` tool spawns its child in it. When unset, all of these fall
+    /// back to the workspace root — so an omitted `cwd` preserves the prior
+    /// behavior exactly.
+    ///
+    /// The value is canonicalized so a symlinked cwd (e.g. WSL's
+    /// `/home/apath -> /mnt/c/Users/apath`) and a differently-cased WSL
+    /// `/mnt/[a-z]` mount both compare consistently against the sandbox's
+    /// allowed roots and report a stable, printable path to the model.
+    pub fn with_cwd(mut self, cwd: PathBuf) -> Self {
+        let canonical = dunce::canonicalize(&cwd).unwrap_or_else(|_| cwd.clone());
+        self.fs = self.fs.clone().with_base(Some(canonical.clone()));
+        self.cwd = Some(canonical);
+        self
     }
 
     /// Set an explicit WebClient (useful for testing with mock base URLs).
@@ -124,14 +147,18 @@ impl CompositeExecutor {
 /// `bash`, `web_search`, `web_fetch`). `ast` appends the structural AST
 /// surgery tools; `paper` appends OpenAlex `paper_lookup`.
 pub fn builtin_tool_schemas() -> Vec<ToolSchema> {
-    // The `edit_file` description depends on the `ast` feature gate: with
-    // `ast`, edits pass an in-memory AST syntax gate before commit; without it,
-    // `edit_file` is a plain exact-substring replacement and must NOT promise
-    // AST validation.
+    // The `edit_file` and `write_file` descriptions depend on the `ast` feature gate:
+    // with `ast`, writes pass an in-memory AST syntax gate before commit; without it,
+    // they perform direct filesystem operations without AST validation.
     #[cfg(feature = "ast")]
     const EDIT_FILE_DESC: &str = "Replace an exact substring in a file, validating the rewritten content with in-memory AST syntax before committing. Target must match uniquely unless replace_all is true.";
     #[cfg(not(feature = "ast"))]
     const EDIT_FILE_DESC: &str = "Replace an exact substring in a file. Target must match uniquely unless replace_all is true.";
+
+    #[cfg(feature = "ast")]
+    const WRITE_FILE_DESC: &str = "Create or overwrite a file on disk, validating code syntax with an in-memory AST gate before committing (creates parent directories automatically). Prefer edit_file for surgical changes to existing files.";
+    #[cfg(not(feature = "ast"))]
+    const WRITE_FILE_DESC: &str = "Create or overwrite a file on disk (creates parent directories automatically). Prefer edit_file for surgical changes to existing files.";
 
     // `mut` is needed only for the feature-gated `push` blocks below (`ast`,
     // `paper`); allow the warning on builds where both are off.
@@ -152,7 +179,7 @@ pub fn builtin_tool_schemas() -> Vec<ToolSchema> {
         },
         ToolSchema {
             name: "write_file".to_string(),
-            description: "Create or overwrite a file on disk (creates parent directories automatically). Prefer edit_file for surgical changes to existing files.".to_string(),
+            description: WRITE_FILE_DESC.to_string(),
             parameters: json!({
                 "type": "object",
                 "properties": {
@@ -203,7 +230,7 @@ pub fn builtin_tool_schemas() -> Vec<ToolSchema> {
         },
         ToolSchema {
             name: "bash".to_string(),
-            description: "Execute a shell command with process-group isolation and safety validation. Use for builds, test suites, linters, git operations (status/diff/log/commit), Python execution, and external CLIs (e.g. cargo, gh); do NOT use bash for reading files, text search, or directory listing where native tools exist.".to_string(),
+            description: "Execute a shell command with process-group isolation and safety validation. Use for builds, test suites, linters, git operations (status/diff/log/commit), Python execution, and external CLIs (e.g. cargo, gh); Do NOT use bash for reading files, text search, or directory listing where native tools exist. Do NOT use it to re-run a file or path operation that a dedicated tool refused: tool denials are binding sandbox decisions, so report the constraint to the Lead Architect / user instead of working around it.".to_string(),
             parameters: json!({
                 "type": "object",
                 "properties": {
@@ -317,7 +344,14 @@ impl ToolExecutor for CompositeExecutor {
                     .unwrap_or(30_000);
                 let timeout = Duration::from_millis(timeout_ms);
 
-                match shell::run_async(cmd, &self.workspace_root, timeout).await {
+                // The active task cwd (canonicalized by `with_cwd`) is the
+                // child's working directory when set; an unset cwd falls back
+                // to the workspace root, so an omitted cwd is a no-op.
+                let cwd = self
+                    .cwd
+                    .as_deref()
+                    .unwrap_or(&self.workspace_root);
+                match shell::run_async(cmd, cwd, timeout).await {
                     Ok(out) => {
                         let mut text = String::new();
                         if out.exit_code != 0 {
@@ -427,7 +461,7 @@ impl ToolExecutor for CompositeExecutor {
                 let category = args.get("category").and_then(|v| v.as_str());
                 match self
                     .web
-                    .web_search(query, self.brave_api_key.as_deref(), category)
+                    .web_search(query, self.brave_api_key.as_deref(), category, Some(limit))
                     .await
                 {
                     Ok(outcome) => {
@@ -540,6 +574,68 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
         dir
+    }
+
+    /// The `bash` tool schema must carry the boundary clause: the shell is for
+    /// its sanctioned uses (builds, git, Python, CLIs), never a workaround for
+    /// a denied file/path operation. This is the routing-side reinforcement of
+    /// the binding-denial protocol (system-prompt invariant + denial directive).
+    #[test]
+    fn bash_schema_forbids_re_denial_bypass() {
+        let schemas = builtin_tool_schemas();
+        let bash = schemas
+            .iter()
+            .find(|s| s.name == "bash")
+            .expect("bash schema present");
+        for needle in [
+            "Do NOT use bash for reading files",
+            "Do NOT use it to re-run a file or path operation that a dedicated tool refused",
+            "binding sandbox decisions",
+            "Lead Architect / user",
+        ] {
+            assert!(
+                bash.description.contains(needle),
+                "bash schema missing '{needle}': {}",
+                bash.description
+            );
+        }
+    }
+
+    /// `with_cwd` must be *live*, not dormant: setting the active task cwd
+    /// re-baselines relative filesystem-path resolution to it, and the worker
+    /// calls it for every dispatch (`run_job_with_engine`). This proves it by
+    /// showing the same relative `read_file` fails while `cwd` is unset
+    /// (resolved against the workspace root) and succeeds once `cwd` points at
+    /// the subdirectory that actually holds the file.
+    #[tokio::test]
+    async fn with_cwd_rebases_relative_reads() {
+        let ws = temp_workspace();
+        let sub = ws.join("sub");
+        std::fs::create_dir_all(&sub).unwrap();
+        std::fs::write(sub.join("marker.txt"), "hello-cwd\n").unwrap();
+
+        let executor = CompositeExecutor::new(&ws, None).expect("failed to create executor");
+
+        // Unset cwd: a relative path resolves against the workspace root,
+        // where `marker.txt` does not exist, so the read is refused.
+        let before = executor.execute("read_file", r#"{"path":"marker.txt"}"#).await;
+        assert!(
+            matches!(&before, Err(ToolError::Execute { .. })),
+            "expected read_file to fail with cwd unset (resolves to {}): {before:?}",
+            ws.display()
+        );
+
+        // Live cwd: the same relative read now resolves against the subdirectory
+        // and returns the file. Proves the worker's `with_cwd` call is effective.
+        let executor = executor.with_cwd(sub);
+        let after = executor.execute("read_file", r#"{"path":"marker.txt"}"#).await;
+        match after {
+            Ok(out) => assert!(
+                out.text.contains("hello-cwd"),
+                "with_cwd must make the relative read resolve into the cwd: {out:?}"
+            ),
+            Err(e) => panic!("with_cwd must make the relative read succeed: {e:?}"),
+        }
     }
 
     #[tokio::test]

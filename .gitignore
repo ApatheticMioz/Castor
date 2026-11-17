@@ -84,6 +84,9 @@ desktop.ini
 # Rust build artifacts
 target/
 
+# vLLM tailnet gateway & audit trail (plaintext request captures - never committed)
+.vllmtail/
+
 # Local media studio workspace, logo scratch & draft PRs
 video/
 docs/assets/logos/

@@ -199,13 +199,15 @@
         </div>
       </div>
 
-      <div class="flex-1 overflow-y-auto p-1.5 flex flex-col gap-1" id="spansListContainer">
-        <!-- Rendered timeline rows -->
+      <div class="relative flex-1 min-h-0">
+        <div class="absolute inset-0 overflow-y-auto p-1.5 flex flex-col gap-1" id="spansListContainer">
+          <!-- Rendered timeline rows -->
+        </div>
       </div>
     </section>
 
     <!-- PANE 3: DETAIL INSPECTOR (Right) -->
-    <main class="flex-1 flex flex-col bg-black overflow-hidden">
+    <main class="relative flex-1 flex flex-col bg-black overflow-hidden">
       <!-- Active Task Header & Dispatch Aggregates Banner -->
       <div class="bg-card border-b border-border px-4 py-2 flex flex-col gap-2 shrink-0" id="activeTaskHeader">
         <!-- Row 1: Status Badge, Task ID, Copy, and Turn Navigation -->
@@ -373,7 +375,8 @@
               <span>Execution Output</span>
               <span id="outputMetaLabel">--</span>
             </div>
-            <pre><code class="language-bash" id="actionOutputCode">--</code></pre>
+            <pre class="relative max-h-[45vh] overflow-y-auto"><code class="language-bash" id="actionOutputCode">--</code>
+            </pre>
           </div>
         </div>
 
@@ -512,8 +515,9 @@
       lastSize: 0,
       lastActiveStatus: null,
       autoSync: true,
+      // Follow Live: keeps focus on the active/latest session's last turn & last tool call.
+      // Disengages when the user clicks an older tool call, older turn, or completed session.
       followLive: localStorage.getItem('castor_trace_follow_live') !== 'false',
-      userPinned: false,
     };
 
     // Semantic tool-pill colors (shared by the timeline pills and the legend).
@@ -575,28 +579,61 @@
     const TERMINAL_STATUSES = new Set(['completed', 'failed', 'cancelled', 'orphaned']);
     function isTerminalStatus(s) { return TERMINAL_STATUSES.has(s); }
 
+    function isLiveStatus(s) {
+      return s === 'executing' || s === 'queued';
+    }
+
+    function isActiveTaskLive() {
+      const t = state.tasks.find(x => x.id === state.activeTaskId) || state.activeTaskData?.task;
+      return !!(t && isLiveStatus(t.status));
+    }
+
+    function findLatestLiveTask() {
+      return state.tasks.find(t => isLiveStatus(t.status)) || null;
+    }
+
+    function setFollowLive(on, persist = false) {
+      state.followLive = !!on;
+      if (persist) {
+        localStorage.setItem('castor_trace_follow_live', String(state.followLive));
+      }
+      applyFollowLiveUI();
+    }
+
+    function focusLatestToolOfActiveTask() {
+      const visible = getVisibleTurnIndices();
+      if (visible.length === 0) {
+        state.activeTurnIndex = 0;
+        state.activeToolIndex = 0;
+        return;
+      }
+      const lastTurn = visible[visible.length - 1];
+      state.activeTurnIndex = lastTurn;
+      state.activeToolIndex = freshestToolIndexForTurn(lastTurn);
+    }
+
     function applyFollowLiveUI() {
       if (state.followLive) {
         followDot.className = 'w-2 h-2 rounded-full bg-emerald-500';
         followText.textContent = 'Follow Live';
       } else {
         followDot.className = 'w-2 h-2 rounded-full bg-zinc-600';
-        followText.textContent = state.userPinned ? 'Follow Paused' : 'Follow Off';
+        followText.textContent = 'Follow Off';
       }
     }
 
     btnFollowLive.addEventListener('click', async () => {
-      state.followLive = !state.followLive;
-      state.userPinned = !state.followLive;
-      localStorage.setItem('castor_trace_follow_live', String(state.followLive));
-      applyFollowLiveUI();
-      if (state.followLive) {
-        // Resuming live: jump to the freshest task and immediately stick the
-        // inspector to its latest turn and freshest tool call.
-        if (state.tasks.length > 0 && state.tasks[0].id !== state.activeTaskId) {
-          await selectTask(state.tasks[0].id, false);
+      const on = !state.followLive;
+      setFollowLive(on, true);
+      if (on) {
+        const target = findLatestLiveTask() || state.tasks[0];
+        if (target && target.id !== state.activeTaskId) {
+          await selectTask(target.id, { userClick: false });
         } else if (state.activeTaskId) {
-          await reloadActiveTaskData();
+          focusLatestToolOfActiveTask();
+          renderTimeline();
+          renderInspector();
+          spansListContainer.scrollTop = spansListContainer.scrollHeight;
         }
       }
       updateLiveNotice();
@@ -604,12 +641,10 @@
 
     if (btnJumpLive) {
       btnJumpLive.addEventListener('click', async () => {
-        state.userPinned = false;
-        state.followLive = true;
-        localStorage.setItem('castor_trace_follow_live', 'true');
-        applyFollowLiveUI();
-        if (state.tasks.length > 0) {
-          await selectTask(state.tasks[0].id, false);
+        setFollowLive(true, true);
+        const target = findLatestLiveTask() || state.tasks[0];
+        if (target) {
+          await selectTask(target.id, { userClick: false });
         }
         updateLiveNotice();
       });
@@ -631,13 +666,11 @@
 
     function updateLiveNotice() {
       if (!liveTaskNotice) return;
-      const latest = state.tasks[0];
-      const isLatestLive = latest && (latest.status === 'executing' || latest.status === 'queued');
-      const isViewingOlder = state.activeTaskId && latest && state.activeTaskId !== latest.id;
-      if (isLatestLive && isViewingOlder) {
+      const live = findLatestLiveTask();
+      if (live && live.id !== state.activeTaskId) {
         liveTaskNotice.classList.remove('hidden');
         if (liveTaskNoticeLabel) {
-          liveTaskNoticeLabel.textContent = `Live: ${latest.id}`;
+          liveTaskNoticeLabel.textContent = `Live: ${live.id}`;
         }
       } else {
         liveTaskNotice.classList.add('hidden');
@@ -757,33 +790,35 @@
       return toolCalls.length > 0 ? toolCalls.length - 1 : 0;
     }
 
-    // True when (turnIdx, toolIdx) is the freshest inspector position under the
-    // active filter -- the latest visible turn and its most recent tool call.
-    function isAtFreshestPosition(turnIdx, toolIdx) {
-      return turnIdx !== null && turnIdx === lastVisibleTurn()
-        && toolIdx === freshestToolIndexForTurn(turnIdx);
+    function selectTurn(idx, toolIdx) {
+      state.activeTurnIndex = idx;
+      state.activeToolIndex = (toolIdx == null) ? 0 : toolIdx;
+      renderTimeline();
+      renderInspector();
     }
 
-    // Pin follow-live when the user manually navigates away from the freshest
-    // position (older turn, older tool pill, prev-turn nav). Persisted so the
-    // pin survives a reload; pollCheck then leaves the user exactly where they
-    // left off instead of yanking them back to the latest dispatch.
-    function pinFollowLive() {
-      state.followLive = false;
-      state.userPinned = true;
-      localStorage.setItem('castor_trace_follow_live', 'false');
-      applyFollowLiveUI();
-      updateLiveNotice();
+    function navStep(dir) {
+      const visible = getVisibleTurnIndices();
+      if (visible.length === 0) return;
+      let pos = visible.indexOf(state.activeTurnIndex);
+      if (pos < 0) pos = (dir > 0) ? 0 : visible.length - 1;
+      pos = Math.max(0, Math.min(visible.length - 1, pos + dir));
+      const targetTurn = visible[pos];
+      const isLast = targetTurn === lastVisibleTurn() && isActiveTaskLive();
+      setFollowLive(isLast);
+      selectTurn(targetTurn, isLast ? freshestToolIndexForTurn(targetTurn) : 0);
     }
 
-    // Re-engage follow-live when the user explicitly returns to the live stream
-    // (Follow Live / Jump Live / navigating to the latest turn or freshest tool).
-    function resumeFollowLive() {
-      state.followLive = true;
-      state.userPinned = false;
-      localStorage.setItem('castor_trace_follow_live', 'true');
-      applyFollowLiveUI();
-      updateLiveNotice();
+    function cycleTool(dir) {
+      const turn = state.activeTaskData?.turns?.[state.activeTurnIndex];
+      const toolCalls = turn?.dispatch?.tool_calls || [];
+      if (toolCalls.length < 2) return;
+      const next = Math.max(0, Math.min(toolCalls.length - 1, state.activeToolIndex + dir));
+      const isLast = state.activeTurnIndex === lastVisibleTurn()
+        && next === freshestToolIndexForTurn(state.activeTurnIndex)
+        && isActiveTaskLive();
+      setFollowLive(isLast);
+      selectTurn(state.activeTurnIndex, next);
     }
 
     async function loadTasksInitial() {
@@ -795,9 +830,13 @@
         renderTasksList();
 
         if (state.tasks.length > 0 && !state.activeTaskId) {
-          await selectTask(state.tasks[0].id, false);
-        } else if (state.followLive && !state.userPinned && state.tasks.length > 0 && state.tasks[0].id !== state.activeTaskId) {
-          await selectTask(state.tasks[0].id, false);
+          const target = state.followLive ? (findLatestLiveTask() || state.tasks[0]) : state.tasks[0];
+          await selectTask(target.id, { userClick: false });
+        } else if (state.tasks.length > 0 && state.followLive && !isActiveTaskLive()) {
+          const target = findLatestLiveTask() || state.tasks[0];
+          if (target && target.id !== state.activeTaskId) {
+            await selectTask(target.id, { userClick: false });
+          }
         }
         updateLiveNotice();
       } catch (err) {
@@ -811,7 +850,7 @@
         const res = await fetch(`/api/poll?taskId=${state.activeTaskId || ''}`);
         const data = await res.json();
 
-        // 1. New task arrived or latest status changed → resync the list.
+        // 1. New task arrived or latest status changed -> resync the list.
         const listChanged = data.totalTasks !== state.tasks.length
           || (data.latestTaskId && data.latestTaskId !== state.tasks[0]?.id)
           || (data.latestStatus !== state.tasks[0]?.status);
@@ -819,12 +858,16 @@
           await loadTasksInitial();
         }
 
-        // 2. Follow Live: jump to newly-dispatched live task ONLY if user has not pinned an older task!
-        if (state.followLive && !state.userPinned && data.latestTaskId
-          && data.latestTaskId !== state.activeTaskId
-          && (data.latestStatus === 'executing' || data.latestStatus === 'queued' || !state.activeTaskId)) {
-          await selectTask(data.latestTaskId, false);
-          return;
+        // 2. If following live and the currently selected session is NOT live
+        // (e.g. it completed or no live session was running before), switch to
+        // the latest live session if one exists. If the selected session IS
+        // live (concurrent sessions), keep focus on the selected session.
+        if (state.followLive && !isActiveTaskLive()) {
+          const live = findLatestLiveTask();
+          if (live && live.id !== state.activeTaskId) {
+            await selectTask(live.id, { userClick: false });
+            return;
+          }
         }
 
         // 3. Track the active task's status transitions.
@@ -832,15 +875,20 @@
         if (data.activeTaskId && data.activeTaskId === state.activeTaskId) {
           state.lastActiveStatus = data.status;
         }
-        // Executing → terminal: refresh so the terminal state renders without a manual refresh.
         if (prevStatus === 'executing' && data.status && isTerminalStatus(data.status)
           && (data.activeTaskId === state.activeTaskId || data.activeTaskId === data.latestTaskId)) {
           if (state.activeTaskId) await reloadActiveTaskData();
+          if (state.followLive) {
+            const nextLive = findLatestLiveTask();
+            if (nextLive && nextLive.id !== state.activeTaskId) {
+              await selectTask(nextLive.id, { userClick: false });
+            }
+          }
           updateLiveNotice();
           return;
         }
 
-        // 4. Otherwise, refresh current task data if mtime or size changed
+        // 4. Refresh current task data if mtime or size changed.
         const sizeChanged = typeof data.size === 'number' && data.size !== state.lastSize;
         const mtimeChanged = data.mtime && data.mtime !== state.lastMtime;
         if (sizeChanged || mtimeChanged) {
@@ -854,33 +902,23 @@
       } catch {}
     }
 
-    async function selectTask(taskId, isUserAction = false) {
-      if (isUserAction) {
-        if (state.tasks.length > 0 && taskId !== state.tasks[0].id) {
-          // User intentionally chose an older task: pin it so pollCheck doesn't yank them away!
-          state.userPinned = true;
-          state.followLive = false;
-          localStorage.setItem('castor_trace_follow_live', 'false');
-          applyFollowLiveUI();
-        } else if (state.tasks.length > 0 && taskId === state.tasks[0].id) {
-          // User explicitly clicked the freshest task: unpin and follow live
-          state.userPinned = false;
-          state.followLive = true;
-          localStorage.setItem('castor_trace_follow_live', 'true');
-          applyFollowLiveUI();
-        }
+    async function selectTask(taskId, opts = { userClick: true }) {
+      const task = state.tasks.find(t => t.id === taskId);
+      const isLive = !!(task && isLiveStatus(task.status));
+      if (opts && opts.userClick !== false) {
+        // Clicking an active session keeps/engages follow on its last tool call;
+        // clicking a completed session disengages follow.
+        setFollowLive(isLive);
       }
       state.activeTaskId = taskId;
-      // Follow-live (and not pinned): reset indices so reloadActiveTaskData()
-      // binds cleanly to the latest turn and its freshest tool call.
-      if (state.followLive && !state.userPinned) {
+      if (state.followLive) {
         state.activeTurnIndex = -1;
         state.activeToolIndex = -1;
       } else {
         state.activeTurnIndex = 0;
         state.activeToolIndex = 0;
       }
-      state.lastActiveStatus = state.tasks.find(t => t.id === taskId)?.status ?? null;
+      state.lastActiveStatus = task?.status ?? null;
       renderTasksList();
       await reloadActiveTaskData();
       updateLiveNotice();
@@ -901,16 +939,9 @@
 
         const visibleIndices = getVisibleTurnIndices();
         if (visibleIndices.length > 0) {
-          if (state.followLive && !state.userPinned) {
-            // Follow-live stickiness: lock the inspector to the latest turn and,
-            // within it, the freshest tool call, so live streaming/polling always
-            // surfaces the newest execution without a manual click.
-            state.activeTurnIndex = visibleIndices[visibleIndices.length - 1];
-            const currentTurn = turns[state.activeTurnIndex];
-            const toolCalls = currentTurn?.dispatch?.tool_calls || [];
-            state.activeToolIndex = toolCalls.length > 0 ? toolCalls.length - 1 : 0;
-          } else if (!visibleIndices.includes(state.activeTurnIndex)) {
-            // Pinned: keep the user's selection unless it fell out of the active filter.
+          if (state.followLive) {
+            focusLatestToolOfActiveTask();
+          } else if (state.activeTurnIndex < 0 || !visibleIndices.includes(state.activeTurnIndex)) {
             state.activeTurnIndex = visibleIndices[0];
             state.activeToolIndex = 0;
           }
@@ -921,6 +952,10 @@
 
         renderTimeline();
         renderInspector();
+
+        if (state.followLive) {
+          spansListContainer.scrollTop = spansListContainer.scrollHeight;
+        }
       } catch (err) {
         console.error('Failed to fetch task trace', err);
       }
@@ -1094,7 +1129,7 @@
           <p class="text-[11px] text-zinc-500 font-sans line-clamp-1">${escapeHtml(cleanPrompt)}</p>
         `;
 
-        card.addEventListener('click', () => selectTask(task.id, true));
+        card.addEventListener('click', () => selectTask(task.id, { userClick: true }));
         tasksListContainer.appendChild(card);
       });
     }
@@ -1205,33 +1240,19 @@
         row.querySelectorAll('.tool-pill').forEach(btn => {
           btn.addEventListener('click', (e) => {
             e.stopPropagation();
-            state.activeTurnIndex = idx;
-            state.activeToolIndex = parseInt(btn.dataset.tidx, 10) || 0;
-            // Picking a tool pins follow-live unless it's the freshest tool call
-            // of the latest turn (which is where follow-live lives).
-            if (isAtFreshestPosition(idx, state.activeToolIndex)) {
-              resumeFollowLive();
-            } else {
-              pinFollowLive();
-            }
-            renderTimeline();
-            renderInspector();
+            const tIdx = parseInt(btn.dataset.tidx, 10) || 0;
+            const isLast = idx === lastVisibleTurn()
+              && tIdx === freshestToolIndexForTurn(idx)
+              && isActiveTaskLive();
+            setFollowLive(isLast);
+            selectTurn(idx, tIdx);
           });
         });
 
         row.addEventListener('click', () => {
-          state.activeTurnIndex = idx;
-          // Landing on the latest turn resumes follow-live and sticks to the
-          // freshest tool call; selecting any older turn pins the user in place.
-          if (idx === lastVisibleTurn()) {
-            state.activeToolIndex = freshestToolIndexForTurn(idx);
-            resumeFollowLive();
-          } else {
-            state.activeToolIndex = 0;
-            pinFollowLive();
-          }
-          renderTimeline();
-          renderInspector();
+          const isLast = idx === lastVisibleTurn() && isActiveTaskLive();
+          setFollowLive(isLast);
+          selectTurn(idx, isLast ? freshestToolIndexForTurn(idx) : 0);
         });
 
         spansListContainer.appendChild(row);
@@ -1596,18 +1617,9 @@
             isAct ? 'bg-zinc-100 text-black border-white shadow-sm ring-1 ring-white' : 'bg-zinc-900 text-zinc-400 border-border hover:text-white'
           }`;
           btn.innerHTML = `<span class="w-1.5 h-1.5 rounded-full ${dotColor}"></span><span>${idx + 1}. ${escapeHtml(tc.name)}</span>`;
-          btn.addEventListener('click', () => {
-            state.activeToolIndex = idx;
-            // Selecting a tool pins follow-live unless it's the freshest tool call
-            // of the latest turn (which is where follow-live lives).
-            if (isAtFreshestPosition(state.activeTurnIndex, idx)) {
-              resumeFollowLive();
-            } else {
-              pinFollowLive();
-            }
-            renderTimeline();
-            renderInspector();
-          });
+          // Selecting a tool is an explicit user action; the button list is a
+          // small horizontal control, so nearest-keeping it in view is enough.
+          btn.addEventListener('click', () => selectTurn(state.activeTurnIndex, idx));
           toolButtonsList.appendChild(btn);
           if (isAct) {
             btn.scrollIntoView({ block: 'nearest', inline: 'nearest' });
@@ -1665,10 +1677,6 @@
         if (state.activeTab === 'execution') {
           if (argsPretty.length < 10000) Prism.highlightElement(argsEl);
           if (outText.length < 30000) Prism.highlightElement(outEl);
-          if (state.followLive && !state.userPinned) {
-            const outContainer = outEl.parentElement;
-            if (outContainer) outContainer.scrollTop = outContainer.scrollHeight;
-          }
         }
       } else {
         const isLiveGenerating = task?.status === 'executing' && state.activeTurnIndex === turns.length - 1;
@@ -1723,11 +1731,8 @@
         if (rawEl.textContent.length < 40000) Prism.highlightElement(rawEl);
       }
 
-      // Auto-scroll timeline to selected row
       const selectedRow = document.getElementById(`turn-row-${state.activeTurnIndex}`);
-      if (selectedRow) {
-        selectedRow.scrollIntoView({ block: 'nearest', behavior: 'smooth' });
-      }
+      if (selectedRow) selectedRow.scrollIntoView({ block: 'nearest' });
     }
 
     function switchTab(tabName) {
@@ -1795,17 +1800,7 @@
     });
 
     btnPrevTurn.addEventListener('click', () => {
-      const visibleIndices = getVisibleTurnIndices();
-      const currentPos = visibleIndices.indexOf(state.activeTurnIndex);
-      if (currentPos > 0) {
-        state.activeTurnIndex = visibleIndices[currentPos - 1];
-        state.activeToolIndex = 0;
-        // Navigating up to an older turn pauses follow-live so polling doesn't
-        // yank the user back to the latest dispatch while they read.
-        pinFollowLive();
-        renderTimeline();
-        renderInspector();
-      }
+      navStep(-1);
     });
 
     btnNextTurn.addEventListener('click', () => {
@@ -1813,18 +1808,9 @@
       const currentPos = visibleIndices.indexOf(state.activeTurnIndex);
       if (currentPos >= 0 && currentPos < visibleIndices.length - 1) {
         const targetTurn = visibleIndices[currentPos + 1];
-        state.activeTurnIndex = targetTurn;
-        // Reaching the latest turn re-engages follow-live and sticks to the
-        // freshest tool call; stepping to a non-latest (older) turn pins.
-        if (targetTurn === lastVisibleTurn()) {
-          state.activeToolIndex = freshestToolIndexForTurn(targetTurn);
-          resumeFollowLive();
-        } else {
-          state.activeToolIndex = 0;
-          pinFollowLive();
-        }
-        renderTimeline();
-        renderInspector();
+        const isLast = targetTurn === lastVisibleTurn() && isActiveTaskLive();
+        setFollowLive(isLast);
+        selectTurn(targetTurn, isLast ? freshestToolIndexForTurn(targetTurn) : 0);
       }
     });
 
@@ -1850,27 +1836,9 @@
       
       // Multi-tool cycling: Left/Right or h/l
       else if (e.key === 'ArrowLeft' || e.key === 'h') {
-        const turns = state.activeTaskData?.turns || [];
-        const turn = turns[state.activeTurnIndex];
-        const toolCalls = turn?.dispatch?.tool_calls || [];
-        if (toolCalls.length > 1 && state.activeToolIndex > 0) {
-          state.activeToolIndex--;
-          if (isAtFreshestPosition(state.activeTurnIndex, state.activeToolIndex)) resumeFollowLive();
-          else pinFollowLive();
-          renderTimeline();
-          renderInspector();
-        }
+        cycleTool(-1);
       } else if (e.key === 'ArrowRight' || e.key === 'l') {
-        const turns = state.activeTaskData?.turns || [];
-        const turn = turns[state.activeTurnIndex];
-        const toolCalls = turn?.dispatch?.tool_calls || [];
-        if (toolCalls.length > 1 && state.activeToolIndex < toolCalls.length - 1) {
-          state.activeToolIndex++;
-          if (isAtFreshestPosition(state.activeTurnIndex, state.activeToolIndex)) resumeFollowLive();
-          else pinFollowLive();
-          renderTimeline();
-          renderInspector();
-        }
+        cycleTool(1);
       }
       
       // Filter cycle: f

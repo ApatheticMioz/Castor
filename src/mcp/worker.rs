@@ -142,7 +142,8 @@ Peer Engineering Invariants:\n\
     let routing = routing.concat();
     system_prompt.push_str(&routing);
     system_prompt.push_str(
-        "- Verification Discipline: Never claim completion or close a task without running the verification gate and confirming clean output.",
+        "- Verification Discipline: Never claim completion or close a task without running the verification gate and confirming clean output.\n\
+- Security & Authority: Tool refusals tagged `Access denied`, `Execution blocked`, or `binary file` are binding policy decisions, not transient failures or permission requests. Never route around one \u{2014} no `bash`/`cat`/`cp`/`mv`/`tee` substitute, alternative path, symlink, or privilege escalation. If the blocked file or operation is essential to the task, stop that line of work and report the constraint in your final report, naming the exact target and the allowed root or permission that would unblock it, so the Lead Architect / user can adjust the workspace policy deliberately. (If the denial was your own typo \u{2014} a malformed or mistyped in-workspace path \u{2014} correct it and retry; that is fixing your error, not bypassing policy.)",
     );
 
     system_prompt.push_str(&format!(
@@ -313,7 +314,7 @@ pub async fn run_job_with_engine(
         // A byte-identical, deterministic `[Workspace Skeleton]` block (a pure
         // function of the workspace's stable top-level shape) — a warm KV prefix
         // so 96%+ of the Turn-1 prefix cache hits across concurrent sessions.
-        runner::build_workspace_skeleton(std::path::Path::new(&spec.cwd))
+        runner::skeleton::build_workspace_skeleton(std::path::Path::new(&spec.cwd))
     } else {
         String::new()
     };
@@ -335,7 +336,7 @@ pub async fn run_job_with_engine(
 
     // Include any resumed-history tokens so the slot's initial budget reflects
     // the true working set (prefix + history + new prompt).
-    let resumed_tokens = runner::resumed_history_tokens(state, &spec.session_id, Some(max_ctx));
+    let resumed_tokens = runner::context::resumed_history_tokens(state, &spec.session_id, Some(max_ctx));
     let new_prompt_tokens = (spec.prompt.chars().count() / 4) as u32;
     let initial_tokens = new_prompt_tokens.saturating_add(resumed_tokens);
     let lease = sem.acquire_with_tokens(&spec.task_id, initial_tokens).await;
@@ -380,7 +381,18 @@ pub async fn run_job_with_engine(
         config.openalex_api_key.clone(),
         ext_bridge,
     ) {
-        Ok(exec) => exec,
+        Ok(exec) => {
+            // Re-baseline the executor against the task's actual working
+            // directory (the dispatch cwd, host-path-normalized and canonical
+            // through the OS symlink layer by `with_cwd`). This makes the
+            // active-task cwd *live* for every dispatch: relative
+            // `read_file`/`write_file`/`edit_file`/`list_dir`/`search_code`
+            // paths resolve against it and the `bash` child spawns in it,
+            // instead of silently falling back to the workspace root. When the
+            // dispatch cwd is the workspace root itself (the common case) this
+            // is a no-op relative to the prior behavior.
+            exec.with_cwd(host_raw_path.clone())
+        }
         Err(e) => {
             let err_msg = format!("failed to initialize executor: {e}");
             let _ = registry
@@ -388,12 +400,15 @@ pub async fn run_job_with_engine(
                 .await;
             let guard = shared_lease.lock().unwrap();
             let _ = sem.release(&guard);
+            // Defensive sweep: reclaim any orphaned slot (our lease is bound
+            // to a now-terminal task; the reaper also covers the case where
+            // this worker dies before releasing).
+            sem.clear_reclaimable();
             return Err(err_msg);
         }
     };
 
     let tools = executor.tool_schemas();
-    let turns_budget = spec.turns_budget.unwrap_or(runner::DEFAULT_TURNS_BUDGET);
 
     // Terminal artifacts (the reasoning-ceiling salvage report) are persisted
     // under the state dir's `.scratch/`. The per-session reasoning-effort
@@ -429,7 +444,6 @@ pub async fn run_job_with_engine(
         &system_prompt,
         &spec.prompt,
         &tools,
-        turns_budget,
         Some(&options),
     )
     .await;
@@ -437,20 +451,28 @@ pub async fn run_job_with_engine(
     // 9. Transition terminal status and release slot.
     match outcome {
         Ok(session_res) => {
-            let terminal_status = if session_res.status == "failed" {
-                TaskStatus::Failed
-            } else {
+            let terminal_status = if session_res.status == "completed" {
                 TaskStatus::Completed
+            } else {
+                TaskStatus::Failed
+            };
+            let reason = if terminal_status == TaskStatus::Failed && session_res.final_text.is_empty() {
+                format!("[Task ended with status: {}]", session_res.status)
+            } else {
+                session_res.final_text.clone()
             };
             let _ = registry
                 .transition(
                     &spec.task_id,
                     terminal_status,
-                    Some(session_res.final_text.clone()),
+                    Some(reason),
                 )
                 .await;
             let guard = shared_lease.lock().unwrap();
             let _ = sem.release(&guard);
+            // Defensive sweep: our lease is bound to a now-terminal task, so
+            // the reaper reclaims any orphaned slot this worker left behind.
+            sem.clear_reclaimable();
             Ok(session_res.final_text)
         }
         Err(e) => {
@@ -460,6 +482,9 @@ pub async fn run_job_with_engine(
                 .await;
             let guard = shared_lease.lock().unwrap();
             let _ = sem.release(&guard);
+            // Defensive sweep: our lease is bound to a now-terminal task, so
+            // the reaper reclaims any orphaned slot this worker left behind.
+            sem.clear_reclaimable();
             Err(err_msg)
         }
     }
@@ -808,5 +833,112 @@ mod tests {
             !prompt.contains("[Workspace Skeleton]"),
             "skeleton must be omitted when disabled"
         );
+    }
+
+    /// The standing `Security & Authority` invariant must be present in the
+    /// static (low-churn) persona block: it makes tool denials *binding*,
+    /// forbids the `bash`/path bypass, and defines the escalation path to the
+    /// Lead Architect / user. This is the normative half of the denial protocol
+    /// (the other half is the directive carried by each denial message).
+    #[test]
+    fn system_prompt_defines_binding_denial_authority() {
+        let root = std::path::PathBuf::from("/work/repo");
+        let prompt = build_worker_system_prompt(&root, false, "", "");
+
+        assert!(
+            prompt.contains("Security & Authority:"),
+            "invariant missing: {prompt}"
+        );
+        for needle in [
+            "binding policy decisions",
+            "Never route around",
+            "`bash`/`cat`/`cp`/`mv`/`tee`",
+            "report the constraint",
+            "Lead Architect / user",
+        ] {
+            assert!(
+                prompt.contains(needle),
+                "invariant missing '{needle}': {prompt}"
+            );
+        }
+        // The invariant sits in the static persona block: before [Workspace]
+        // (byte-0 persona) and after the tool-routing list.
+        let p_inv = prompt
+            .find("Security & Authority:")
+            .expect("invariant present");
+        let p_workspace = prompt.find("[Workspace]").expect("workspace present");
+        assert!(p_inv < p_workspace, "invariant must sit in the static block, before [Workspace]");
+    }
+
+    #[tokio::test]
+    async fn status_simplification_exhausted_reasoning_marks_task_failed() {
+        let (state, dir) = tmp_state();
+        let registry = TaskRegistry::new(&state);
+        let task_id = registry
+            .create("task reasoning fail", dir.to_str().unwrap(), "sess_fail")
+            .await
+            .unwrap();
+
+        let spec = JobSpec {
+            task_id: task_id.clone(),
+            prompt: "solve task".to_string(),
+            cwd: dir.to_str().unwrap().to_string(),
+            session_id: "sess_fail".to_string(),
+            reasoning_effort: None,
+            extensions: None,
+            skills: None,
+            test_command: None,
+            turns_budget: None,
+            timeout_ms: None,
+        };
+
+        let engine = ScriptedEngine {
+            responses: tokio::sync::Mutex::new(VecDeque::from(vec![
+                Completion {
+                    content: "".to_string(),
+                    reasoning_content: Some("infinite thoughts...".into()),
+                    tool_calls: Vec::new(),
+                    finish_reason: Some("length".to_string()),
+                    metrics: Metrics {
+                        ttft_ms: None,
+                        total_ms: 10.0,
+                        tokens_per_sec: None,
+                        prompt_tokens: None,
+                        cached_tokens: None,
+                        completion_tokens: None,
+                        reasoning_tokens: None,
+                    },
+                },
+                Completion {
+                    content: "Salvage summary: reasoning ceiling hit".to_string(),
+                    reasoning_content: None,
+                    tool_calls: Vec::new(),
+                    finish_reason: Some("stop".to_string()),
+                    metrics: Metrics {
+                        ttft_ms: None,
+                        total_ms: 10.0,
+                        tokens_per_sec: None,
+                        prompt_tokens: None,
+                        cached_tokens: None,
+                        completion_tokens: None,
+                        reasoning_tokens: None,
+                    },
+                },
+            ])),
+        };
+
+        let loaded = crate::config::load().expect("load default config");
+        let mut config = loaded.config;
+        config.state_dir = dir.clone();
+
+        let res = run_job_with_engine(&spec, &state, &config, &engine)
+            .await
+            .unwrap();
+        assert!(res.contains("Salvage summary: reasoning ceiling hit"));
+
+        let rec = registry.get(&task_id).await.unwrap();
+        assert_eq!(rec.status, TaskStatus::Failed);
+
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

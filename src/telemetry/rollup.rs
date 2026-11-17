@@ -1,370 +1,25 @@
-//! Telemetry: a single event stream plus derived statistics.
+//! Aggregate statistics: fold the per-session aggregates and task records
+//! into a single [`Stats`], render the operational dashboard card, and write
+//! `stats.json`.
 //!
-//! Locked decision: there is exactly ONE event stream. The tracing-JSONL
-//! ledger (`<state>/telemetry/events.jsonl`) is the ledger; there is NO
-//! second stats writer. Statistics are *derived* on demand by walking the
-//! existing ledgers (`sessions/*/events.jsonl` + `tasks/*.json`)
-//! rather than maintained by a parallel writer.
-//!
-//! Derivation is best-effort: missing or corrupt ledger lines are skipped
-//! silently (the ledgers are the authority; this module is a read-only
-//! projection over them).
+//! This is the "roll up the whole ledger set" half of the derivation: it
+//! consumes the per-session aggregates produced by [`super::derive`] plus the
+//! `tasks/*.json` records and produces the cumulative [`Stats`].
 
 use std::collections::BTreeMap;
 use std::fs;
 use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
-#[cfg(test)]
-use serde_json::Value;
-use tracing_subscriber::prelude::*;
 
-/// Baseline frontier-model pricing (USD per million tokens).
-const PROMPT_COST_PER_MILLION: f64 = 2.0;
-const COMPLETION_COST_PER_MILLION: f64 = 10.0;
-
-/// Default average system electrical power consumption in kilowatts (250 W).
-const DEFAULT_SYSTEM_POWER_KW: f64 = 0.25;
-
-/// Default electrical draw in kilowatts while the GPU is idle (i.e. a session
-/// is alive but no model compute is in flight) — 30 W.
-const DEFAULT_IDLE_POWER_KW: f64 = 0.03;
-
-/// Default effective electricity rate in USD per kilowatt-hour ($0.18/kWh).
-const DEFAULT_ELECTRICITY_COST_PER_KWH: f64 = 0.18;
-
-/// The benchmark model the cost-saved figure is quoted against.
-const BENCHMARK_MODEL: &str = "Claude Sonnet 5";
-
-fn default_electricity_rate() -> f64 {
-    DEFAULT_ELECTRICITY_COST_PER_KWH
-}
-
-fn default_system_power_watts() -> u32 {
-    (DEFAULT_SYSTEM_POWER_KW * 1000.0).round() as u32
-}
-
-fn system_power_kw() -> f64 {
-    std::env::var("CASTOR_SYSTEM_WATTS")
-        .or_else(|_| std::env::var("CASTOR_POWER_WATTS"))
-        .ok()
-        .and_then(|s| s.parse::<f64>().ok())
-        .map(|w| w / 1000.0)
-        .unwrap_or(DEFAULT_SYSTEM_POWER_KW)
-}
-
-fn electricity_rate_usd() -> f64 {
-    std::env::var("CASTOR_ELECTRICITY_RATE")
-        .or_else(|_| std::env::var("CASTOR_ELECTRICITY_RATE_USD"))
-        .ok()
-        .and_then(|s| s.parse::<f64>().ok())
-        .unwrap_or(DEFAULT_ELECTRICITY_COST_PER_KWH)
-}
-
-/// Electrical draw in kilowatts while the GPU is idle, honoring the
-/// `CASTOR_IDLE_WATTS` override (falls back to the 30 W default).
-fn idle_power_kw() -> f64 {
-    std::env::var("CASTOR_IDLE_WATTS")
-        .ok()
-        .and_then(|s| s.parse::<f64>().ok())
-        .map(|w| w / 1000.0)
-        .unwrap_or(DEFAULT_IDLE_POWER_KW)
-}
-
-/// Hall-of-Fame extremes across the scanned events: the single most
-/// notable values observed in the window. `None` means no event in the
-/// scanned set reported a finite value for that metric (never zero-filled,
-/// mirroring the `Stats` averaging policy).
-#[derive(Debug, Clone, PartialEq, Default, Serialize, Deserialize)]
-pub struct ExtremesSummary {
-    /// Largest single-turn prompt-token count (the biggest context ingested
-    /// by any one dispatch).
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub max_prompt_tokens: Option<u64>,
-    /// Largest single-turn reasoning-token count (the deepest single
-    /// deliberation).
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub max_reasoning_tokens: Option<u64>,
-    /// Fastest observed Time-To-First-Token in ms (best prefill latency).
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub min_ttft_ms: Option<f64>,
-    /// Peak hardware decode speed in tokens/second (fastest speculative
-    /// burst; same source as `Stats::peak_decode_tps`).
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub peak_decode_tps: Option<f64>,
-}
-
-/// Derived statistics over the session + task ledgers.
-///
-/// Field names mirror the JS `DEFAULT_STATS` object so the two stay
-/// comparable. Averages are `None` when no ledger reported a finite value
-/// for that field (never zero-filled).
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-pub struct Stats {
-    pub total_completion_tokens: u64,
-    pub total_reasoning_tokens: u64,
-    pub total_prompt_tokens: u64,
-    pub total_cached_tokens: u64,
-    /// Total prompt tokens on turns that reported cache metrics.
-    #[serde(default)]
-    pub total_cache_eligible_prompt_tokens: u64,
-    pub total_turns: u64,
-    pub total_sessions: u64,
-    pub total_tasks_completed: u64,
-    pub total_tasks_failed: u64,
-    pub total_tasks_cancelled: u64,
-    /// Total task execution time in ms (sum of `ended_at - started_at` over
-    /// task records that reported both bounds; wall-clock runtime while a
-    /// task was actually executing).
-    pub total_task_execution_ms: u64,
-    /// Mean session duration in ms (over sessions that reported one).
-    pub avg_duration_ms: Option<f64>,
-    /// Total duration sum in ms over sessions that reported one.
-    pub total_duration_ms: u64,
-    pub total_tool_calls: u64,
-    pub total_tool_errors: u64,
-    /// Per-tool call counts (name → count).
-    pub tool_calls: BTreeMap<String, u64>,
-    /// Per-tool error counts (name → count).
-    pub tool_errors: BTreeMap<String, u64>,
-    pub benchmark_model: String,
-    /// API cost that the derived token volume would have cost at the
-    /// benchmark model's frontier rates (the "cost saved" figure).
-    pub estimated_cost_saved_usd: f64,
-    /// Estimated local electricity cost in USD.
-    pub estimated_electricity_cost_usd: f64,
-    /// Estimated energy consumption in kWh.
-    pub estimated_energy_kwh: f64,
-    /// Real GPU model-compute time in ms: the sum of (TTFT prefill + decode)
-    /// across all qualifying turns in every session, including sessions that
-    /// never wrote a `final` event (crashed sessions still contribute their
-    /// measured compute time).
-    #[serde(default)]
-    pub inference_compute_ms: u64,
-    /// Electricity cost rate used in calculations (USD per kWh).
-    #[serde(default = "default_electricity_rate")]
-    pub electricity_rate_usd: f64,
-    /// System electrical draw in watts used in calculations.
-    #[serde(default = "default_system_power_watts")]
-    pub system_power_watts: u32,
-    /// Net operational savings in USD (virtual cloud cost - electricity cost).
-    pub net_savings_usd: f64,
-    /// Deliberation ratio: reasoning tokens / completion tokens.
-    pub reasoning_ratio: Option<f64>,
-    /// Surgical precision ratio: edit_file calls / write_file calls.
-    pub edit_write_ratio: Option<f64>,
-    /// Hardware decode speed in tokens/second (pure generation, excluding prefill).
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub avg_decode_tps: Option<f64>,
-    /// Peak speculative decode burst speed observed (tokens/second).
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub peak_decode_tps: Option<f64>,
-    /// Effective prefill throughput in tokens/second (accelerated by prefix cache).
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub effective_prefill_tps: Option<f64>,
-    /// Average Time To First Token (prefill latency) in milliseconds.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub avg_ttft_ms: Option<f64>,
-    /// ISO-8601 UTC of the earliest recorded session event, if any.
-    pub first_recorded_session: Option<String>,
-    /// ISO-8601 UTC of the latest recorded session event, if any.
-    pub last_recorded_session: Option<String>,
-    /// ISO-8601 UTC at which these stats were derived.
-    pub last_updated: String,
-    /// Per-UTC-day aggregates (key `YYYY-MM-DD`), populated only when derived
-    /// with `by_day`. `None` means daily bucketing was not requested, in
-    /// which case the field is omitted from JSON entirely.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub daily: Option<BTreeMap<String, DayBucket>>,
-    /// Hall-of-Fame extremes. `Some` only when derived with `extremes: true`
-    /// (`castor stats --extremes`); `None` otherwise (omitted from JSON).
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub extremes: Option<ExtremesSummary>,
-    /// Accumulator for the duration average (not serialized).
-    #[serde(skip)]
-    duration_sum: u64,
-    /// Count of sessions that reported a duration (not serialized).
-    #[serde(skip)]
-    duration_count: u64,
-    /// Earliest event across all ledgers, in epoch milliseconds (not
-    /// serialized; rendered into `first_recorded_session` at the end).
-    #[serde(skip)]
-    first_ms: Option<i128>,
-    /// Latest event across all ledgers, in epoch milliseconds (not serialized;
-    /// rendered into `last_recorded_session` at the end).
-    #[serde(skip)]
-    last_ms: Option<i128>,
-}
-
-impl Default for Stats {
-    fn default() -> Self {
-        Self {
-            total_completion_tokens: 0,
-            total_reasoning_tokens: 0,
-            total_prompt_tokens: 0,
-            total_cached_tokens: 0,
-            total_cache_eligible_prompt_tokens: 0,
-            total_turns: 0,
-            total_sessions: 0,
-            total_tasks_completed: 0,
-            total_tasks_failed: 0,
-            total_tasks_cancelled: 0,
-            total_task_execution_ms: 0,
-            avg_duration_ms: None,
-            total_duration_ms: 0,
-            total_tool_calls: 0,
-            total_tool_errors: 0,
-            tool_calls: BTreeMap::new(),
-            tool_errors: BTreeMap::new(),
-            benchmark_model: BENCHMARK_MODEL.to_string(),
-            estimated_cost_saved_usd: 0.0,
-            estimated_electricity_cost_usd: 0.0,
-            estimated_energy_kwh: 0.0,
-            inference_compute_ms: 0,
-            electricity_rate_usd: DEFAULT_ELECTRICITY_COST_PER_KWH,
-            system_power_watts: (DEFAULT_SYSTEM_POWER_KW * 1000.0).round() as u32,
-            net_savings_usd: 0.0,
-            reasoning_ratio: None,
-            edit_write_ratio: None,
-            avg_decode_tps: None,
-            peak_decode_tps: None,
-            effective_prefill_tps: None,
-            avg_ttft_ms: None,
-            first_recorded_session: None,
-            last_recorded_session: None,
-            last_updated: String::new(),
-            daily: None,
-            extremes: None,
-            duration_sum: 0,
-            duration_count: 0,
-            first_ms: None,
-            last_ms: None,
-        }
-    }
-}
-
-/// Initialize the single tracing-JSONL event stream.
-///
-/// Writes one JSON object per line to `<state_dir>/telemetry/events.jsonl`
-/// (append mode, created on demand) and mirrors `warn`-and-above events to
-/// stderr (the MCP-mode operator surface). The level filter honors the
-/// `RUST_LOG` environment variable (defaulting to `info`).
-///
-/// This installs the *global* default subscriber, so it must be called at
-/// most once per process.
-pub fn init_tracing(state_dir: &Path) -> Result<(), Box<dyn std::error::Error>> {
-    let telemetry_dir = state_dir.join("telemetry");
-    fs::create_dir_all(&telemetry_dir)?;
-    let events_path = telemetry_dir.join("events.jsonl");
-
-    let env_filter = tracing_subscriber::EnvFilter::try_from_default_env()
-        .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("info"));
-
-    let file_layer = tracing_subscriber::fmt::layer()
-        .json()
-        .with_writer(FileSink { path: events_path })
-        .with_filter(env_filter);
-
-    let stderr_layer = tracing_subscriber::fmt::layer()
-        .with_writer(std::io::stderr)
-        .with_ansi(false)
-        .with_filter(tracing_subscriber::EnvFilter::new("warn"));
-
-    tracing_subscriber::registry()
-        .with(file_layer)
-        .with(stderr_layer)
-        .try_init()?;
-
-    Ok(())
-}
-
-/// A `MakeWriter` that appends to a fixed file path (one open per write).
-///
-/// Telemetry must never break the inference path: if the file (or its
-/// parent directory) cannot be opened, the writer degrades to a no-op
-/// sink instead of panicking.
-struct FileSink {
-    path: PathBuf,
-}
-
-/// A `Write` target that silently discards every byte.
-struct NoopWriter;
-
-impl std::io::Write for NoopWriter {
-    fn write(&mut self, _buf: &[u8]) -> std::io::Result<usize> {
-        Ok(_buf.len())
-    }
-    fn flush(&mut self) -> std::io::Result<()> {
-        Ok(())
-    }
-}
-
-impl<'writer> tracing_subscriber::fmt::MakeWriter<'writer> for FileSink {
-    type Writer = Box<dyn std::io::Write + Send + Sync>;
-
-    fn make_writer(&'writer self) -> Self::Writer {
-        use std::fs::OpenOptions;
-        if let Some(parent) = self.path.parent() {
-            let _ = fs::create_dir_all(parent);
-        }
-        match OpenOptions::new()
-            .create(true)
-            .append(true)
-            .open(&self.path)
-        {
-            Ok(f) => Box::new(f),
-            Err(_) => Box::new(NoopWriter),
-        }
-    }
-}
-
-/// Per-UTC-day bucket of session-activity aggregates.
-///
-/// Keys are civil dates in the `YYYY-MM-DD` form (UTC). `duration_ms` is `None`
-/// when no session attributed to that day reported a duration.
-#[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
-pub struct DayBucket {
-    pub turns: u64,
-    pub prompt_tokens: u64,
-    pub cached_tokens: u64,
-    #[serde(default)]
-    pub cache_eligible_prompt_tokens: u64,
-    pub completion_tokens: u64,
-    pub reasoning_tokens: u64,
-    pub tool_calls: u64,
-    pub tool_errors: u64,
-    /// Sum of reported session durations (ms) attributed to this day; `None`
-    /// when none of the sessions in the day reported a duration.
-    pub duration_ms: Option<u64>,
-    /// Number of session records attributed to this day (by their first
-    /// timestamp) — i.e. how many sessions had activity in the day.
-    pub sessions: u64,
-}
-
-/// Options controlling how [`derive_stats`] projects the ledgers.
-///
-/// All fields are optional. The default (`StatsOptions::default()`, used by
-/// callers that do not care about windowing or bucketing) applies no time
-/// filter and no daily bucketing.
-#[derive(Debug, Clone, Copy, Default)]
-pub struct StatsOptions {
-    /// Inclusive lower bound on event timestamps, in epoch milliseconds
-    /// (`timestamp_ms >= since_ms`). `None` = no time filter.
-    ///
-    /// Callers compute this as `now_ms - <user duration>` (e.g. from
-    /// `humantime::parse_duration` on a `--since 24h` argument); the derivation
-    /// itself stays pure and wall-clock-free so tests can pin it to fixed
-    /// timestamps.
-    pub since_ms: Option<i128>,
-    /// Aggregate per UTC civil day (`YYYY-MM-DD`).
-    pub by_day: bool,
-    /// Surface the Hall-of-Fame extremes section in the rendered card
-    /// (`castor stats --extremes`).
-    pub extremes: bool,
-}
+use super::*;
+use super::derive::{
+    get_file_meta, parse_chunk_of_sessions, parse_session_events, process_session_dirs_and_update,
+    read_dir_or_empty, utc_day, FastTask, SessionAgg,
+};
 
 #[derive(Default)]
-struct SessionRollup {
+pub(super) struct SessionRollup {
     total_sessions: u64,
     total_turns: u64,
     total_prompt_tokens: u64,
@@ -458,7 +113,7 @@ impl SessionRollup {
     }
 }
 
-fn add_session_to_rollup(rollup: &mut SessionRollup, session: &SessionAgg, opts: &StatsOptions) {
+pub(super) fn add_session_to_rollup(rollup: &mut SessionRollup, session: &SessionAgg, opts: &StatsOptions) {
     rollup.total_sessions += 1;
     rollup.total_turns += session.turns;
     rollup.total_prompt_tokens += session.prompt_tokens;
@@ -530,89 +185,7 @@ fn add_session_to_rollup(rollup: &mut SessionRollup, session: &SessionAgg, opts:
     }
 }
 
-fn get_file_meta(p: &Path) -> Option<(u64, u64)> {
-    let meta = fs::metadata(p).ok()?;
-    let size = meta.len();
-    let mtime = meta
-        .modified()
-        .ok()
-        .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
-        .map(|d| d.as_millis() as u64)
-        .unwrap_or(0);
-    Some((size, mtime))
-}
-
-type SessionParseResult = (PathBuf, Option<(u64, u64)>, SessionAgg);
-
-fn parse_chunk_of_sessions(paths: &[PathBuf]) -> Vec<SessionParseResult> {
-    let mut results = Vec::with_capacity(paths.len());
-    for path in paths {
-        if !path.is_dir() {
-            continue;
-        }
-        let events_path = path.join("events.jsonl");
-        let meta = get_file_meta(&events_path);
-        let Ok(raw) = fs::read_to_string(&events_path) else {
-            continue;
-        };
-        if let Some(agg) = parse_session_events(&raw, None) {
-            results.push((path.clone(), meta, agg));
-        }
-    }
-    results
-}
-
-fn process_session_dirs_and_update(
-    paths: &[PathBuf],
-    opts: &StatsOptions,
-    cache_sessions: &mut BTreeMap<String, CachedSession>,
-    cache_dirty: &mut bool,
-) -> SessionRollup {
-    let mut rollup = SessionRollup::default();
-    let results = parse_chunk_of_sessions(paths);
-    for (dir, meta, agg) in results {
-        let name = dir
-            .file_name()
-            .and_then(|n| n.to_str())
-            .unwrap_or_default()
-            .to_string();
-        if let Some((size, mtime)) = meta {
-            cache_sessions.insert(
-                name,
-                CachedSession {
-                    mtime_ms: mtime,
-                    file_size: size,
-                    is_final: agg.is_final,
-                    agg: agg.clone(),
-                },
-            );
-            *cache_dirty = true;
-        }
-        if let Some(cutoff) = opts.since_ms {
-            match (agg.first_ms, agg.last_ms) {
-                (Some(f), _) if f >= cutoff => {
-                    add_session_to_rollup(&mut rollup, &agg, opts);
-                }
-                (Some(_), Some(l)) if l < cutoff => {}
-                (Some(_), Some(_)) => {
-                    let events_path = dir.join("events.jsonl");
-                    if let Some(filtered) = fs::read_to_string(events_path)
-                        .ok()
-                        .and_then(|raw| parse_session_events(&raw, opts.since_ms))
-                    {
-                        add_session_to_rollup(&mut rollup, &filtered, opts);
-                    }
-                }
-                _ => {}
-            }
-        } else {
-            add_session_to_rollup(&mut rollup, &agg, opts);
-        }
-    }
-    rollup
-}
-
-fn load_session_rollups_cached(
+pub(super) fn load_session_rollups_cached(
     session_dirs: &[PathBuf],
     opts: &StatsOptions,
     num_threads: usize,
@@ -751,7 +324,7 @@ fn load_session_rollups_cached(
     (rollup, cache_dirty)
 }
 
-fn load_task_metrics_cached(
+pub(super) fn load_task_metrics_cached(
     task_files: &[PathBuf],
     since_ms: Option<i128>,
     _num_threads: usize,
@@ -840,15 +413,15 @@ fn load_task_metrics_cached(
 }
 
 #[derive(Default)]
-struct TaskMetrics {
-    completed: u64,
-    failed: u64,
-    cancelled: u64,
+pub(super) struct TaskMetrics {
+    pub(super) completed: u64,
+    pub(super) failed: u64,
+    pub(super) cancelled: u64,
     /// Sum of task execution durations in ms (`ended_at - started_at`) over
     /// non-cancelled tasks that reported both bounds. Cancelled tasks represent
     /// aborted or zombie executions whose `ended_at` reflects manual cleanup
     /// rather than active execution.
-    total_execution_ms: u64,
+    pub(super) total_execution_ms: u64,
 }
 
 /// Derive the cumulative [`Stats`] by walking the existing ledgers:
@@ -1640,98 +1213,33 @@ pub fn format_stats_card_styled(stats: &Stats, color: bool) -> String {
     out
 }
 
-/// Per-UTC-day event aggregates for one session (the per-session half of a
-/// daily bucket; the session-level fields are merged in by `derive_stats`).
-#[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
-struct DayEvents {
-    turns: u64,
-    prompt_tokens: u64,
-    cached_tokens: u64,
-    #[serde(default)]
-    cache_eligible_prompt_tokens: u64,
-    completion_tokens: u64,
-    reasoning_tokens: u64,
-    tool_calls: u64,
-    tool_errors: u64,
-}
-
-/// Per-session aggregates extracted from one `events.jsonl` ledger.
 #[derive(Debug, Clone, PartialEq, Default, Serialize, Deserialize)]
-struct SessionAgg {
-    turns: u64,
-    prompt_tokens: u64,
-    cached_tokens: u64,
-    #[serde(default)]
-    cache_eligible_prompt_tokens: u64,
-    completion_tokens: u64,
-    reasoning_tokens: u64,
-    tool_calls: u64,
-    tool_errors: u64,
-    tool_calls_by_name: BTreeMap<String, u64>,
-    tool_errors_by_name: BTreeMap<String, u64>,
-    duration_ms: Option<u64>,
-    /// Earliest event timestamp as epoch milliseconds (UTC-normalized).
-    first_ms: Option<i128>,
-    /// Latest event timestamp as epoch milliseconds (UTC-normalized).
-    last_ms: Option<i128>,
-    /// Per-UTC-day event aggregates (civil date `YYYY-MM-DD` → events).
-    events_by_day: BTreeMap<String, DayEvents>,
-    #[serde(default)]
-    is_final: bool,
-    #[serde(default)]
-    decode_duration_ms: f64,
-    #[serde(default)]
-    decode_tokens: u64,
-    #[serde(default)]
-    peak_decode_tps: Option<f64>,
-    #[serde(default)]
-    ttft_sum_ms: f64,
-    #[serde(default)]
-    ttft_count: u64,
-    #[serde(default)]
-    prefill_prompt_tokens: u64,
-    #[serde(default)]
-    max_prompt_tokens: u64,
-    #[serde(default)]
-    max_reasoning_tokens: u64,
-    /// Fastest TTFT (ms) observed in this session (best prefill latency).
-    #[serde(default)]
-    min_ttft_ms: Option<f64>,
-    /// Real GPU model-compute time (ms): the sum of `ttft + decode` across all
-    /// qualifying turns. Tracked per turn regardless of whether the session
-    /// ever wrote a `final` event, so a crashed session's compute time is not
-    /// dropped to zero.
-    #[serde(default)]
-    inference_compute_ms: f64,
+pub(super) struct CachedSession {
+    pub(super) mtime_ms: u64,
+    pub(super) file_size: u64,
+    pub(super) is_final: bool,
+    pub(super) agg: SessionAgg,
 }
 
 #[derive(Debug, Clone, PartialEq, Default, Serialize, Deserialize)]
-struct CachedSession {
-    mtime_ms: u64,
-    file_size: u64,
-    is_final: bool,
-    agg: SessionAgg,
-}
-
-#[derive(Debug, Clone, PartialEq, Default, Serialize, Deserialize)]
-struct CachedTask {
-    status: String,
-    timestamp_ms: Option<u64>,
-    execution_ms: Option<u64>,
+pub(super) struct CachedTask {
+    pub(super) status: String,
+    pub(super) timestamp_ms: Option<u64>,
+    pub(super) execution_ms: Option<u64>,
 }
 
 /// Bumped when the cached value shape changes (v7 excludes cancelled zombie tasks
 /// from `total_execution_ms`).
-const TELEMETRY_CACHE_VERSION: u32 = 7;
+pub(super) const TELEMETRY_CACHE_VERSION: u32 = 7;
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-struct TelemetryCache {
+pub(super) struct TelemetryCache {
     #[serde(default)]
-    version: u32,
+    pub(super) version: u32,
     #[serde(default)]
-    sessions: BTreeMap<String, CachedSession>,
+    pub(super) sessions: BTreeMap<String, CachedSession>,
     #[serde(default)]
-    tasks: BTreeMap<String, CachedTask>,
+    pub(super) tasks: BTreeMap<String, CachedTask>,
 }
 
 impl Default for TelemetryCache {
@@ -1744,426 +1252,13 @@ impl Default for TelemetryCache {
     }
 }
 
-#[derive(Deserialize)]
-struct FastEvent<'a> {
-    #[serde(borrow)]
-    r#type: Option<&'a str>,
-    #[serde(borrow)]
-    timestamp: Option<RawTimestamp<'a>>,
-    #[serde(borrow)]
-    name: Option<&'a str>,
-    #[serde(default)]
-    is_error: Option<bool>,
-    #[serde(default)]
-    duration_ms: Option<u64>,
-    metrics: Option<FastMetrics>,
-    usage: Option<FastUsage>,
-    prompt_tokens: Option<u64>,
-    cached_tokens: Option<u64>,
-    completion_tokens: Option<u64>,
-    reasoning_tokens: Option<u64>,
-    tokens_per_sec: Option<f64>,
-    ttft_ms: Option<f64>,
-    total_ms: Option<f64>,
-    cache_read_input_tokens: Option<u64>,
-    cached_prompt_tokens: Option<u64>,
-    cache_read_tokens: Option<u64>,
-    prompt_tokens_details: Option<FastPromptDetails>,
-}
-
-#[derive(Deserialize)]
-#[serde(untagged)]
-enum RawTimestamp<'a> {
-    #[serde(borrow)]
-    Str(&'a str),
-    Num(i64),
-}
-
-#[derive(Deserialize)]
-struct FastUsage {
-    prompt_tokens_details: Option<FastPromptDetails>,
-}
-
-#[derive(Deserialize)]
-struct FastMetrics {
-    prompt_tokens: Option<u64>,
-    cached_tokens: Option<u64>,
-    completion_tokens: Option<u64>,
-    reasoning_tokens: Option<u64>,
-    tokens_per_sec: Option<f64>,
-    ttft_ms: Option<f64>,
-    total_ms: Option<f64>,
-    cache_read_input_tokens: Option<u64>,
-    cached_prompt_tokens: Option<u64>,
-    cache_read_tokens: Option<u64>,
-    prompt_tokens_details: Option<FastPromptDetails>,
-    usage: Option<FastUsage>,
-}
-
-#[derive(Deserialize)]
-struct FastPromptDetails {
-    cached_tokens: Option<u64>,
-}
-
-impl<'a> FastEvent<'a> {
-    fn timing(&self) -> (Option<f64>, Option<f64>, Option<f64>) {
-        if let Some(m) = &self.metrics {
-            (
-                m.ttft_ms.or(self.ttft_ms),
-                m.total_ms.or(self.total_ms),
-                m.tokens_per_sec.or(self.tokens_per_sec),
-            )
-        } else {
-            (self.ttft_ms, self.total_ms, self.tokens_per_sec)
-        }
-    }
-
-    fn tokens(&self) -> (Option<u64>, Option<u64>, Option<u64>, Option<u64>) {
-        if let Some(m) = &self.metrics {
-            let prompt = m.prompt_tokens;
-            let cached = m
-                .cached_tokens
-                .or(m.cache_read_input_tokens)
-                .or(m.cached_prompt_tokens)
-                .or(m.cache_read_tokens)
-                .or_else(|| {
-                    m.prompt_tokens_details
-                        .as_ref()
-                        .and_then(|d| d.cached_tokens)
-                })
-                .or_else(|| {
-                    m.usage
-                        .as_ref()
-                        .and_then(|u| u.prompt_tokens_details.as_ref())
-                        .and_then(|d| d.cached_tokens)
-                });
-            let completion = m.completion_tokens;
-            let reasoning = m.reasoning_tokens;
-            (prompt, cached, completion, reasoning)
-        } else {
-            let prompt = self.prompt_tokens;
-            let cached = self
-                .cached_tokens
-                .or(self.cache_read_input_tokens)
-                .or(self.cached_prompt_tokens)
-                .or(self.cache_read_tokens)
-                .or_else(|| {
-                    self.prompt_tokens_details
-                        .as_ref()
-                        .and_then(|d| d.cached_tokens)
-                })
-                .or_else(|| {
-                    self.usage
-                        .as_ref()
-                        .and_then(|u| u.prompt_tokens_details.as_ref())
-                        .and_then(|d| d.cached_tokens)
-                });
-            let completion = self.completion_tokens;
-            let reasoning = self.reasoning_tokens;
-            (prompt, cached, completion, reasoning)
-        }
-    }
-}
-
-#[derive(Deserialize)]
-struct FastTask<'a> {
-    #[serde(borrow)]
-    status: Option<&'a str>,
-    ended_at: Option<u64>,
-    started_at: Option<u64>,
-    created_at: Option<u64>,
-}
-
-impl FastTask<'_> {
-    /// Task execution duration in ms (`ended_at - started_at`), `None` when
-    /// either bound is missing or the interval is degenerate.
-    fn execution_ms(&self) -> Option<u64> {
-        let start = self.started_at?;
-        let end = self.ended_at?;
-        end.checked_sub(start)
-    }
-}
-
-/// Format an epoch-millisecond instant as a UTC civil date string
-/// (`YYYY-MM-DD`). All calendar math is delegated to `chrono` (`DateTime` is
-/// UTC by construction).
-fn utc_day(ms: i128) -> String {
-    chrono::DateTime::from_timestamp_millis(ms as i64)
-        .map(|dt| dt.format("%Y-%m-%d").to_string())
-        .unwrap_or_else(|| "1970-01-01".to_string())
-}
-
-/// List a directory's entries, returning an empty vec when the directory is
-/// missing or unreadable (a missing ledger dir is a valid state).
-fn read_dir_or_empty(dir: &Path) -> Vec<PathBuf> {
-    let Ok(rd) = fs::read_dir(dir) else {
-        return Vec::new();
-    };
-    rd.flatten().map(|e| e.path()).collect()
-}
-
-/// Parse one session's `events.jsonl` into per-session aggregates.
-///
-/// Returns `None` when the ledger is empty or every line is corrupt.
-/// Malformed lines are skipped silently (derivation, not authority).
-///
-/// The parser reads the **canonical** schema only:
-/// - `dispatch` turns carrying per-turn token usage under a `metrics`
-///   sub-object (`prompt_tokens` / `completion_tokens` / `reasoning_tokens`),
-/// - `tool_result` events (a `name` field, an `is_error` flag),
-/// - a `final` terminal (an optional `duration_ms`).
-///
-/// Timestamps are parsed as RFC-3339 UTC strings and normalized to integer
-/// epoch milliseconds (the single order for the horizon and the `--since`
-/// window). A missing or non-RFC-3339 timestamp yields no epoch value (the
-/// event still counts, but cannot be windowed).
-///
-/// `since` is the `--since` time-window cutoff (inclusive lower bound, in
-/// epoch milliseconds). `None` keeps every event; a value keeps only events
-/// whose timestamp is `>=` the cutoff (an untimestamped event is excluded
-/// because it cannot be proven inside the window).
-fn parse_session_events(raw: &str, since: Option<i128>) -> Option<SessionAgg> {
-    let mut agg = SessionAgg::default();
-    let mut any = false;
-    let mut prev_prompt_tokens: u64 = 0;
-
-    for line in raw.lines() {
-        let line = line.trim();
-        if line.is_empty() {
-            continue;
-        }
-        let Ok(ev) = serde_json::from_str::<FastEvent>(line) else {
-            continue; // corrupt line: skip
-        };
-
-        let ms = parse_timestamp_ms_from_raw(ev.timestamp.as_ref());
-
-        let in_window = match (since, ms) {
-            (None, _) => true,
-            (Some(cutoff), Some(m)) => m >= cutoff,
-            (Some(_), None) => false,
-        };
-        if !in_window {
-            continue;
-        }
-        any = true;
-
-        if let Some(ms) = ms {
-            agg.first_ms = Some(match agg.first_ms {
-                Some(cur) => cur.min(ms),
-                None => ms,
-            });
-            agg.last_ms = Some(match agg.last_ms {
-                Some(cur) => cur.max(ms),
-                None => ms,
-            });
-        }
-
-        let day = ms.map(utc_day);
-
-        match ev.r#type {
-            Some("dispatch") => {
-                agg.turns += 1;
-                let (prompt, cached, completion, reasoning) = ev.tokens();
-                let p = prompt.unwrap_or(0);
-                let comp = completion.unwrap_or(0);
-                agg.prompt_tokens += p;
-                let c_tok = cached.or_else(|| {
-                    if prev_prompt_tokens > 0 {
-                        Some(prev_prompt_tokens.min(p))
-                    } else if p > 131_072 {
-                        // Default prefix cache ratio for large initial dispatches (>128k)
-                        Some(((p as f64) * 0.9390).round() as u64)
-                    } else {
-                        None
-                    }
-                });
-                if let Some(c) = c_tok {
-                    agg.cached_tokens += c;
-                    agg.cache_eligible_prompt_tokens += p;
-                }
-                prev_prompt_tokens = p;
-                agg.completion_tokens += comp;
-                let r = reasoning.unwrap_or(0);
-                agg.reasoning_tokens += r;
-                agg.max_prompt_tokens = agg.max_prompt_tokens.max(p);
-                agg.max_reasoning_tokens = agg.max_reasoning_tokens.max(r);
-
-                let (ttft_opt, total_opt, _) = ev.timing();
-                if let Some(ttft) = ttft_opt
-                    && ttft >= 0.0
-                {
-                    // A 0.0 ttft is a "not measured" sentinel, not a real
-                    // prefill observation — it must not inflate the TTFT
-                    // count/sum (which would bias the average) nor contribute
-                    // prompt tokens into the prefill-throughput denominator.
-                    if ttft > 0.0 {
-                        agg.ttft_sum_ms += ttft;
-                        agg.ttft_count += 1;
-                        agg.min_ttft_ms = Some(agg.min_ttft_ms.map_or(ttft, |cur| cur.min(ttft)));
-                        if p > 0 {
-                            agg.prefill_prompt_tokens += p;
-                        }
-                    }
-                    if let Some(total) = total_opt
-                        && total > ttft
-                    {
-                        let decode_ms = total - ttft;
-                        if decode_ms >= 50.0 && comp > 0 {
-                            let turn_tps = (comp as f64) / (decode_ms / 1000.0);
-                            // Generous ceiling: admit high-acceptance DFlash2
-                            // speculative-decode bursts (hundreds of t/s)
-                            // instead of capping them at the 250 t/s that
-                            // used to silently drop them from the peak/sustained
-                            // decode metrics; the `decode_ms >= 50.0` guard
-                            // above still filters zero-duration division
-                            // artifacts.
-                            if turn_tps <= 2000.0 {
-                                agg.decode_duration_ms += decode_ms;
-                                agg.decode_tokens += comp;
-                                // Real GPU compute time: prefill (TTFT) +
-                                // decode for this turn, tracked even for
-                                // sessions that never write a `final` event.
-                                if ttft > 0.0 {
-                                    agg.inference_compute_ms += ttft + decode_ms;
-                                }
-                                if comp >= 4 && decode_ms >= 80.0 {
-                                    agg.peak_decode_tps = Some(
-                                        agg.peak_decode_tps
-                                            .map_or(turn_tps, |cur| cur.max(turn_tps)),
-                                    );
-                                }
-                            }
-                        }
-                    }
-                }
-
-                if let Some(day) = day {
-                    let ev_day = agg.events_by_day.entry(day).or_default();
-                    ev_day.turns += 1;
-                    ev_day.prompt_tokens += p;
-                    if let Some(c) = c_tok {
-                        ev_day.cached_tokens += c;
-                        ev_day.cache_eligible_prompt_tokens += p;
-                    }
-                    ev_day.completion_tokens += comp;
-                    ev_day.reasoning_tokens += reasoning.unwrap_or(0);
-                }
-            }
-            Some("tool_result") => {
-                if let Some(name) = ev.name {
-                    agg.tool_calls += 1;
-                    let is_err = ev.is_error.unwrap_or(false);
-                    if is_err {
-                        agg.tool_errors += 1;
-                        *agg.tool_errors_by_name.entry(name.to_string()).or_insert(0) += 1;
-                    }
-                    *agg.tool_calls_by_name.entry(name.to_string()).or_insert(0) += 1;
-                    if let Some(day) = day {
-                        let ev_day = agg.events_by_day.entry(day).or_default();
-                        ev_day.tool_calls += 1;
-                        if is_err {
-                            ev_day.tool_errors += 1;
-                        }
-                    }
-                }
-            }
-            Some("final") => {
-                agg.is_final = true;
-                if let Some(d) = ev.duration_ms {
-                    agg.duration_ms = Some(d);
-                }
-            }
-            _ => {}
-        }
-    }
-
-    any.then_some(agg)
-}
-
-/// Normalize a ledger `timestamp` into integer epoch milliseconds (UTC).
-///
-/// The canonical ledger stamps every event with an RFC-3339 UTC string
-/// (`YYYY-MM-DDTHH:MM:SS.mmmZ`, as produced by [`iso_from_ms`]). This parses
-/// that grammar directly via [`chrono::DateTime::parse_from_rfc3339`] and
-/// returns the epoch-millis value (the single order used for the active
-/// horizon and the `--since` window). A JSON number is also accepted (epoch
-/// milliseconds directly). Anything else — a missing timestamp, a bare integer
-/// string, an unrecognized suffix, or malformed text — yields `None`; the event
-/// still counts but carries no timestamp for windowing.
-#[cfg(test)]
-fn parse_timestamp_ms(v: &Value) -> Option<i128> {
-    match v {
-        Value::Number(n) => n.as_i64().map(|x| x as i128),
-        Value::String(s) => parse_timestamp_str(s),
-        _ => None,
-    }
-}
-
-fn parse_timestamp_str(s: &str) -> Option<i128> {
-    let s = s.trim();
-    if s.ends_with("ms") || s.parse::<i64>().is_ok() {
-        return None;
-    }
-    chrono::DateTime::parse_from_rfc3339(s)
-        .ok()
-        .map(|dt| dt.timestamp_millis() as i128)
-}
-
-fn parse_timestamp_ms_from_raw(ts: Option<&RawTimestamp>) -> Option<i128> {
-    match ts {
-        Some(RawTimestamp::Num(n)) => Some(*n as i128),
-        Some(RawTimestamp::Str(s)) => parse_timestamp_str(s),
-        _ => None,
-    }
-}
-
-/// Format epoch milliseconds as an ISO-8601 / RFC-3339 UTC string (`...Z`).
-///
-/// `pub(crate)` so the session event logger (`runner::events`) can stamp every
-/// event with a standards-compliant timestamp. All civil-date / epoch math is
-/// delegated to `chrono`.
-pub(crate) fn iso_from_ms(ms: u64) -> String {
-    chrono::DateTime::from_timestamp_millis(ms as i64)
-        .map(|dt| dt.format("%Y-%m-%dT%H:%M:%S%.3fZ").to_string())
-        // Out-of-range epoch millis (beyond chrono's bounds) must not break the
-        // inference path: degrade to a zeroed RFC-3339 stamp instead of
-        // panicking.
-        .unwrap_or_else(|| "1970-01-01T00:00:00.000Z".to_string())
-}
-
-/// Current time as an ISO-8601 UTC string.
-fn now_iso() -> String {
-    let ms = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_millis() as u64)
-        .unwrap_or(0);
-    iso_from_ms(ms)
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
+    use super::super::tests::{tmp_state, write};
+    use super::super::derive::parse_timestamp_ms;
+    use super::super::iso_from_ms;
     use serde_json::json;
-
-    fn tmp_state() -> PathBuf {
-        let dir = std::env::temp_dir().join(format!(
-            "castor_tel_{}_{}",
-            std::process::id(),
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .map(|d| d.as_nanos())
-                .unwrap_or(0)
-        ));
-        let _ = fs::remove_dir_all(&dir);
-        fs::create_dir_all(&dir).unwrap();
-        dir
-    }
-
-    fn write(p: &Path, body: &str) {
-        fs::create_dir_all(p.parent().unwrap()).unwrap();
-        fs::write(p, body).unwrap();
-    }
 
     #[test]
     fn derive_stats_exact_counts() {
@@ -2292,27 +1387,6 @@ mod tests {
     }
 
     #[test]
-    fn init_tracing_writes_json_line_to_file_sink() {
-        let state = tmp_state();
-        init_tracing(&state).expect("init_tracing");
-        tracing::info!(target: "castor.telemetry", hello = "world", "telemetry line");
-
-        let events = state.join("telemetry/events.jsonl");
-        let raw = fs::read_to_string(&events).expect("events.jsonl exists");
-        let line = raw.lines().find(|l| !l.trim().is_empty()).expect("a line");
-        let v: Value = serde_json::from_str(line).expect("valid JSON line");
-        assert_eq!(v.get("level").and_then(|x| x.as_str()), Some("INFO"));
-        assert_eq!(
-            v.get("fields")
-                .and_then(|f| f.get("hello"))
-                .and_then(|x| x.as_str()),
-            Some("world")
-        );
-        assert!(v.get("timestamp").is_some());
-        let _ = fs::remove_dir_all(&state);
-    }
-
-    #[test]
     fn format_stats_card_renders_dashboard() {
         let state = tmp_state();
         let s = derive_stats(&state, &Default::default());
@@ -2322,146 +1396,6 @@ mod tests {
         assert!(card.contains("TOKEN EFFICIENCY"));
         assert!(card.contains("CLOUD ARBITRAGE"));
         let _ = fs::remove_dir_all(&state);
-    }
-
-    // --- Single canonical schema (no backward-compatibility fallbacks) ---
-
-    /// A canonical `dispatch` ledger: snake_case `metrics`, `name`/`is_error`
-    /// on tool results, a `final` terminal carrying `duration_ms`, and
-    /// RFC-3339 timestamps throughout.
-    const CANONICAL_LEDGER: &str = concat!(
-        "{\"type\":\"dispatch\",\"turn\":1,\"timestamp\":\"2026-10-01T12:00:00.000Z\",\"metrics\":{\"prompt_tokens\":1000,\"cached_tokens\":400,\"completion_tokens\":200,\"reasoning_tokens\":50}}\n",
-        "{\"type\":\"tool_result\",\"turn\":1,\"name\":\"bash\",\"is_error\":true,\"timestamp\":\"2026-10-01T12:00:01.000Z\"}\n",
-        "{\"type\":\"final\",\"status\":\"completed\",\"duration_ms\":1000,\"timestamp\":\"2026-10-01T12:00:02.000Z\"}\n",
-    );
-
-    #[test]
-    fn parse_canonical_dispatch_ledger() {
-        let agg = parse_session_events(CANONICAL_LEDGER, None).expect("canonical ledger parses");
-        assert_eq!(agg.turns, 1);
-        assert_eq!(agg.prompt_tokens, 1000);
-        assert_eq!(agg.cached_tokens, 400);
-        assert_eq!(agg.completion_tokens, 200);
-        assert_eq!(agg.reasoning_tokens, 50);
-        assert_eq!(agg.tool_calls, 1);
-        assert_eq!(agg.tool_errors, 1);
-        assert_eq!(agg.tool_calls_by_name.get("bash"), Some(&1));
-        assert_eq!(agg.tool_errors_by_name.get("bash"), Some(&1));
-        assert_eq!(agg.duration_ms, Some(1000));
-        // The RFC-3339 horizon normalizes to integer epoch milliseconds.
-        assert_eq!(
-            agg.first_ms,
-            Some(parse_timestamp_ms(&json!("2026-10-01T12:00:00.000Z")).unwrap())
-        );
-        assert_eq!(
-            agg.last_ms,
-            Some(parse_timestamp_ms(&json!("2026-10-01T12:00:02.000Z")).unwrap())
-        );
-        assert!(agg.first_ms.unwrap() < agg.last_ms.unwrap());
-    }
-
-    /// Regression guard (#18): a `ttft_ms` of exactly `0.0` is a "not
-    /// measured" sentinel and must NOT collapse `min_ttft_ms` (and the average)
-    /// to zero. Only strictly-positive TTFTs are admitted to the min.
-    #[test]
-    fn min_ttft_ignores_zero_sentinel() {
-        let ledger = concat!(
-            // First dispatch has no measured TTFT (0.0 sentinel); it must not
-            // drive the min to zero.
-            "{\"type\":\"dispatch\",\"turn\":1,\"timestamp\":\"2026-10-01T12:00:00.000Z\",\"metrics\":{\"prompt_tokens\":1000,\"ttft_ms\":0.0}}\n",
-            // Second dispatch has a real 250ms TTFT.
-            "{\"type\":\"dispatch\",\"turn\":2,\"timestamp\":\"2026-10-01T12:00:01.000Z\",\"metrics\":{\"prompt_tokens\":1000,\"ttft_ms\":250.0}}\n",
-            // Third dispatch has a 100ms TTFT — the true min.
-            "{\"type\":\"dispatch\",\"turn\":3,\"timestamp\":\"2026-10-01T12:00:02.000Z\",\"metrics\":{\"prompt_tokens\":1000,\"ttft_ms\":100.0}}\n",
-            // Terminal so the session is finalized.
-            "{\"type\":\"final\",\"status\":\"completed\",\"duration_ms\":1000,\"timestamp\":\"2026-10-01T12:00:03.000Z\"}\n",
-        );
-        let agg = parse_session_events(ledger, None).expect("ledger parses");
-        // Only the two strictly-positive TTFTs count as observations; the
-        // 0.0 sentinel is a "not measured" marker, not a real prefill.
-        assert_eq!(agg.ttft_count, 2);
-        // But the min must be 100.0, not the 0.0 sentinel.
-        assert_eq!(agg.min_ttft_ms, Some(100.0));
-
-        // A session with ONLY 0.0 sentinels yields no TTFT observations at
-        // all.
-        let only_zero = concat!(
-            "{\"type\":\"dispatch\",\"turn\":1,\"timestamp\":\"2026-10-01T12:00:00.000Z\",\"metrics\":{\"prompt_tokens\":1000,\"ttft_ms\":0.0}}\n",
-            "{\"type\":\"final\",\"status\":\"completed\",\"duration_ms\":1000,\"timestamp\":\"2026-10-01T12:00:01.000Z\"}\n",
-        );
-        let agg0 = parse_session_events(only_zero, None).expect("ledger parses");
-        assert_eq!(agg0.ttft_count, 0);
-        assert_eq!(agg0.ttft_sum_ms, 0.0);
-        assert_eq!(agg0.min_ttft_ms, None);
-    }
-
-    /// Regression guard: a ledger carrying non-canonical schema spellings
-    /// (`assistant_message` turns, `toolName`/`isError` tool fields,
-    /// `session_end` terminal, and `…ms` epoch-string timestamps) is
-    /// read as an empty session — only canonical schema fields are parsed.
-    const LEGACY_LEDGER: &str = concat!(
-        "{\"timestamp\":\"1791000000000ms\",\"type\":\"assistant_message\",\"metrics\":{\"promptTokens\":60000,\"completionTokens\":20000,\"reasoningTokens\":5000}}\n",
-        "{\"timestamp\":\"1791000000100ms\",\"type\":\"tool_result\",\"toolName\":\"bash\",\"isError\":false}\n",
-        "{\"timestamp\":\"1791000000200ms\",\"type\":\"session_end\",\"status\":\"completed\",\"durationMs\":1000}\n",
-    );
-
-    #[test]
-    fn legacy_spellings_are_no_longer_recognized() {
-        let agg = parse_session_events(LEGACY_LEDGER, None).expect("ledger is well-formed JSON");
-        // No canonical `dispatch` → zero turns (the `assistant_message` is
-        // ignored, not matched).
-        assert_eq!(agg.turns, 0);
-        assert_eq!(agg.prompt_tokens, 0);
-        // No canonical `name`/`is_error` → the `tool_result` is ignored.
-        assert_eq!(agg.tool_calls, 0);
-        assert_eq!(agg.tool_errors, 0);
-        // No canonical `final`/`duration_ms` → no duration.
-        assert_eq!(agg.duration_ms, None);
-        // The `…ms` epoch-string timestamps are not RFC-3339 → no horizon.
-        assert_eq!(agg.first_ms, None);
-        assert_eq!(agg.last_ms, None);
-    }
-
-    /// `parse_timestamp_ms` reads RFC-3339 (and a JSON epoch-millis number)
-    /// and returns `None` for every other shape.
-    #[test]
-    fn parse_timestamp_ms_reads_rfc3339_only() {
-        // RFC-3339 with Z (verified against `date -u` / `python3`).
-        assert_eq!(
-            parse_timestamp_ms(&json!("2026-09-05T03:58:07.228Z")),
-            Some(1_788_580_687_228)
-        );
-        // JSON number (epoch millis) is still accepted.
-        assert_eq!(
-            parse_timestamp_ms(&json!(1_791_000_000_000i64)),
-            Some(1_791_000_000_000)
-        );
-        // Epoch-millis string with `ms` suffix → rejected.
-        assert_eq!(parse_timestamp_ms(&json!("1791000000000ms")), None);
-        // Bare integer string (interpreted as epoch millis) → rejected.
-        assert_eq!(parse_timestamp_ms(&json!("1791000000000")), None);
-        // RFC-3339 without a timezone → rejected.
-        assert_eq!(parse_timestamp_ms(&json!("2026-09-05T03:58:07")), None);
-        // Not a date at all → rejected.
-        assert_eq!(parse_timestamp_ms(&json!("not a date")), None);
-        assert_eq!(parse_timestamp_ms(&json!(null)), None);
-        assert_eq!(parse_timestamp_ms(&json!(true)), None);
-    }
-
-    /// `iso_from_ms` and `parse_timestamp_ms` are exact inverses: the
-    /// writer's `now_iso` stamp (RFC-3339 `...Z`) must round-trip through the
-    /// reader to the same epoch milliseconds.
-    #[test]
-    fn iso_from_ms_round_trips_through_reader() {
-        let ms: u64 = 1_757_048_687_228; // an arbitrary non-zero instant
-        let iso = iso_from_ms(ms);
-        assert!(iso.ends_with('Z'), "expected Z-suffixed UTC, got {iso}");
-        assert_eq!(iso.len(), 24, "YYYY-MM-DDTHH:MM:SS.mmmZ, got {iso}");
-        assert_eq!(
-            parse_timestamp_ms(&json!(iso)),
-            Some(ms as i128),
-            "iso {iso} must round-trip to {ms}"
-        );
     }
 
     // --- --since windowing & --by-day bucketing ----------------
@@ -2476,20 +1410,6 @@ mod tests {
         "{\"type\":\"tool_result\",\"turn\":2,\"name\":\"read_file\",\"is_error\":true,\"timestamp\":\"2026-09-06T23:15:01.000Z\"}\n",
         "{\"type\":\"final\",\"status\":\"completed\",\"duration_ms\":5000,\"timestamp\":\"2026-09-06T23:15:02.000Z\"}\n",
     );
-
-    /// `utc_day` renders an epoch-millis instant as its UTC civil date,
-    /// independent of the local timezone. The epoch values are produced by
-    /// the independent `parse_timestamp_ms` parser, so this is a cross-check
-    /// that the civil-date formatting agrees with the RFC-3339 parsing.
-    #[test]
-    fn utc_day_renders_utc_civil_date() {
-        let d1 = parse_timestamp_ms(&json!("2026-09-05T00:30:00.000Z")).unwrap();
-        let d2 = parse_timestamp_ms(&json!("2026-09-06T23:15:00.000Z")).unwrap();
-        assert_eq!(utc_day(d1), "2026-09-05");
-        assert_eq!(utc_day(d2), "2026-09-06");
-        // Epoch 0 → 1970-01-01.
-        assert_eq!(utc_day(0), "1970-01-01");
-    }
 
     /// The `--by-day` flag splits per-event aggregates into two UTC days.
     /// A session that spans a midnight is counted once (on its first day)

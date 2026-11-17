@@ -10,6 +10,9 @@ This directory holds the **active specifications** for the Castor harness. All d
 - [`architecture.md`](architecture.md) — System flow, DGI, zero-turn lifecycle, token-budget semaphore, stream proxy, Evo, the 8-tool core, skills, and the MCP tool surface.
 - [`security.md`](security.md) — The zero-trust workspace containment pipeline.
 - [`cli.md`](cli.md) — CLI reference, building, and the test gate.
+- [`commercial-deployments.md`](commercial-deployments.md) — On-premises enterprise and software studio setup guide (Turnkey Sprints, air-gapped defense enclaves).
+- [`roi-and-telemetry.md`](roi-and-telemetry.md) — Ground-truth 2.56B token operational telemetry, MTP speed metrics, and cloud cost arbitrage calculations.
+- [`faq.md`](faq.md) — Technical, commercial, and regulatory frequently asked questions.
 
 ## Active Specifications
 

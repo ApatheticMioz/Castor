@@ -83,20 +83,63 @@ pub struct ReplaceSummary {
 }
 
 /// Resolve a file path to its canonical `SupportLang` via
-/// `SupportLang::from_path`, which knows the full 27-language extension map
-/// (e.g. `.go` → Go, `.sh` → Bash, `.json` → Json, `.rs` → Rust). Returns
-/// `None` for unrecognized extensions (the file is skipped on directory scans).
-fn infer_lang_by_extension(path: &Path) -> Option<SupportLang> {
-    SupportLang::from_path(path)
+/// `SupportLang::from_path` with comprehensive extension fallbacks covering
+/// all 27 bundled tree-sitter grammars (including `.htm`, `.yml`, `.bash`,
+/// `.mjs`, `.cjs`, `.jsx`, `.mts`, `.cts`, `.pyi`, `.cc`, `.hpp`, `.jsonc`,
+/// etc.). Returns `None` for unrecognized extensions (e.g. `.txt`, `.md`, or
+/// arbitrary non-code files).
+pub fn infer_lang_by_extension(path: &Path) -> Option<SupportLang> {
+    if let Some(lang) = SupportLang::from_path(path) {
+        return Some(lang);
+    }
+    let ext = path.extension()?.to_str()?.to_ascii_lowercase();
+    match ext.as_str() {
+        "rs" => Some(SupportLang::Rust),
+        "py" | "pyi" => Some(SupportLang::Python),
+        "js" | "mjs" | "cjs" | "jsx" => Some(SupportLang::JavaScript),
+        "ts" | "mts" | "cts" => Some(SupportLang::TypeScript),
+        "tsx" => Some(SupportLang::Tsx),
+        "go" => Some(SupportLang::Go),
+        "c" | "h" => Some(SupportLang::C),
+        "cpp" | "cc" | "cxx" | "hpp" | "hh" | "hxx" => Some(SupportLang::Cpp),
+        "java" => Some(SupportLang::Java),
+        "cs" => Some(SupportLang::CSharp),
+        "lua" => Some(SupportLang::Lua),
+        "html" | "htm" | "xhtml" => Some(SupportLang::Html),
+        "css" | "scss" => Some(SupportLang::Css),
+        "json" | "jsonc" => Some(SupportLang::Json),
+        "yaml" | "yml" => Some(SupportLang::Yaml),
+        "sh" | "bash" | "zsh" => Some(SupportLang::Bash),
+        "rb" => Some(SupportLang::Ruby),
+        "php" => Some(SupportLang::Php),
+        "swift" => Some(SupportLang::Swift),
+        "kt" | "kts" => Some(SupportLang::Kotlin),
+        "scala" => Some(SupportLang::Scala),
+        "dart" => Some(SupportLang::Dart),
+        "sol" => Some(SupportLang::Solidity),
+        "hs" => Some(SupportLang::Haskell),
+        "ex" | "exs" => Some(SupportLang::Elixir),
+        "nix" => Some(SupportLang::Nix),
+        _ => None,
+    }
 }
 
 /// Parse a language alias (e.g. `"js"`, `"ts"`, `"py"`, `"rs"`) into a
 /// `SupportLang`. All 27 canonical aliases from `SupportLang::all_langs` are
-/// accepted (case-insensitively).
+/// accepted (case-insensitively), along with standard common aliases.
 fn parse_lang(alias: &str) -> Result<SupportLang, AstError> {
-    alias
-        .parse::<SupportLang>()
-        .map_err(|e| AstError::Language(format!("unsupported language '{alias}': {e}")))
+    if let Ok(lang) = alias.parse::<SupportLang>() {
+        return Ok(lang);
+    }
+    let lower = alias.to_ascii_lowercase();
+    match lower.as_str() {
+        "sh" | "shell" => Ok(SupportLang::Bash),
+        "yml" => Ok(SupportLang::Yaml),
+        "c++" => Ok(SupportLang::Cpp),
+        "htm" => Ok(SupportLang::Html),
+        "csharp" => Ok(SupportLang::CSharp),
+        _ => Err(AstError::Language(format!("unsupported language '{alias}'"))),
+    }
 }
 
 /// Recursively collect candidate files under `dir`, skipping ignored
@@ -331,13 +374,189 @@ fn replace_in_memory(
     Ok((src, edits.len()))
 }
 
+/// Produce an HTML-validation copy of `content` in which *bare* ampersands
+/// (those not already part of a valid character reference) are escaped to
+/// `&amp;`.
+///
+/// The grammar this exists for is [`SupportLang::Html`]: the tree-sitter HTML
+/// scanner treats an `&` not followed by a valid character reference (e.g.
+/// `&amp;`, `&#65;`, `&nbsp;`) as malformed and recovers an `ERROR` node. That
+/// is a real validation concern, but *bare* ampersands are pervasive and valid
+/// in real-world HTML (e.g. the headline "Model Rationale & Intent"), so
+/// escaping them here lets the gate accept HTML that a browser would parse
+/// fine while still flagging a genuinely broken reference.
+///
+/// A character reference is `&[name];` (1-30 name chars: letters, digits, `_`)
+/// or `&#digits;` / `&#x hex;`. References *without* a closing `;` (e.g.
+/// `&amp`) and a trailing, incomplete `&` are NOT treated as valid, so both
+/// are escaped. The escape is idempotent: a `&amp;` already in the text stays
+/// `&amp;` (its `&` is a valid reference and is left alone), so it never
+/// double-escapes to `&amp;amp;`.
+pub fn html_validation_text(content: &str) -> String {
+    let bytes = content.as_bytes();
+    let n = bytes.len();
+
+    // Returns the index just past the valid character reference starting at
+    // `i` (`bytes[i] == b'&'`), or `None` when the `&` is not the start of a
+    // valid reference (so it must be escaped).
+    fn reference_end(bytes: &[u8], i: usize) -> Option<usize> {
+        let n = bytes.len();
+        if matches!(bytes.get(i + 1), Some(b'#')) {
+            // Numeric reference: `&#digits;` or `&#x hex;`.
+            let mut k = i + 2;
+            let hex = matches!(bytes.get(k), Some(b'x') | Some(b'X'));
+            if hex {
+                k += 1;
+            }
+            let start = k;
+            while k < n && (if hex { bytes[k].is_ascii_hexdigit() } else { bytes[k].is_ascii_digit() }) {
+                k += 1;
+            }
+            (k > start && matches!(bytes.get(k), Some(b';'))).then_some(k + 1)
+        } else {
+            // Named reference: `&[1-30 alphanumeric / '_'];`.
+            let mut k = i + 1;
+            while k < n && (bytes[k].is_ascii_alphanumeric() || bytes[k] == b'_') {
+                k += 1;
+            }
+            let name_len = k - i - 1;
+            ((1..=30).contains(&name_len) && matches!(bytes.get(k), Some(b';'))).then_some(k + 1)
+        }
+    }
+
+    // `&` is a single ASCII byte (0x26) and can never appear as a continuation
+    // byte of a multi-byte UTF-8 sequence, so scanning for it byte-by-byte is
+    // safe: every `bytes[i] == b'&'` sits on a char boundary. Everything else is
+    // flushed in whole char-boundary slices (`&content[last..]`) so multi-byte
+    // sequences (accented, CJK, emoji) are copied intact and never mangled into
+    // per-byte Latin-1 mojibake (the old `out.push(bytes[i] as char)` did
+    // exactly that, turning e.g. `Café` into `CafÃ©`).
+    let mut out = String::with_capacity(content.len());
+    let mut i = 0usize;
+    let mut last = 0usize;
+    while i < n {
+        if bytes[i] != b'&' {
+            i += 1;
+            continue;
+        }
+        // Flush the run of non-`&` bytes preceding this `&` as a UTF-8 slice.
+        if last < i {
+            out.push_str(&content[last..i]);
+        }
+        match reference_end(bytes, i) {
+            Some(end) => {
+                // A valid character reference: keep it verbatim (idempotent).
+                out.push_str(&content[i..end]);
+                last = end;
+                i = end;
+            }
+            None => {
+                // A bare `&`: escape it, then continue scanning past that byte.
+                out.push_str("&amp;");
+                last = i + 1;
+                i += 1;
+            }
+        }
+    }
+    // Trailing run of non-`&` bytes after the last `&`.
+    if last < n {
+        out.push_str(&content[last..n]);
+    }
+    out
+}
+
+/// Diagnostic details for a detected syntax error.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SyntaxErrorDetail {
+    pub line: usize,
+    pub col: usize,
+    pub snippet: String,
+}
+
+/// Convert a byte offset in `source` to a 1-indexed (line, column) tuple.
+/// Safely handles UTF-8 multi-byte boundaries.
+pub fn byte_to_line_col(source: &str, mut byte_offset: usize) -> (usize, usize) {
+    byte_offset = byte_offset.min(source.len());
+    while byte_offset > 0 && !source.is_char_boundary(byte_offset) {
+        byte_offset -= 1;
+    }
+    let prefix = &source[..byte_offset];
+    let line = prefix.matches('\n').count() + 1;
+    let col = match prefix.rfind('\n') {
+        Some(idx) => byte_offset - idx,
+        None => byte_offset + 1,
+    };
+    (line, col)
+}
+
+/// Recursively walk the AST to collect syntax errors (`ERROR`, `UNDEFINED`, `MISSING` nodes).
+/// Does not descend into child nodes of an error node to avoid duplicate cascading reports.
+fn collect_syntax_errors(
+    node: &Node<ast_grep_core::tree_sitter::StrDoc<SupportLang>>,
+    source: &str,
+    errors: &mut Vec<SyntaxErrorDetail>,
+    limit: usize,
+) {
+    if errors.len() >= limit {
+        return;
+    }
+    let kind = node.kind();
+    if node.is_error()
+        || node.is_missing()
+        || kind == "ERROR"
+        || kind == "UNDEFINED"
+        || kind == "MISSING"
+    {
+        let range = node.range();
+        let (line, col) = byte_to_line_col(source, range.start);
+        let line_content = source.lines().nth(line.saturating_sub(1)).unwrap_or("");
+        let text = node.text();
+        let trimmed_text = text.trim();
+        let raw_snippet = if !trimmed_text.is_empty() {
+            trimmed_text
+        } else if !line_content.trim().is_empty() {
+            line_content.trim()
+        } else {
+            "<end of file>"
+        };
+        let snippet = if raw_snippet.chars().count() > 60 {
+            let s: String = raw_snippet.chars().take(60).collect();
+            format!("{s}...")
+        } else {
+            raw_snippet.to_string()
+        };
+        errors.push(SyntaxErrorDetail {
+            line,
+            col,
+            snippet,
+        });
+        return;
+    }
+    for child in node.children() {
+        collect_syntax_errors(&child, source, errors, limit);
+        if errors.len() >= limit {
+            break;
+        }
+    }
+}
+
 /// Syntax gate: reparse `content` and report whether any ERROR-kind node is
 /// present (tree-sitter error recovery). Presence means the content is
-/// malformed. Used by [`ast_replace`] for its rollback decision and by
-/// [`validate_file_syntax`] to gate `edit_file` writes when the `ast` feature
-/// is enabled.
+/// malformed. Used by [`ast_replace`] for its rollback decision.
+///
+/// For HTML, the content is validated through [`html_validation_text`], which
+/// escapes bare `&` to `&amp;` first, so valid HTML containing an unescaped
+/// ampersand is not rejected as malformed.
 pub fn syntax_gate(content: &str, lang: SupportLang) -> bool {
-    let doc = lang.ast_grep(content);
+    if content.trim().is_empty() {
+        return false;
+    }
+    let source = if lang == SupportLang::Html {
+        html_validation_text(content)
+    } else {
+        content.to_string()
+    };
+    let doc = lang.ast_grep(&source);
     let mut has_error = false;
     walk_for_errors(&doc.root(), &mut has_error);
     has_error
@@ -346,25 +565,49 @@ pub fn syntax_gate(content: &str, lang: SupportLang) -> bool {
 /// Validate that `content` parses cleanly as the language that
 /// [`infer_lang_by_extension`] resolves for `path`.
 ///
-/// Returns `Ok(())` when the extension does not map to any supported
-/// grammar (nothing to validate, so no language is assumed) or when the
-/// content parses without any ERROR/UNDEFINED node. Returns
-/// [`AstError::SyntaxFailure`] when the resolved grammar flags the content as
-/// malformed — this is what lets `FsExecutor::edit_file` refuse a write that
-/// would introduce syntax errors into a source file.
+/// Returns `Ok(())` when:
+/// - The content is empty (e.g. creating blank files), or
+/// - The extension does not map to any supported grammar (non-code files like `.txt`/`.md`), or
+/// - The content parses without any ERROR/UNDEFINED/MISSING nodes.
+///
+/// Returns [`AstError::SyntaxFailure`] with descriptive line, column, and snippet
+/// diagnostics when the resolved grammar flags the content as malformed.
+/// This acts as an invisible barrier preventing `edit_file` and `write_file`
+/// from committing syntax errors to disk.
 pub fn validate_file_syntax(path: &Path, content: &str) -> Result<(), AstError> {
+    if content.trim().is_empty() {
+        return Ok(());
+    }
     let Some(lang) = infer_lang_by_extension(path) else {
         // Unrecognized extension: no bundled grammar, so there is no syntax to
         // validate. (This also keeps non-code edits like `.txt`/`.md` free.)
         return Ok(());
     };
-    if syntax_gate(content, lang) {
-        return Err(AstError::SyntaxFailure(format!(
-            "in-memory {lang} parse of {} found ERROR/UNDEFINED nodes",
-            path.display()
-        )));
+    let source = if lang == SupportLang::Html {
+        html_validation_text(content)
+    } else {
+        content.to_string()
+    };
+    let doc = lang.ast_grep(&source);
+    let mut errors = Vec::new();
+    collect_syntax_errors(&doc.root(), &source, &mut errors, 3);
+    if errors.is_empty() {
+        return Ok(());
     }
-    Ok(())
+
+    let mut msg = format!(
+        "in-memory {lang} parse of {} found ERROR/UNDEFINED nodes ({} syntax error(s)):",
+        path.display(),
+        errors.len()
+    );
+    for err in &errors {
+        msg.push_str(&format!(
+            "\n  - line {}, col {}: syntax error near `{}`",
+            err.line, err.col, err.snippet
+        ));
+    }
+    msg.push_str("\nPlease verify syntax, matching delimiters, and brackets before saving.");
+    Err(AstError::SyntaxFailure(msg))
 }
 
 fn walk_for_errors(node: &Node<ast_grep_core::tree_sitter::StrDoc<SupportLang>>, out: &mut bool) {
@@ -372,7 +615,12 @@ fn walk_for_errors(node: &Node<ast_grep_core::tree_sitter::StrDoc<SupportLang>>,
         return;
     }
     let kind = node.kind();
-    if kind == "ERROR" || kind == "UNDEFINED" {
+    if node.is_error()
+        || node.is_missing()
+        || kind == "ERROR"
+        || kind == "UNDEFINED"
+        || kind == "MISSING"
+    {
         *out = true;
         return;
     }
@@ -773,5 +1021,284 @@ mod tests {
         let path = std::path::Path::new("notes.txt");
         let content = "let x = ;;;\n";
         assert!(validate_file_syntax(path, content).is_ok());
+    }
+
+    #[test]
+    fn infer_lang_by_extension_maps_html() {
+        assert_eq!(
+            infer_lang_by_extension(std::path::Path::new("a.html")),
+            Some(SupportLang::Html)
+        );
+        assert_eq!(
+            infer_lang_by_extension(std::path::Path::new("a.htm")),
+            Some(SupportLang::Html)
+        );
+        assert_eq!(
+            infer_lang_by_extension(std::path::Path::new("a.xhtml")),
+            Some(SupportLang::Html)
+        );
+    }
+
+    #[test]
+    fn validate_file_syntax_allows_empty_files() {
+        assert!(validate_file_syntax(std::path::Path::new("empty.rs"), "").is_ok());
+        assert!(validate_file_syntax(std::path::Path::new("empty.py"), "   \n\t").is_ok());
+        assert!(validate_file_syntax(std::path::Path::new("empty.json"), "").is_ok());
+    }
+
+    #[test]
+    fn validate_file_syntax_across_all_mainstream_languages() {
+        // Pairs of (file_path, valid_content, invalid_content)
+        let cases: &[(&str, &str, &str)] = &[
+            (
+                "app.rs",
+                "fn main() { println!(\"ok\"); }",
+                "fn main() { let x = ;;; }",
+            ),
+            (
+                "script.py",
+                "def greet(name):\n    return f\"hi {name}\"\n",
+                "def broken(x y):\n    return x + y\n",
+            ),
+            (
+                "web.js",
+                "function add(a, b) { return a + b; }",
+                "function broken( { return; }",
+            ),
+            (
+                "component.jsx",
+                "function Comp() { return <div>Hello</div>; }",
+                "function Comp() { return <div><span></div>; }",
+            ),
+            (
+                "module.mjs",
+                "export const x = 42;",
+                "export const x = ;",
+            ),
+            (
+                "legacy.cjs",
+                "module.exports = { x: 42 };",
+                "module.exports = { x: };",
+            ),
+            (
+                "types.ts",
+                "interface User { name: string; age: number; }",
+                "interface User { name: string age: number; }",
+            ),
+            (
+                "view.tsx",
+                "export const View = (): JSX.Element => <div>Ok</div>;",
+                "export const View = (): JSX.Element => <div><span></div>;",
+            ),
+            (
+                "server.go",
+                "package main\nfunc main() {}\n",
+                "package main\nfunc broken( { return }\n",
+            ),
+            (
+                "native.c",
+                "int add(int a, int b) { return a + b; }",
+                "int broken( { return 0; }",
+            ),
+            (
+                "native.h",
+                "int add(int a, int b);",
+                "int broken( ;",
+            ),
+            (
+                "native.cpp",
+                "int add(int a, int b) { return a + b; }",
+                "int broken( { return 0; }",
+            ),
+            (
+                "native.cc",
+                "int add(int a, int b) { return a + b; }",
+                "int broken( { return 0; }",
+            ),
+            (
+                "native.hpp",
+                "template<typename T> T add(T a, T b) { return a + b; }",
+                "template<typename T> T broken( { return 0; }",
+            ),
+            (
+                "App.java",
+                "public class App { public static void main(String[] args) {} }",
+                "public class App { public static void broken( {} }",
+            ),
+            (
+                "Program.cs",
+                "class Program { static void Main() {} }",
+                "class Program { static void Broken( {} }",
+            ),
+            (
+                "script.lua",
+                "function add(a, b) return a + b end",
+                "function broken( return end",
+            ),
+            (
+                "page.html",
+                "<!DOCTYPE html><html><body><h1>Title</h1></body></html>",
+                "<<<\n",
+            ),
+            (
+                "page.htm",
+                "<!DOCTYPE html><html><body><h1>Title</h1></body></html>",
+                "<<<\n",
+            ),
+            (
+                "style.css",
+                "body { margin: 0; padding: 0; color: #fff; }",
+                "body { margin: ;;; }",
+            ),
+            (
+                "data.json",
+                "{\"name\": \"castor\", \"valid\": true}",
+                "{\"name\": \"castor\", \"broken\": ,}",
+            ),
+            (
+                "config.yaml",
+                "server:\n  port: 8080\n  host: 127.0.0.1\n",
+                "server: [unclosed list\n",
+            ),
+            (
+                "config.yml",
+                "server:\n  port: 8080\n  host: 127.0.0.1\n",
+                "server: [unclosed list\n",
+            ),
+            (
+                "run.sh",
+                "#!/bin/bash\necho \"hello\"\n",
+                "if [ -f file ]; then\n  echo \"no fi\"\n",
+            ),
+            (
+                "run.bash",
+                "#!/bin/bash\necho \"hello\"\n",
+                "if [ -f file ]; then\n  echo \"no fi\"\n",
+            ),
+        ];
+
+        for (file_name, valid, invalid) in cases {
+            let path = std::path::Path::new(file_name);
+            // 1. Valid syntax must pass cleanly
+            assert!(
+                validate_file_syntax(path, valid).is_ok(),
+                "language for '{file_name}' should accept valid syntax:\n{valid}"
+            );
+
+            // 2. Invalid syntax must fail and return descriptive diagnostics
+            let err = validate_file_syntax(path, invalid).unwrap_err();
+            assert!(
+                matches!(err, AstError::SyntaxFailure(_)),
+                "language for '{file_name}' should return SyntaxFailure for invalid syntax"
+            );
+            let msg = err.to_string();
+            assert!(
+                msg.contains("syntax error"),
+                "error message for '{file_name}' should mention syntax error, got: {msg}"
+            );
+            assert!(
+                msg.contains("line ") && msg.contains("col "),
+                "error message for '{file_name}' should include line and column numbers, got: {msg}"
+            );
+        }
+    }
+
+    #[test]
+    fn html_validation_text_escapes_bare_ampersand_only() {
+        // A bare `&` (not part of a character reference) becomes `&amp;`.
+        assert_eq!(
+            html_validation_text("Model Rationale & Intent"),
+            "Model Rationale &amp; Intent"
+        );
+        // Multiple bare `&` are all escaped.
+        assert_eq!(
+            html_validation_text("A & B & C"),
+            "A &amp; B &amp; C"
+        );
+    }
+
+    #[test]
+    fn html_validation_text_preserves_valid_references() {
+        // Existing character references (named and numeric) are left intact, so
+        // the escape is idempotent and never double-escapes a valid reference.
+        assert_eq!(
+            html_validation_text("A &amp; B"),
+            "A &amp; B"
+        );
+        assert_eq!(
+            html_validation_text("C &nbsp; &copy;"),
+            "C &nbsp; &copy;"
+        );
+        assert_eq!(
+            html_validation_text("D &#65; &#x41;"),
+            "D &#65; &#x41;"
+        );
+    }
+
+    #[test]
+    fn html_validation_text_preserves_multibyte_utf8() {
+        // The non-`&` runs are flushed as whole char-boundary slices, so
+        // multi-byte UTF-8 (accented, CJK, emoji) is copied intact — the old
+        // byte-by-byte `out.push(bytes[i] as char)` mangled each of these into
+        // per-byte Latin-1 mojibake (e.g. `Café` → `CafÃ©`). A multi-byte char
+        // can never equal the ASCII `&` byte, so the ampersand scan stays
+        // boundary-safe and the `&` handling is unchanged.
+        //
+        // (a) A bare `&` next to multi-byte text: the accented `é` (2 bytes),
+        //     the CJK chars (3 bytes each), and the emoji (4 bytes each) all
+        //     survive byte-for-byte while the bare `&` is still escaped.
+        assert_eq!(
+            html_validation_text("Café & 中文 & 测试 & 😀 & 😃"),
+            "Café &amp; 中文 &amp; 测试 &amp; 😀 &amp; 😃"
+        );
+        // (b) A *valid* reference adjacent to multi-byte text: the reference is
+        //     kept verbatim and the surrounding non-ASCII bytes stay intact.
+        assert_eq!(
+            html_validation_text("Café &amp; 😀 &copy; 中文"),
+            "Café &amp; 😀 &copy; 中文"
+        );
+        // (c) Pure multi-byte text with no `&` at all is a no-op identity —
+        //     the whole string round-trips exactly (this is the mojibake case).
+        assert_eq!(
+            html_validation_text("Café 😀 中文"),
+            "Café 😀 中文"
+        );
+        assert_eq!(
+            html_validation_text("测试"),
+            "测试"
+        );
+    }
+
+    #[test]
+    fn validate_file_syntax_accepts_valid_html_with_bare_ampersand() {
+        // The motivating case: valid HTML with a bare `&` (no character
+        // reference) must NOT be rejected as malformed. The gate escapes the
+        // bare `&` before parsing, so the HTML grammar sees a valid reference.
+        let path = std::path::Path::new("index.html");
+        let content = "<!DOCTYPE html>\n<html><head><title>T</title></head>\
+                       <body><h1>Model Rationale &amp; Intent</h1>\
+                       <p>Model Rationale &amp; Intent</p></body></html>\n";
+        assert!(validate_file_syntax(path, content).is_ok());
+
+        // The exact headline from the bug report, with a *bare* ampersand in
+        // the source, is what this fix is for.
+        let bare = "<!DOCTYPE html>\n<html><body><h1>Model Rationale & Intent</h1></body></html>\n";
+        assert!(
+            validate_file_syntax(path, bare).is_ok(),
+            "a bare & in valid HTML must not be a SyntaxFailure"
+        );
+    }
+
+    #[test]
+    fn validate_file_syntax_still_rejects_invalid_html() {
+        // Genuinely malformed HTML must still fail the gate — the bare-`&`
+        // escape must not mask a real structural error. `<<<` is a construct the
+        // tree-sitter HTML grammar recovers as an ERROR node (verified against
+        // the grammar; note that a bare `&` in *text* is accepted, so the
+        // escape cannot turn a valid doc into an invalid one or vice versa).
+        let path = std::path::Path::new("bad.html");
+        let content = "<<<\n";
+        let err = validate_file_syntax(path, content).unwrap_err();
+        assert!(matches!(err, AstError::SyntaxFailure(_)), "{err}");
     }
 }

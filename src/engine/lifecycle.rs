@@ -481,7 +481,8 @@ impl EngineLifecycle {
             // On WSL2/Linux, never invoke `sh -c "wsl ..."`: strip any leading
             // `wsl`/`wsl.exe` interop wrapper so the inner command runs directly
             // (e.g. `wsl -d Ubuntu -- bash -lc "pkill vllm"` -> `bash -lc "pkill vllm"`).
-            let cmd = crate::platform::strip_wsl_wrapper(&normalized);
+            // Also normalize Windows backslashes in paths to prevent exit 127 in sh -c.
+            let cmd = crate::platform::normalize_launch_command(&normalized);
             let mut c = Command::new("sh");
             c.arg("-c").arg(cmd);
             c
