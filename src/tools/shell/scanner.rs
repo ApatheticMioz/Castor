@@ -561,10 +561,7 @@ fn is_protected_root(p: &str) -> bool {
             return true;
         }
     }
-    if p == "/root" || is_home_user(&p) {
-        return true;
-    }
-    false
+    p == "/root" || is_home_user(&p)
 }
 
 // ---------------------------------------------------------------------------
