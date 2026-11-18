@@ -18,7 +18,7 @@ use tokio::process::Command;
 use tokio::sync::Mutex;
 
 use super::backend::{Backend, EngineProfile, api_url};
-use crate::config::{Config, default_launch_command};
+use crate::config::{Config, default_launch_command, resolve_default_launch_command};
 use crate::platform::{is_wsl, wsl_normalize};
 use crate::state::{AcquireResult, Locks, StateDir, WedgeCounter};
 
@@ -264,7 +264,12 @@ impl EngineLifecycle {
             if Backend::from_config(&self.config) == Backend::LlamaCpp {
                 return self.readiness().await;
             }
-            return Err(LifecycleError::NoLaunchCommand);
+            let can_use_default = self.config.base_url.is_some()
+                && self.config.ports.engine != 0
+                && resolve_default_launch_command().is_some();
+            if !can_use_default {
+                return Err(LifecycleError::NoLaunchCommand);
+            }
         }
         match self.boot().await {
             Ok(()) => Ok(()),

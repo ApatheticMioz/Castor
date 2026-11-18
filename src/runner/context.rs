@@ -1,4 +1,4 @@
-//! Token counting and session message persistence.
+//! Token counting, in-flight ceilings, and session message persistence.
 
 use std::fs;
 use std::path::PathBuf;
@@ -11,6 +11,9 @@ use crate::state::StateDir;
 
 use super::messages::strip_think_tags;
 
+pub(crate) const CONTEXT_CEILING_DIRECTIVE: &str =
+    "[System: Working context budget has reached 90%. Do not execute further tools. \
+     Synthesize your final conclusions and response immediately.]";
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub(crate) struct PersistedMessage {
@@ -119,6 +122,48 @@ pub(crate) fn history_tokens(messages: &[Message]) -> usize {
 
 pub(crate) fn watermark_tokens(max_context: usize) -> usize {
     (max_context as u64 * 75 / 100) as usize
+}
+
+pub(crate) fn in_flight_ceiling_tokens(max_context: usize) -> usize {
+    (max_context as u64 * 90 / 100) as usize
+}
+
+/// Conservative token estimate for newly appended messages not yet measured by
+/// an engine `usage.prompt_tokens` report (code/JSON tokenizes closer to ~2.8
+/// chars/token than 4 chars/token, and includes tool-call arguments).
+pub(crate) fn uncounted_tail_tokens(messages: &[Message]) -> usize {
+    messages
+        .iter()
+        .map(|m| {
+            let content_chars = m.content.chars().count();
+            let tc_chars: usize = m
+                .tool_calls
+                .iter()
+                .map(|tc| tc.name.len() + tc.arguments.chars().count() + 16)
+                .sum();
+            (content_chars + tc_chars).div_ceil(3)
+        })
+        .sum()
+}
+
+/// Effective in-flight context footprint in tokens.
+///
+/// Prefers the last engine-reported `prompt_tokens` (exact upstream tokenizer
+/// count for `messages[..accounted_msgs]` + tool schemas + chat template) plus
+/// a conservative token count for any messages appended since that call, falling
+/// back to `history_tokens` only before the first engine usage report.
+pub(crate) fn in_flight_context_tokens(
+    messages: &[Message],
+    accounted_msgs: usize,
+    last_prompt_tokens: Option<usize>,
+) -> usize {
+    match last_prompt_tokens {
+        Some(pt) => {
+            let tail = messages.get(accounted_msgs..).unwrap_or(&[]);
+            pt.saturating_add(uncounted_tail_tokens(tail))
+        }
+        None => history_tokens(messages),
+    }
 }
 
 pub fn resumed_history_tokens(state: &StateDir, session_id: &str, max_context: Option<u32>) -> u32 {
@@ -250,6 +295,21 @@ mod tests {
             should_resume(&history, "prompt", 0),
             "zero max_context disables the watermark — always resume"
         );
+    }
+
+    #[test]
+    fn in_flight_context_tokens_prefers_engine_prompt_tokens_plus_tail() {
+        let messages = vec![
+            msg("system", "sys"),
+            msg("user", "u"),
+            msg("assistant", "a"),
+            msg("tool", "x".repeat(30)),
+        ];
+        assert_eq!(in_flight_ceiling_tokens(150_000), 135_000);
+        // Without engine usage, falls back to history_tokens.
+        assert_eq!(in_flight_context_tokens(&messages, 0, None), history_tokens(&messages));
+        // With engine prompt_tokens=1000 covering the first 3 messages, adds only the 30-char tail (10 tokens).
+        assert_eq!(in_flight_context_tokens(&messages, 3, Some(1000)), 1010);
     }
 }
 

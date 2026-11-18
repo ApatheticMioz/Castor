@@ -1,6 +1,23 @@
 //! Message shaping, think-tag stripping, delimiter sanitization, and metrics projection.
 
-use crate::engine::{Message, Metrics};
+use crate::engine::{Completion, Message, Metrics};
+
+/// Extract the best available text from a completion (`content`, falling back
+/// to trimmed `reasoning_content` when `content` is whitespace-only).
+pub(crate) fn completion_text(completion: &Completion) -> String {
+    if !completion.content.trim().is_empty() {
+        completion.content.clone()
+    } else if let Some(rc) = completion
+        .reasoning_content
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+    {
+        rc.to_string()
+    } else {
+        completion.content.clone()
+    }
+}
 
 pub(crate) fn msg(role: &str, content: impl Into<String>) -> Message {
     Message {

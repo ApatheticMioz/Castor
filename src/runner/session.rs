@@ -2,11 +2,15 @@
 
 use crate::engine::{Message, ToolSchema};
 use crate::runner::budget::{LOOP_THRESHOLD, LOOP_WINDOW};
-use crate::runner::context::{history_tokens, load_messages, save_messages, should_resume};
+use crate::runner::context::{
+    CONTEXT_CEILING_DIRECTIVE, history_tokens, in_flight_ceiling_tokens, in_flight_context_tokens,
+    load_messages, save_messages, should_resume, watermark_tokens,
+};
 use crate::runner::events::EventLogger;
 use crate::runner::loop_detector::{LoopDetector, LoopState};
 use crate::runner::messages::{
-    is_severed_stop, metrics_json, msg, sanitize_tool_delimiters, strip_reasoning_tags,
+    completion_text, is_severed_stop, metrics_json, msg, sanitize_tool_delimiters,
+    strip_reasoning_tags,
 };
 use crate::runner::salvage::{
     is_reasoning_ceiling, run_degenerate_final_salvage, run_reasoning_ceiling_salvage,
@@ -67,7 +71,21 @@ pub async fn run_session(
         && let Some(history) = load_messages(state, session_id)
         && !history.is_empty()
     {
-        if check_resume(&history, user_prompt, options) {
+        let max_context = options.map(|o| o.max_context).unwrap_or(0);
+        let fits_watermark = if max_context > 0 {
+            let mut candidate = Vec::with_capacity(messages.len() + history.len() + 1);
+            candidate.extend(messages.iter().cloned());
+            candidate.extend(history.iter().cloned());
+            candidate.push(msg("user", user_prompt));
+            if let Some(exact) = engine.count_tokens(&candidate, tools).await {
+                exact <= watermark_tokens(max_context)
+            } else {
+                check_resume(&history, user_prompt, options)
+            }
+        } else {
+            check_resume(&history, user_prompt, options)
+        };
+        if fits_watermark {
             messages.extend(history);
         } else {
             tracing::info!(
@@ -114,6 +132,24 @@ pub async fn run_session(
         .map(|o| o.effective_close_tag())
         .unwrap_or_else(|| concat!("</th", "ink>").to_string());
 
+    // In-flight 90% context ceiling (re-checked every turn). When accumulated
+    // context reaches 90% of `max_context`, the next turn disables tool
+    // dispatch, appends `CONTEXT_CEILING_DIRECTIVE`, and lands the final
+    // completion in the remaining 10% headroom. `0` disables the gate.
+    let ceiling_tokens = in_flight_ceiling_tokens(options.map(|o| o.max_context).unwrap_or(0));
+    let mut ceiling_triggered = false;
+    let mut break_after_turn = false;
+    let mut last_prompt_tokens: Option<usize> = if ceiling_tokens > 0 {
+        engine.count_tokens(&messages, tools).await
+    } else {
+        None
+    };
+    let mut accounted_msgs: usize = if last_prompt_tokens.is_some() {
+        messages.len()
+    } else {
+        0
+    };
+
     loop {
         turns += 1;
 
@@ -138,7 +174,37 @@ pub async fn run_session(
             }
         }
 
-        let active_tools: &[ToolSchema] = tools;
+        if !ceiling_triggered && ceiling_tokens > 0 {
+            if accounted_msgs < messages.len()
+                && let Some(exact) = engine.count_tokens(&messages, tools).await
+            {
+                last_prompt_tokens = Some(exact);
+                accounted_msgs = messages.len();
+            }
+            let current_tokens =
+                in_flight_context_tokens(&messages, accounted_msgs, last_prompt_tokens);
+            if current_tokens >= ceiling_tokens {
+                tracing::info!(
+                    session = %session_id,
+                    context_tokens = current_tokens,
+                    ceiling_tokens,
+                    "in-flight 90% context ceiling reached; disabling tool dispatch and \
+                     landing a final completion in the remaining headroom"
+                );
+                let _ = logger.append(serde_json::json!({
+                    "type": "context_ceiling",
+                    "turn": turns,
+                    "history_tokens": current_tokens,
+                    "max_context": ceiling_tokens,
+                }));
+                messages.push(msg("user", CONTEXT_CEILING_DIRECTIVE));
+                ceiling_triggered = true;
+                break_after_turn = true;
+            }
+        }
+
+        let active_tools: &[ToolSchema] = if break_after_turn { &[] } else { tools };
+        accounted_msgs = messages.len();
         let watchdog = wd_timeout > 0 || wd_max_reasoning > 0;
         let completion = if watchdog {
             let primary = chat_with_watchdog(
@@ -198,6 +264,10 @@ pub async fn run_session(
             }))
             .map_err(RunnerError::Io)?;
 
+        if let Some(pt) = completion.metrics.prompt_tokens {
+            last_prompt_tokens = Some(pt as usize);
+        }
+
         // Append the assistant message. Strip <th_ink>...</th_ink> traces if tool_calls
         // were made, to prevent context inflation and prompt-cache invalidation.
         let sanitized_content = if !completion.tool_calls.is_empty() {
@@ -211,6 +281,14 @@ pub async fn run_session(
             tool_calls: completion.tool_calls.clone(),
             tool_call_id: None,
         });
+
+        // In-flight 90% ceiling landed: tools were disabled on this turn. Record
+        // the completion text and break immediately — skipping continuation,
+        // salvage passes, and any tool calls a non-compliant engine may emit.
+        if break_after_turn {
+            final_text = completion_text(&completion);
+            break;
+        }
 
         if completion.tool_calls.is_empty() {
             // Compute the ceiling signal before moving `completion.content`.
@@ -259,8 +337,12 @@ pub async fn run_session(
                      already complete, reply with your final answer."
                 );
                 messages.push(msg("user", continuation_prompt));
+                accounted_msgs = messages.len();
                 match engine.chat(&messages, tools, true, effort).await {
                     Ok(cont) => {
+                        if let Some(pt) = cont.metrics.prompt_tokens {
+                            last_prompt_tokens = Some(pt as usize);
+                        }
                         if cont.tool_calls.is_empty() {
                             // Terminal: land on the continuation's content (or its
                             // reasoning if the content is empty).

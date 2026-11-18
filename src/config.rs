@@ -24,17 +24,63 @@ const SWARM_BASE_URL: &str = "http://127.0.0.1:18020/v1";
 /// Swarm baseline concurrency: matches the launcher's `MAX_SEQS=4`.
 const SWARM_MAX_CONCURRENT_TASKS: u32 = 4;
 
+const SWARM_SCRIPT_REL: &str = if cfg!(windows) {
+    "scripts\\main\\start.bat"
+} else {
+    "scripts/wsl/start_swarm.sh"
+};
+
+fn format_swarm_launch(script: &std::path::Path) -> String {
+    if cfg!(windows) {
+        format!("cmd /c \"{}\"", script.display())
+    } else {
+        format!("bash \"{}\"", script.display())
+    }
+}
+
+/// Resolve the repository's default Swarm launcher script across `cwd` and
+/// `exe` ancestors so workers/CLIs started in any workspace can still locate
+/// `scripts/wsl/start_swarm.sh` (or `scripts\main\start.bat`).
+pub(crate) fn resolve_default_launch_command_from(
+    cwd: Option<&std::path::Path>,
+    exe: Option<&std::path::Path>,
+) -> Option<String> {
+    if let Some(dir) = cwd {
+        let candidate = dir.join(SWARM_SCRIPT_REL);
+        if candidate.is_file() {
+            return Some(format_swarm_launch(&candidate));
+        }
+    }
+    if let Some(bin) = exe {
+        for ancestor in bin.ancestors() {
+            let candidate = ancestor.join(SWARM_SCRIPT_REL);
+            if candidate.is_file() {
+                return Some(format_swarm_launch(&candidate));
+            }
+        }
+    }
+    None
+}
+
+pub(crate) fn resolve_default_launch_command() -> Option<String> {
+    let cwd = std::env::current_dir().ok();
+    let exe = std::env::current_exe().ok();
+    resolve_default_launch_command_from(cwd.as_deref(), exe.as_deref())
+}
+
 /// The repository start launcher for the Swarm baseline, per platform.
 ///
 /// `pub(crate)` so the lifecycle layer can fall back to it when a non-llama
-/// backend boots with no `launch_command` configured, letting a bare
-/// `castor server start` bring up the Swarm baseline out of the box.
+/// backend boots with no `launch_command` configured, letting `castor server start`
+/// and Swarm worker auto-boot locate `start_swarm.sh` from any workspace.
 pub(crate) fn default_launch_command() -> String {
-    if cfg!(windows) {
-        "cmd /c scripts\\main\\start.bat".to_string()
-    } else {
-        "bash scripts/wsl/start_swarm.sh".to_string()
-    }
+    resolve_default_launch_command().unwrap_or_else(|| {
+        if cfg!(windows) {
+            format!("cmd /c {SWARM_SCRIPT_REL}")
+        } else {
+            format!("bash {SWARM_SCRIPT_REL}")
+        }
+    })
 }
 
 /// Where a field's effective value came from.
@@ -1722,5 +1768,26 @@ mod tests {
             (l.config.max_context, l.sources.max_context),
             (None, Source::Default)
         );
+    }
+
+    #[test]
+    fn resolve_default_launch_command_finds_script_via_exe_ancestors() {
+        let root = tmp_dir();
+        let script = root.join(SWARM_SCRIPT_REL);
+        std::fs::create_dir_all(script.parent().unwrap()).unwrap();
+        std::fs::write(&script, "#!/bin/bash\n").unwrap();
+
+        let other_cwd = tmp_dir();
+        let fake_exe = root.join("target").join("release").join("castor");
+        let resolved =
+            resolve_default_launch_command_from(Some(&other_cwd), Some(&fake_exe)).unwrap();
+        assert!(
+            resolved.contains(&script.to_string_lossy().to_string()),
+            "expected resolved launcher to reference {}, got: {resolved}",
+            script.display()
+        );
+
+        let absent = resolve_default_launch_command_from(Some(&other_cwd), Some(&other_cwd));
+        assert!(absent.is_none());
     }
 }

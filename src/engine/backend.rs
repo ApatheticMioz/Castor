@@ -197,7 +197,7 @@ pub(crate) fn api_url(config: &Config, endpoint: &str) -> Result<String, String>
 /// vLLM exposes `/version` and `/health` at the root, while its OpenAI
 /// API lives under `/v1`; llama.cpp serves both `/v1/health` and root
 /// `/health`, so candidates are probed in order until one matches.
-fn server_root(base_url: &str) -> Option<String> {
+pub(crate) fn server_root(base_url: &str) -> Option<String> {
     let base = base_url.trim_end_matches('/');
     if let Some(idx) = base.rfind("/v1") {
         Some(base[..idx].to_string())

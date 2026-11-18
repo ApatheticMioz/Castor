@@ -70,6 +70,16 @@ pub trait ChatEngine: Send + Sync {
         stream: bool,
         reasoning_effort: Option<&str>,
     ) -> Result<crate::engine::Completion, EngineError>;
+
+    /// Exact prompt token count via the engine's tokenizer endpoint when
+    /// available; `None` falls back to `usage.prompt_tokens` / local sizing.
+    async fn count_tokens(
+        &self,
+        _messages: &[Message],
+        _tools: &[ToolSchema],
+    ) -> Option<usize> {
+        None
+    }
 }
 
 #[async_trait]
@@ -82,6 +92,14 @@ impl ChatEngine for EngineClient {
         reasoning_effort: Option<&str>,
     ) -> Result<crate::engine::Completion, EngineError> {
         EngineClient::chat(self, messages, tools, stream, reasoning_effort).await
+    }
+
+    async fn count_tokens(
+        &self,
+        messages: &[Message],
+        tools: &[ToolSchema],
+    ) -> Option<usize> {
+        EngineClient::count_tokens(self, messages, tools).await
     }
 }
 
@@ -151,16 +169,22 @@ pub struct SessionOptions {
     /// Consecutive non-mutating bash probes before the probe-budget advisory
     /// is injected. Defaults to 4.
     pub probe_budget: usize,
-    /// The engine's max context (in tokens). Drives the in-session resume watermark
-    /// (tokens approximated as `chars / 4`):
+    /// The engine's max context (in tokens). Drives two in-session gates:
     ///
     /// - **75% resume watermark** — a resumed session rolls to a fresh
     ///   `[system, user]` pair when the loaded history plus the new prompt
     ///   would exceed 75% of this budget (checked once, at resume, in
-    ///   [`should_resume`]).
+    ///   [`should_resume`], tokens approximated as `chars / 4`).
+    /// - **90% in-flight ceiling** — while a session runs, [`run_session`]
+    ///   checks the accumulated context (preferring engine-reported
+    ///   `prompt_tokens` plus uncounted tail tokens) against 90% of this
+    ///   budget at the top of every turn; when reached, it disables further
+    ///   tool dispatch, appends [`context::CONTEXT_CEILING_DIRECTIVE`], and
+    ///   lands the final completion in the remaining 10% headroom.
     ///
-    /// `0` (the default) disables the gate — history always resumes when
-    /// present (zero behavior change for callers that don't set it).
+    /// `0` (the default) disables both gates — history always resumes when
+    /// present and the in-flight ceiling never trips (zero behavior change for
+    /// callers that don't set it).
     pub max_context: usize,
     /// Reasoning open tag the runner strips from assistant content and
     /// sanitizes inside tool results. `None` means "use the reserved default"

@@ -1,7 +1,6 @@
 //! DGI Gatekeeper — Decomposition Granularity Index.
 //!
-//! Classifies dispatch prompts with a serving-engine probe and an advisory
-//! offline heuristic.
+//! Classifies dispatch prompts with a serving-engine probe.
 //!
 //! The probe comes in two shapes, and they are intentionally not comparable in
 //! latency: the vLLM path is a single-token guided_choice completion pass,
@@ -9,9 +8,6 @@
 //! duration scales with decode speed on CPU models. Both shapes share one
 //! request-builder / verdict-decoder core ([`probe_request`],
 //! [`decode_verdict`]) so the decision rule stays DRY and engine-agnostic.
-//!
-//! Domain agnosticism: no repo-specific patterns, no hardcoded file extensions,
-//! and no hard regex or length limits.
 
 use serde_json::json;
 
@@ -67,59 +63,128 @@ impl DgiVerdict {
     }
 }
 
-/// Turn the probe's first decoded token into a verdict (the decoded-text
-/// fallback when logprobs are absent). The token is normalized (trimmed,
-/// lowercased) before matching since serving engines may prepend whitespace.
-fn verdict_from_text(token: &str) -> DgiVerdict {
-    let t = token.trim().to_ascii_lowercase();
-    if t.starts_with("over") {
-        DgiVerdict::Reject(vec![
+/// Turn the probe's first decoded token into a verdict (used only when an
+/// endpoint does not return `top_logprobs`). Rejects empty or unrecognized
+/// text rather than silently admitting.
+fn verdict_from_text(token: &str) -> Result<DgiVerdict, String> {
+    let trimmed = token.trim();
+    if trimmed.is_empty() {
+        return Err("DGI probe returned empty completion text".into());
+    }
+    if is_choice_prefix(trimmed, VERDICT_ADMIT, 2) {
+        Ok(DgiVerdict::Admit)
+    } else if is_choice_prefix(trimmed, VERDICT_OVERLOADED, 2) {
+        Ok(DgiVerdict::Reject(vec![
             "Model-classified monolithic multi-subsystem dispatch (OVERLOADED)".to_string(),
-        ])
+        ]))
     } else {
-        DgiVerdict::Admit
+        Err(format!("unexpected DGI probe completion text: {trimmed:?}"))
     }
 }
 
+/// Returns `true` when `token` is a non-empty prefix of `target` of at least
+/// `min_len` characters (exact-case first, or full-word case-insensitive).
+fn is_choice_prefix(token: &str, target: &str, min_len: usize) -> bool {
+    let t = token.trim();
+    if t.len() >= min_len && target.starts_with(t) {
+        return true;
+    }
+    t.eq_ignore_ascii_case(target)
+}
+
+fn logsumexp(a: Option<f64>, b: f64) -> f64 {
+    match a {
+        None => b,
+        Some(prev) => {
+            let m = prev.max(b);
+            m + ((prev - m).exp() + (b - m).exp()).ln()
+        }
+    }
+}
+
+/// Extract `(token, logprob)` pairs from either `/v1/completions` map format
+/// (`{"AD": -0.01, "OVER": -5.3, ...}`) or Chat Completions array format
+/// (`[{"token": " ADMIT", "logprob": -0.01}, ...]`).
+fn extract_top_logprobs(top_logprobs: &serde_json::Value) -> Option<Vec<(String, f64)>> {
+    if let Some(obj) = top_logprobs.as_object() {
+        let pairs: Vec<(String, f64)> = obj
+            .iter()
+            .filter_map(|(k, v)| v.as_f64().map(|lp| (k.clone(), lp)))
+            .collect();
+        return if pairs.is_empty() { None } else { Some(pairs) };
+    }
+    if let Some(arr) = top_logprobs.as_array() {
+        let pairs: Vec<(String, f64)> = arr
+            .iter()
+            .filter_map(|e| {
+                let tok = e.get("token")?.as_str()?.to_string();
+                let lp = e.get("logprob")?.as_f64()?;
+                Some((tok, lp))
+            })
+            .collect();
+        return if pairs.is_empty() { None } else { Some(pairs) };
+    }
+    None
+}
+
 /// Log-odds decision rule: `delta_z = logP(OVERLOADED) - logP(ADMIT)` measured
-/// on the probe's first token (probability = exp of the logprob). Reject only
-/// when the OVERLOADED margin exceeds `reject_margin`; a near-tie
-/// (|delta_z| <= margin) is advisory `Review(1)`; otherwise admit.
+/// on the probe's first token. Supports multi-token BPE first-token prefixes
+/// (`AD`/`OVER`) via `logsumexp`, and handles one-sided top-K truncation using
+/// `min(top_logprobs)` as a strict upper bound when the losing choice falls
+/// outside top-K.
 fn verdict_from_logprobs(
     top_logprobs: &serde_json::Value,
     reject_margin: f64,
 ) -> Result<DgiVerdict, String> {
-    /// Normalized match: serving engines serve guided tokens with a surface
-    /// prefix (e.g. `" ADMIT"`), so compare the trimmed, lowercased token.
-    fn logprob_of(top: &serde_json::Value, token: &str) -> Option<f64> {
-        let want = token.to_ascii_lowercase();
-        top.as_array()?
-            .iter()
-            .find(|e| {
-                e.get("token")
-                    .and_then(|t| t.as_str())
-                    .map(|s| s.trim().to_ascii_lowercase())
-                    == Some(want.clone())
-            })
-            .and_then(|e| e.get("logprob")?.as_f64())
+    let pairs = extract_top_logprobs(top_logprobs)
+        .ok_or_else(|| "top_logprobs empty or unrecognized format".to_string())?;
+
+    let mut p_admit: Option<f64> = None;
+    let mut p_over: Option<f64> = None;
+    let mut floor_lp = f64::INFINITY;
+
+    for (tok, lp) in &pairs {
+        floor_lp = floor_lp.min(*lp);
+        if is_choice_prefix(tok, VERDICT_ADMIT, 2) {
+            p_admit = Some(logsumexp(p_admit, *lp));
+        } else if is_choice_prefix(tok, VERDICT_OVERLOADED, 2) {
+            p_over = Some(logsumexp(p_over, *lp));
+        }
     }
-    let (p_admit, p_over) = match (
-        logprob_of(top_logprobs, VERDICT_ADMIT),
-        logprob_of(top_logprobs, VERDICT_OVERLOADED),
-    ) {
-        (Some(a), Some(o)) => (a, o),
-        _ => return Err("top_logprobs missing both probe choices".into()),
-    };
-    // logP(OVERLOADED) - logP(ADMIT): positive when OVERLOADED is more probable.
-    let delta_z = p_over - p_admit;
-    if delta_z > reject_margin {
-        Ok(DgiVerdict::Reject(vec![format!(
-            "Model-classified monolithic multi-subsystem dispatch (OVERLOADED, log-odds margin {delta_z:.3} > {reject_margin})"
-        )]))
-    } else if delta_z.abs() <= reject_margin {
-        Ok(DgiVerdict::Review(1))
-    } else {
-        Ok(DgiVerdict::Admit)
+
+    // Fallback for tokenizers that split choices at a 1-char first token ("A"/"O").
+    if p_admit.is_none() || p_over.is_none() {
+        for (tok, lp) in &pairs {
+            let t = tok.trim();
+            if p_admit.is_none() && t == "A" {
+                p_admit = Some(*lp);
+            } else if p_over.is_none() && t == "O" {
+                p_over = Some(*lp);
+            }
+        }
+    }
+
+    match (p_admit, p_over) {
+        (Some(a), Some(o)) => {
+            let delta_z = o - a;
+            if delta_z > reject_margin {
+                Ok(DgiVerdict::Reject(vec![format!(
+                    "Model-classified monolithic multi-subsystem dispatch (OVERLOADED, log-odds margin {delta_z:.3} > {reject_margin})"
+                )]))
+            } else if delta_z.abs() <= reject_margin {
+                Ok(DgiVerdict::Review(1))
+            } else {
+                Ok(DgiVerdict::Admit)
+            }
+        }
+        // Only ADMIT appeared in top-K: OVERLOADED logprob is strictly <= floor_lp.
+        (Some(a), None) if (floor_lp - a) < -reject_margin => Ok(DgiVerdict::Admit),
+        // Only OVERLOADED appeared in top-K: ADMIT logprob is strictly <= floor_lp.
+        (None, Some(o)) if (o - floor_lp) > reject_margin => Ok(DgiVerdict::Reject(vec![format!(
+            "Model-classified monolithic multi-subsystem dispatch (OVERLOADED, lower-bound margin {:.3} > {reject_margin})",
+            o - floor_lp
+        )])),
+        _ => Err("top_logprobs missing probe choices".into()),
     }
 }
 
@@ -132,7 +197,7 @@ fn decode_verdict(val: &serde_json::Value, reject_margin: f64) -> Result<DgiVerd
         verdict_from_logprobs(first, reject_margin)
     } else {
         let text = choice["text"].as_str().unwrap_or("");
-        Ok(verdict_from_text(text))
+        verdict_from_text(text)
     }
 }
 
@@ -151,8 +216,7 @@ fn probe_request(
             ),
             "max_tokens": 1,
             "temperature": 0.0,
-            "logprobs": true,
-            "top_logprobs": 2,
+            "logprobs": 20,
             "guided_choice": [VERDICT_ADMIT, VERDICT_OVERLOADED],
         }),
         crate::engine::backend::ProbeShape::JsonSchemaChat => json!({
@@ -250,7 +314,8 @@ pub async fn evaluate_model_probe(
     )
 }
 
-/// Probe using the configured backend's request format and authentication.
+/// Query the configured serving engine using its capability-selected probe
+/// format, retrying once on transient socket/5xx blips before failing fast.
 pub async fn evaluate_configured_model_probe(
     config: &crate::config::Config,
     prompt: &str,
@@ -268,25 +333,43 @@ pub async fn evaluate_configured_model_probe(
         ProbeShape::GuidedChoiceCompletion => api_url(config, "completions")?,
         ProbeShape::JsonSchemaChat => api_url(config, "chat/completions")?,
     };
-    let mut request = http.post(&url).json(&probe_request(shape, model, prompt));
-    if let Some(key) = &config.api_key {
-        request = request.bearer_auth(key);
+    let payload = probe_request(shape, model, prompt);
+
+    let mut attempt = 0;
+    loop {
+        let mut request = http.post(&url).json(&payload);
+        if let Some(key) = &config.api_key {
+            request = request.bearer_auth(key);
+        }
+        match request.send().await {
+            Ok(response) => {
+                let status = response.status();
+                let body = response
+                    .text()
+                    .await
+                    .map_err(|e| format!("reading upstream HTTP {status} body: {e}"))?;
+                if (status.as_u16() == 502 || status.as_u16() == 503 || status.as_u16() == 504)
+                    && attempt == 0
+                {
+                    attempt += 1;
+                    tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+                    continue;
+                }
+                if !status.is_success() {
+                    return Err(format!("upstream HTTP {status}: {body}"));
+                }
+                let val: serde_json::Value = serde_json::from_str(&body)
+                    .map_err(|e| format!("malformed probe response: {e}"))?;
+                return decode_probe_response(shape, &val, config.dgi_reject_margin);
+            }
+            Err(e) if attempt == 0 => {
+                attempt += 1;
+                tracing::warn!(url = %url, "DGI probe transport error ({e}); retrying once");
+                tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+            }
+            Err(e) => return Err(format!("connection to {url} failed: {e}")),
+        }
     }
-    let response = request
-        .send()
-        .await
-        .map_err(|e| format!("connection to {url} failed: {e}"))?;
-    let status = response.status();
-    let body = response
-        .text()
-        .await
-        .map_err(|e| format!("reading upstream HTTP {status} body: {e}"))?;
-    if !status.is_success() {
-        return Err(format!("upstream HTTP {status}: {body}"));
-    }
-    let val: serde_json::Value =
-        serde_json::from_str(&body).map_err(|e| format!("malformed probe response: {e}"))?;
-    decode_probe_response(shape, &val, config.dgi_reject_margin)
 }
 
 /// Warm-session bypass: a session that already has a non-empty persisted
@@ -306,31 +389,51 @@ pub fn warm_session_bypass(
         .unwrap_or(false)
 }
 
-/// Offline or soft heuristic evaluation: advisory only, NEVER a hard reject.
-pub fn evaluate(prompt: &str) -> DgiVerdict {
-    // Soft heuristic: advisory review if length exceeds 2,500 chars, but never reject.
-    if prompt.len() > 2500 {
-        return DgiVerdict::Review(2);
-    }
-    DgiVerdict::Admit
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
 
     #[test]
-    fn short_prompt_admits() {
-        let v = evaluate("Fix off-by-one in src/pruner.rs line 42.");
-        assert_eq!(v, DgiVerdict::Admit);
+    fn vllm_completions_map_top_logprobs_decodes_bpe_prefixes() {
+        let top = json!({
+            "AD": -0.0081,
+            "ADM": -5.88,
+            "ad": -6.38,
+            "OVER": -5.3831
+        });
+        assert_eq!(verdict_from_logprobs(&top, 1.5).unwrap(), DgiVerdict::Admit);
+
+        let top_mon = json!({
+            "OVER": -0.1,
+            "AD": -2.5
+        });
+        assert!(verdict_from_logprobs(&top_mon, 1.5).unwrap().is_reject());
     }
 
     #[test]
-    fn long_prompt_soft_review_never_rejects() {
-        let p = "x".repeat(3000);
-        let v = evaluate(&p);
-        assert!(!v.is_reject(), "soft heuristic must never reject");
-        assert_eq!(v, DgiVerdict::Review(2));
+    fn vllm_completions_one_sided_top_logprobs_bounds_missing_choice() {
+        // Only AD appeared in top-20; floor is -7.13 -> margin <= -7.12 < -1.5 -> Admit.
+        let top = json!({
+            "AD": -0.0075,
+            "ADM": -5.88,
+            "The": -7.13
+        });
+        assert_eq!(verdict_from_logprobs(&top, 1.5).unwrap(), DgiVerdict::Admit);
+
+        // Only OVER appeared in top-20; floor is -6.0 -> margin >= 5.9 > 1.5 -> Reject.
+        let top_over = json!({
+            "OVER": -0.1,
+            "The": -6.0
+        });
+        assert!(verdict_from_logprobs(&top_over, 1.5).unwrap().is_reject());
+    }
+
+    #[test]
+    fn text_fallback_rejects_empty_or_garbage_output() {
+        assert!(verdict_from_text("").is_err());
+        assert!(verdict_from_text("hello world").is_err());
+        assert_eq!(verdict_from_text("AD").unwrap(), DgiVerdict::Admit);
+        assert!(verdict_from_text("OVER").unwrap().is_reject());
     }
 
     #[test]
@@ -503,6 +606,21 @@ mod tests {
         assert_eq!(verdict, DgiVerdict::Review(1));
     }
 
+    #[test]
+    fn guided_choice_probe_request_uses_integer_logprobs_without_chat_top_logprobs() {
+        let req = probe_request(
+            crate::engine::backend::ProbeShape::GuidedChoiceCompletion,
+            "qwen3.8-27b",
+            "fix bug",
+        );
+        assert_eq!(req["logprobs"].as_u64(), Some(20));
+        assert!(
+            req.get("top_logprobs").is_none(),
+            "completions endpoint must not receive chat-only top_logprobs field"
+        );
+        assert_eq!(req["guided_choice"], json!(["ADMIT", "OVERLOADED"]));
+    }
+
     /// Fixture-integrity test for the DGI calibration anchors in
     /// `dgi_anchors.json` (regenerated by `scripts/gen_dgi_fixture.py`).
     ///
@@ -511,10 +629,7 @@ mod tests {
     /// be ADMITted) and 3 genuine monoliths (coupled multi-subsystem sprawl that
     /// must be REJECTed). This test asserts fixture *integrity* only — it parses
     /// the file, checks the class taxonomy, confirms the 4/3 split, and verifies
-    /// each prompt's character length matches the recorded `expected_len`. It
-    /// deliberately does NOT assert that the offline heuristic (`evaluate`)
-    /// reproduces these verdicts: that heuristic is advisory-only and never
-    /// rejects, so its output is not comparable to the model labels.
+    /// each prompt's character length matches the recorded `expected_len`.
     #[test]
     fn dgi_anchors_fixture_integrity() {
         #[derive(serde::Deserialize)]
@@ -572,5 +687,65 @@ mod tests {
                 a.name, a.expected_len
             );
         }
+    }
+
+    #[test]
+    fn single_char_first_token_fallback_decodes_when_no_multi_char_match() {
+        let top = json!({
+            "A": -0.05,
+            "O": -4.0
+        });
+        assert_eq!(verdict_from_logprobs(&top, 1.5).unwrap(), DgiVerdict::Admit);
+    }
+
+    #[tokio::test]
+    async fn configured_probe_retries_once_on_transient_503() {
+        use axum::Json;
+        use axum::Router;
+        use axum::http::StatusCode;
+        use axum::response::IntoResponse;
+        use axum::routing::post;
+        use std::sync::Arc;
+        use std::sync::atomic::{AtomicUsize, Ordering};
+
+        let calls = Arc::new(AtomicUsize::new(0));
+        let calls_ref = calls.clone();
+        let app = Router::new().route(
+            "/v1/completions",
+            post(move || {
+                let c = calls_ref.fetch_add(1, Ordering::SeqCst);
+                async move {
+                    if c == 0 {
+                        (StatusCode::SERVICE_UNAVAILABLE, "overloaded".to_string()).into_response()
+                    } else {
+                        Json(json!({
+                            "choices": [{
+                                "text": "AD",
+                                "finish_reason": "length",
+                                "logprobs": {"top_logprobs": [{"AD": -0.01, "OVER": -4.5}]}
+                            }]
+                        }))
+                        .into_response()
+                    }
+                }
+            }),
+        );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            axum::serve(listener, app).await.unwrap();
+        });
+
+        let loaded = crate::config::load().expect("load default config");
+        let mut cfg = loaded.config;
+        cfg.base_url = Some(format!("http://{addr}/v1"));
+        cfg.model = Some("qwen3.8-27b".into());
+        cfg.engine_type = Some("vllm".into());
+
+        let verdict = evaluate_configured_model_probe(&cfg, "fix bug", &reqwest::Client::new())
+            .await
+            .unwrap();
+        assert_eq!(verdict, DgiVerdict::Admit);
+        assert_eq!(calls.load(Ordering::SeqCst), 2);
     }
 }

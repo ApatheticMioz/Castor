@@ -275,6 +275,36 @@ impl EngineClient {
         }
     }
 
+    /// Query the serving engine's `/tokenize` endpoint for an exact prompt token
+    /// count (including chat template and tool schemas) when supported by the
+    /// backend (vLLM / Legacy). Returns `None` on unsupported backends or errors.
+    pub async fn count_tokens(&self, messages: &[Message], tools: &[ToolSchema]) -> Option<usize> {
+        if !self.backend.is_vllm() {
+            return None;
+        }
+        let root = super::backend::server_root(&self.base_url)?;
+        let url = format!("{}/tokenize", root.trim_end_matches('/'));
+        let mut body = json!({
+            "model": self.model,
+            "messages": messages.iter().map(|m| m.to_json()).collect::<Vec<_>>(),
+        });
+        if !tools.is_empty() {
+            body["tools"] = json!(tools.iter().map(|t| t.to_json()).collect::<Vec<_>>());
+        }
+        let mut req = self.http.post(&url).json(&body);
+        if let Some(key) = &self.api_key {
+            req = req.bearer_auth(key);
+        }
+        let resp = req.send().await.ok()?;
+        if !resp.status().is_success() {
+            return None;
+        }
+        let val: Value = resp.json().await.ok()?;
+        val.get("count")
+            .and_then(Value::as_u64)
+            .map(|c| c as usize)
+    }
+
     async fn consume_stream(
         &self,
         resp: reqwest::Response,
@@ -1309,5 +1339,73 @@ I will list the directory:
         // Truncated / unclosed must not panic and must return empty tool calls
         assert_eq!(stripped, raw);
         assert!(tcs.is_empty());
+    }
+
+    #[tokio::test]
+    async fn count_tokens_queries_vllm_tokenize_endpoint() {
+        use axum::Json;
+        use axum::Router;
+        use axum::routing::post;
+
+        let app = Router::new().route(
+            "/tokenize",
+            post(|Json(body): Json<Value>| async move {
+                assert_eq!(body["model"], "qwen3.8-27b");
+                assert!(body["messages"].is_array());
+                assert!(body["tools"].is_array());
+                Json(json!({"count": 321, "max_model_len": 150000}))
+            }),
+        );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            axum::serve(listener, app).await.unwrap();
+        });
+
+        let mut cfg = Config {
+            model: Some("qwen3.8-27b".into()),
+            base_url: Some(format!("http://{addr}/v1")),
+            api_key: None,
+            engine_type: Some("vllm".into()),
+            launch_command: None,
+            stop_command: None,
+            max_context: None,
+            ports: crate::config::Ports::default(),
+            max_concurrent_tasks: 1,
+            tool_prefix: "castor".into(),
+            searxng_url: None,
+            brave_api_key: None,
+            openalex_email: None,
+            openalex_api_key: None,
+            boot_timeout_secs: 10,
+            probe_budget: 4,
+            dgi_reject_margin: 1.5,
+            dgi_bypass_warm_session: true,
+            reasoning_open_tag: concat!("<th", "ink>").into(),
+            reasoning_close_tag: concat!("</th", "ink>").into(),
+            turn_timeout_secs: 0,
+            max_turn_reasoning_tokens: 0,
+            tool_spill_bytes: 16384,
+            workspace_skeleton_prefix: true,
+            state_dir: std::env::temp_dir(),
+        };
+        let client = EngineClient::from_config(&cfg).unwrap();
+        let msgs = vec![Message {
+            role: "user".into(),
+            content: "hello".into(),
+            tool_calls: Vec::new(),
+            tool_call_id: None,
+        }];
+        let tools = vec![ToolSchema {
+            name: "bash".into(),
+            description: "run".into(),
+            parameters: json!({"type": "object"}),
+        }];
+        assert_eq!(client.count_tokens(&msgs, &tools).await, Some(321));
+
+        // Non-vLLM backends skip vLLM's chat-message /tokenize endpoint.
+        cfg.engine_type = Some("llama.cpp".into());
+        let llama_client = EngineClient::from_config(&cfg).unwrap();
+        assert_eq!(llama_client.count_tokens(&msgs, &tools).await, None);
     }
 }

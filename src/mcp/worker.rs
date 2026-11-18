@@ -222,8 +222,8 @@ pub async fn run_job_with_engine(
     let max_ctx = config.max_context.unwrap_or(0);
 
     // 1. DGI gatekeeper: classify the dispatch BEFORE committing to a slot
-    //    lease. A rejected dispatch never holds a lease (no release
-    //    bookkeeping needed) and cannot block other waiters in the FIFO queue.
+    //    lease. A rejected or failed probe never holds a lease and fails fast
+    //    with the unadulterated error (no heuristic fallback).
     if config.base_url.is_some() && config.model.is_some() {
         let dgi = if crate::mcp::dgi::warm_session_bypass(config, state, &spec.session_id) {
             tracing::debug!(
@@ -232,35 +232,24 @@ pub async fn run_job_with_engine(
             );
             crate::mcp::dgi::DgiVerdict::Admit
         } else {
-            let lc = crate::engine::EngineLifecycle::new(config, state);
-            if !lc.canary().await {
-                crate::mcp::dgi::evaluate(&spec.prompt)
-            } else {
-                let probe_timeout_secs = std::env::var("CASTOR_DGI_TIMEOUT_SECS")
-                    .ok()
-                    .and_then(|v| v.parse::<u64>().ok())
-                    .unwrap_or(30);
-                let http = reqwest::Client::builder()
-                    .timeout(std::time::Duration::from_secs(probe_timeout_secs))
-                    .build()
-                    .unwrap_or_default();
-                match crate::mcp::dgi::evaluate_configured_model_probe(config, &spec.prompt, &http)
-                    .await
-                {
-                    Ok(v) => v,
-                    Err(err) => {
-                        tracing::warn!(
-                            error = %err,
-                            "[dgi] warning: dispatch classification probe failed ({err}). \
-                             Falling back to soft heuristic."
-                        );
-                        let fallback = crate::mcp::dgi::evaluate(&spec.prompt);
-                        if matches!(fallback, crate::mcp::dgi::DgiVerdict::Admit) {
-                            crate::mcp::dgi::DgiVerdict::Review(0)
-                        } else {
-                            fallback
-                        }
-                    }
+            let probe_timeout_secs = std::env::var("CASTOR_DGI_TIMEOUT_SECS")
+                .ok()
+                .and_then(|v| v.parse::<u64>().ok())
+                .unwrap_or(30);
+            let http = reqwest::Client::builder()
+                .timeout(std::time::Duration::from_secs(probe_timeout_secs))
+                .build()
+                .unwrap_or_default();
+            match crate::mcp::dgi::evaluate_configured_model_probe(config, &spec.prompt, &http)
+                .await
+            {
+                Ok(v) => v,
+                Err(err) => {
+                    let err_msg = format!("DgiProbeError: {err}");
+                    let _ = registry
+                        .transition(&spec.task_id, TaskStatus::Failed, Some(err_msg.clone()))
+                        .await;
+                    return Err(err_msg);
                 }
             }
         };
@@ -335,10 +324,34 @@ pub async fn run_job_with_engine(
     let sem = TaskSemaphore::new(state, max_slots).with_token_budget(max_ctx);
 
     // Include any resumed-history tokens so the slot's initial budget reflects
-    // the true working set (prefix + history + new prompt).
-    let resumed_tokens = runner::context::resumed_history_tokens(state, &spec.session_id, Some(max_ctx));
-    let new_prompt_tokens = (spec.prompt.chars().count() / 4) as u32;
-    let initial_tokens = new_prompt_tokens.saturating_add(resumed_tokens);
+    // the true working set (prefix + history + new prompt). Prefer the engine's
+    // exact `/tokenize` count when available; fall back to local sizing only for
+    // offline/non-vLLM engines.
+    let initial_tokens = {
+        let mut init_msgs = vec![runner::messages::msg("system", &system_prompt)];
+        let mut has_history = false;
+        if let Some(history) = runner::context::load_messages(state, &spec.session_id)
+            && !history.is_empty()
+            && runner::context::should_resume(&history, &spec.prompt, max_ctx as usize)
+        {
+            init_msgs.extend(history);
+            has_history = true;
+        }
+        init_msgs.push(runner::messages::msg("user", &spec.prompt));
+        if let Some(exact) = engine.count_tokens(&init_msgs, &[]).await {
+            exact.min(u32::MAX as usize) as u32
+        } else {
+            let resumed_tokens = if has_history {
+                runner::context::resumed_history_tokens(state, &spec.session_id, Some(max_ctx))
+            } else {
+                0
+            };
+            let prompt_tokens = runner::context::uncounted_tail_tokens(&[
+                runner::messages::msg("user", &spec.prompt),
+            ]) as u32;
+            prompt_tokens.saturating_add(resumed_tokens)
+        }
+    };
     let lease = sem.acquire_with_tokens(&spec.task_id, initial_tokens).await;
     let shared_lease = std::sync::Arc::new(std::sync::Mutex::new(lease));
 
@@ -938,6 +951,59 @@ mod tests {
 
         let rec = registry.get(&task_id).await.unwrap();
         assert_eq!(rec.status, TaskStatus::Failed);
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[tokio::test]
+    async fn run_job_with_engine_fails_fast_when_dgi_probe_fails() {
+        let (state, dir) = tmp_state();
+        let registry = TaskRegistry::new(&state);
+        let task_id = registry
+            .create("dgi fail fast", dir.to_str().unwrap(), "sess_dgi_fail")
+            .await
+            .unwrap();
+
+        let spec = JobSpec {
+            task_id: task_id.clone(),
+            prompt: "fix something".to_string(),
+            cwd: dir.to_str().unwrap().to_string(),
+            session_id: "sess_dgi_fail".to_string(),
+            reasoning_effort: None,
+            extensions: None,
+            skills: None,
+            test_command: None,
+            turns_budget: None,
+            timeout_ms: None,
+        };
+
+        // Bind and drop an ephemeral listener so connection refuses immediately.
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let closed_port = listener.local_addr().unwrap().port();
+        drop(listener);
+
+        let loaded = crate::config::load().expect("load default config");
+        let mut config = loaded.config;
+        config.state_dir = dir.clone();
+        config.base_url = Some(format!("http://127.0.0.1:{closed_port}/v1"));
+        config.model = Some("test-model".to_string());
+        config.engine_type = Some("vllm".to_string());
+
+        let engine = ScriptedEngine {
+            responses: tokio::sync::Mutex::new(VecDeque::new()),
+        };
+
+        let err = run_job_with_engine(&spec, &state, &config, &engine)
+            .await
+            .unwrap_err();
+        assert!(
+            err.starts_with("DgiProbeError:"),
+            "expected DgiProbeError fail-fast, got: {err}"
+        );
+
+        let rec = registry.get(&task_id).await.unwrap();
+        assert_eq!(rec.status, TaskStatus::Failed);
+        assert!(rec.reason.unwrap().starts_with("DgiProbeError:"));
 
         let _ = std::fs::remove_dir_all(&dir);
     }

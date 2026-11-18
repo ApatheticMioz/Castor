@@ -1956,3 +1956,163 @@ async fn cooperative_yield_waits_for_release_before_next_turn() {
     );
     let _ = std::fs::remove_dir_all(&state_root);
 }
+
+#[tokio::test]
+async fn in_flight_context_ceiling_disables_tools_and_lands_final() {
+    let state = tmp_state();
+    let state_root = state.root().to_path_buf();
+    let logger = logger_for(&state);
+
+    // 3_700 chars / 4 = 925 tokens > 900 (90% of 1000) — over the ceiling
+    // before the first turn.
+    let big_prompt = "x".repeat(3_700);
+
+    let engine = ScriptedEngine {
+        responses: tokio::sync::Mutex::new(vec![comp_metrics("Done.", Vec::new(), 950)].into()),
+        calls: tokio::sync::Mutex::new(Vec::new()),
+    };
+    let executor = MockExecutor::new(Vec::new());
+
+    let mut options = SessionOptions::with_state(state);
+    options.max_context = 1_000;
+
+    let res = run_session(
+        &engine,
+        &executor,
+        &logger,
+        "sys",
+        &big_prompt,
+        &[tool_schema("bash")],
+        Some(&options),
+    )
+    .await
+    .unwrap();
+
+    assert_eq!(res.status, "completed");
+    assert_eq!(res.final_text, "Done.");
+
+    let calls = engine.calls.lock().await.clone();
+    assert_eq!(calls.len(), 1, "ceiling must land in one final call");
+    let (_, msgs, tools_sent) = &calls[0];
+    let last_user = msgs
+        .iter()
+        .rev()
+        .find(|m| m.role == "user")
+        .expect("a user message must be present");
+    assert!(
+        last_user
+            .content
+            .contains("Working context budget has reached 90%"),
+        "expected ceiling directive, got: {last_user:?}"
+    );
+    assert!(
+        tools_sent.is_empty(),
+        "tool dispatch must be disabled on the ceiling turn, but sent {tools_sent:?}"
+    );
+
+    let events = logger.read_all();
+    assert!(
+        events.iter().any(|e| e["type"] == "context_ceiling"),
+        "expected a context_ceiling event: {events:?}"
+    );
+    let _ = std::fs::remove_dir_all(&state_root);
+}
+
+#[tokio::test]
+async fn in_flight_context_ceiling_uses_engine_prompt_tokens() {
+    let state = tmp_state();
+    let state_root = state.root().to_path_buf();
+    let logger = logger_for(&state);
+
+    // Text is tiny (~10 chars), well below chars/4 ceiling, but Turn 1
+    // engine metrics report 910 prompt tokens >= 900 (90% of 1000).
+    let engine = ScriptedEngine {
+        responses: tokio::sync::Mutex::new(
+            vec![
+                comp_metrics("", vec![tc("c1", "bash", r#"{"cmd":"ls"}"#)], 910),
+                comp_metrics("Final synthesis.", Vec::new(), 940),
+            ]
+            .into(),
+        ),
+        calls: tokio::sync::Mutex::new(Vec::new()),
+    };
+    let executor = MockExecutor::new(vec!["ok".into()]);
+
+    let mut options = SessionOptions::with_state(state);
+    options.max_context = 1_000;
+
+    let res = run_session(
+        &engine,
+        &executor,
+        &logger,
+        "sys",
+        "go",
+        &[tool_schema("bash")],
+        Some(&options),
+    )
+    .await
+    .unwrap();
+
+    assert_eq!(res.status, "completed");
+    assert_eq!(res.turns, 2);
+    assert_eq!(res.final_text, "Final synthesis.");
+
+    let calls = engine.calls.lock().await.clone();
+    assert_eq!(calls.len(), 2);
+    assert!(
+        !calls[0].2.is_empty(),
+        "turn 1 should carry tools before ceiling trips"
+    );
+    assert!(
+        calls[1].2.is_empty(),
+        "turn 2 must disable tools once engine prompt_tokens >= 90%"
+    );
+    let _ = std::fs::remove_dir_all(&state_root);
+}
+
+#[tokio::test]
+async fn in_flight_context_ceiling_blocks_slipped_tool_calls() {
+    let state = tmp_state();
+    let state_root = state.root().to_path_buf();
+    let logger = logger_for(&state);
+
+    let big_prompt = "x".repeat(3_700);
+    // Simulate a non-compliant engine that returns a tool call even when
+    // tools=[] was sent.
+    let engine = ScriptedEngine {
+        responses: tokio::sync::Mutex::new(
+            vec![comp_metrics(
+                "Partial synthesis.",
+                vec![tc("c1", "bash", r#"{"cmd":"ls"}"#)],
+                950,
+            )]
+            .into(),
+        ),
+        calls: tokio::sync::Mutex::new(Vec::new()),
+    };
+    let executor = MockExecutor::new(vec!["should-not-run".into()]);
+
+    let mut options = SessionOptions::with_state(state);
+    options.max_context = 1_000;
+
+    let res = run_session(
+        &engine,
+        &executor,
+        &logger,
+        "sys",
+        &big_prompt,
+        &[tool_schema("bash")],
+        Some(&options),
+    )
+    .await
+    .unwrap();
+
+    assert_eq!(res.status, "completed");
+    assert_eq!(res.turns, 1);
+    assert_eq!(res.final_text, "Partial synthesis.");
+    assert!(
+        executor.calls().await.is_empty(),
+        "slipped tool calls on ceiling turn must never execute"
+    );
+    let _ = std::fs::remove_dir_all(&state_root);
+}

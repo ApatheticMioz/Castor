@@ -7,7 +7,7 @@ use tracing::warn;
 
 use crate::engine::{Completion, Message, ToolSchema};
 use crate::runner::events::EventLogger;
-use crate::runner::messages::msg;
+use crate::runner::messages::{completion_text, msg};
 use crate::runner::skeleton::spill_tool_output;
 use crate::runner::{ChatEngine, RunnerError, SessionOptions, ToolExecutor, ToolOutcome};
 
@@ -168,7 +168,8 @@ pub(crate) async fn run_reasoning_ceiling_salvage(
                 "reason": "reasoning_ceiling",
                 "content": sc.content,
             }));
-            let trimmed = sc.content.trim();
+            let recovered = completion_text(&sc);
+            let trimmed = recovered.trim();
             if trimmed.is_empty() {
                 // Salvage produced no text: honest status, clean log,
                 // no crash, and the prior turn's content (if any) is
@@ -265,18 +266,7 @@ pub(crate) async fn run_degenerate_final_salvage(
          your findings and the work you have completed.",
     ));
     let salvage = engine.chat(messages, &[], true, effort).await?;
-    let salvage_text = if !salvage.content.trim().is_empty() {
-        salvage.content
-    } else if let Some(rc) = salvage
-        .reasoning_content
-        .as_deref()
-        .map(str::trim)
-        .filter(|s| !s.is_empty())
-    {
-        rc.to_string()
-    } else {
-        String::new()
-    };
+    let salvage_text = completion_text(&salvage);
     logger
         .append(serde_json::json!({
             "type": "salvage",
