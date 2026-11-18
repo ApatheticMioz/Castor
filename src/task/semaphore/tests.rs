@@ -21,21 +21,31 @@ fn rt() -> tokio::runtime::Runtime {
 
 /// Path to the compiled castor binary (used for cross-process tests).
 ///
-/// In test mode `current_exe()` is `target/debug/deps/castor-<hash>`; the
-/// real binary is `target/debug/castor` (two levels up).
+/// Walks `current_exe()` ancestors so both classic Cargo layouts
+/// (`target/debug/deps/castor-<hash>`) and Cargo 1.100+ build-dir layouts
+/// (`target/debug/build/castor/<hash>/deps/castor-<hash>`) resolve the
+/// compiled `castor` executable in `target/<profile>/`.
 fn castor_bin() -> PathBuf {
-    let exe = std::env::current_exe().unwrap();
-    let debug_dir = exe
-        .parent() // .../deps
-        .and_then(|p| p.parent()) // .../debug
-        .unwrap()
-        .to_path_buf();
-    let bin = debug_dir.join("castor");
-    if cfg!(windows) {
-        bin.with_extension("exe")
+    let bin_name = if cfg!(windows) {
+        "castor.exe"
     } else {
-        bin
+        "castor"
+    };
+    let exe = std::env::current_exe().unwrap();
+    for ancestor in exe.ancestors().skip(1) {
+        let candidate = ancestor.join(bin_name);
+        if candidate.is_file() {
+            return candidate;
+        }
+        let debug_candidate = ancestor.join("debug").join(bin_name);
+        if debug_candidate.is_file() {
+            return debug_candidate;
+        }
     }
+    PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("target")
+        .join("debug")
+        .join(bin_name)
 }
 
 /// A defunct (zombie) worker must be treated as DEAD so it cannot hold a
