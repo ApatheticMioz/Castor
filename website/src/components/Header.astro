@@ -1,10 +1,14 @@
 ---
-const NAV_LINKS: Array<{ href: string; label: string }> = [
-  { href: '#telemetry', label: 'Benchmarks' },
-  { href: '#architecture', label: 'Architecture' },
-  { href: '#security', label: 'Sandbox' },
-  { href: '#economics', label: 'Economics' },
-  { href: '#deploy', label: 'Deploy' },
+// Section anchors point at the HOMEPAGE sections with an explicit base prefix
+// (`${base}/#telemetry` → `/Castor/#telemetry` on GitHub Pages, `/#telemetry`
+// on Vercel) so clicking a nav link from ANY subpage routes back to the
+// homepage section smoothly instead of 404ing on that page's own anchor.
+const NAV_LINKS: Array<{ id: string; label: string }> = [
+  { id: 'telemetry', label: 'Benchmarks' },
+  { id: 'architecture', label: 'Architecture' },
+  { id: 'security', label: 'Sandbox' },
+  { id: 'economics', label: 'Economics' },
+  { id: 'deploy', label: 'Deploy' },
 ];
 
 const GITHUB_URL = 'https://github.com/ApatheticMioz/Castor';
@@ -12,6 +16,8 @@ const GITHUB_URL = 'https://github.com/ApatheticMioz/Castor';
 // BASE_URL mirrors `base` in astro.config.mjs; trailing slash stripped so
 // `${base}/assets/...` never emits a double slash).
 const base = import.meta.env.BASE_URL.replace(/\/$/, '');
+// Homepage section anchor: deployment root + section id.
+const homeAnchor = (id: string): string => `${base}/#${id}`;
 ---
 
 <!--
@@ -46,11 +52,12 @@ const base = import.meta.env.BASE_URL.replace(/\/$/, '');
       >
     </a>
 
-    <!-- Center nav (md+): crisp high-contrast links -->
+    <!-- Center nav (md+): crisp high-contrast links; base-prefixed anchors
+         so they resolve to the homepage sections from any subpage. -->
     <nav aria-label="Primary" class="ml-auto hidden items-center gap-7 md:flex">
       {NAV_LINKS.map((link) => (
         <a
-          href={link.href}
+          href={homeAnchor(link.id)}
           class="font-mono text-[12px] uppercase tracking-[0.12em] text-ink-secondary transition-colors duration-150 hover:text-ink"
         >
           {link.label}
@@ -165,7 +172,7 @@ const base = import.meta.env.BASE_URL.replace(/\/$/, '');
     <nav aria-label="Mobile" class="flex flex-col">
       {NAV_LINKS.map((link) => (
         <a
-          href={link.href}
+          href={homeAnchor(link.id)}
           class="border-t border-hairline px-4 py-3 font-mono text-[13px] uppercase tracking-[0.12em] text-ink-secondary transition-colors hover:text-ink"
           data-close-nav
         >

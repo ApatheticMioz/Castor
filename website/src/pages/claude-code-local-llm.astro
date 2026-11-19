@@ -1,0 +1,395 @@
+---
+import Layout from '../layouts/Layout.astro';
+import Header from '../components/Header.astro';
+import QuickstartFooter from '../components/QuickstartFooter.astro';
+import {
+  LEDGER_76DAY as L,
+  CLOUD_MODELS,
+} from '../data/telemetry';
+
+const base = import.meta.env.BASE_URL.replace(/\/$/, '');
+const siteUrl = new URL(Astro.site ?? 'http://localhost').href.replace(/\/$/, '');
+const root = `${siteUrl}${base}/`;
+
+const breadcrumb = {
+  '@type': 'BreadcrumbList',
+  itemListElement: [
+    { '@type': 'ListItem', position: 1, name: 'Home', item: root },
+    {
+      '@type': 'ListItem',
+      position: 2,
+      name: 'Claude Code & Antigravity on a Local LLM',
+    },
+  ],
+};
+
+const faqItems: Array<{ q: string; a: string }> = [
+  {
+    q: 'Will my Claude Code sessions still feel like Claude Code?',
+    a: 'Yes. Your cloud lead architect (Claude Opus 5.5, Fable 5.2, Gemini 4 Neon, or GPT-6.2 Astra) stays exactly where it is. Castor only handles the tool-execution loop — file reads, edits, search, test runs — on your local model. The lead architect still writes the plan and reviews the work; you just stop paying frontier-model token rates for every byte of file I/O.',
+  },
+  {
+    q: 'How does the 93.7% KV prefix cache hit actually work?',
+    a: 'A coding agent re-sends the same system prompt, tool schemas, and recent file context every turn. vLLM caches that prefix in the GPU KV pool, so only the tail of each request is computed. Over 76 days, 2.39B of 2.56B prompt tokens (93.7%) were served from cache, which is why 24 GB of VRAM sustains a 150K-token context without thrashing.',
+  },
+  {
+    q: 'Which GPU do I need?',
+    a: 'Any 8 GB GPU works via the llama.cpp profile (~22–26 tok/s at 8K context). A 12 GB card reaches ~38.6 tok/s at 64K with DFlash2; 16 GB reaches ~53.0 tok/s at 128K. A 24 GB card (RTX 3090, 4090, or A5000) runs vLLM with Qwen3.8-27B-W4A16 and MTP speculative decode at 75.5 p50 / 116.6 p95 tok/s decode.',
+  },
+  {
+    q: 'Is my code sent to any cloud provider by Castor?',
+    a: 'No. Castor is a zero-egress microkernel: the local model and its tool calls stay on loopback (127.0.0.1:18020–18022). Your codebase never leaves your machine through Castor. The only egress is the cloud lead architect conversation you already have — and you can compile that out entirely for air-gapped deployments.',
+  },
+  {
+    q: 'How much do I actually save?',
+    a: 'In the verified 76-day ledger, the same workload would have cost $5,712.50 at Sonnet-tier cloud pricing ($2/M input, $10/M output). Local serving cost $9.38 in electricity — a 99.84% net saving. On frontier-model pricing ($8/$40), the counterfactual is over 4× higher, so the gap widens further.',
+  },
+  {
+    q: 'Does this work with Antigravity, Cursor, or any other MCP host?',
+    a: 'Yes. Castor is a standard stdio MCP server exposing three tools (coworker, task, server). Anything that speaks MCP — Claude Code, Antigravity, Cursor, or a custom host — can register it with one command. The engine-agnostic adapter layer supports vLLM, llama.cpp, SGLang, Ollama, and LM Studio.',
+  },
+];
+
+const faqPage = {
+  '@type': 'FAQPage',
+  mainEntity: faqItems.map((f) => ({
+    '@type': 'Question',
+    name: f.q,
+    acceptedAnswer: { '@type': 'Answer', text: f.a },
+  })),
+};
+
+const techArticle = {
+  '@type': 'TechArticle',
+  name: 'Cut Claude Code & Antigravity Token Costs by 90%+ with a Local GPU',
+  datePublished: '2026-11-19',
+  dateModified: '2026-11-19',
+  author: { '@type': 'Organization', name: 'Castor Technologies' },
+  publisher: { '@type': 'Organization', name: 'Castor Technologies' },
+  mainEntityOfPage: `${root}claude-code-local-llm/`,
+  keywords:
+    'Claude Code, Antigravity, local LLM, Qwen3.8-27B, MCP, token costs, KV cache, vLLM, cost reduction, coding agent',
+  abstract:
+    'Castor pairs your cloud lead architect with a local 27B model (Qwen3.8-27B or Ternary-Bonsai) over MCP, cutting Claude Code / Antigravity token spend by 90%+ — a verified 93.7% KV prefix reuse rate over 76 days.',
+};
+
+const jsonLd = [breadcrumb, techArticle, faqPage];
+
+/* 60-second setup commands (mirrors QuickstartFooter) */
+const commands: Array<{ comment: string; cmd: string }> = [
+  {
+    comment: '# 1. Install & register MCP tools with Claude Code / Antigravity',
+    cmd: 'npx -y mcp-castor install --client all',
+  },
+  {
+    comment: '# 2. Verify your local serving engine (vLLM / llama.cpp / Ollama)',
+    cmd: 'castor server status',
+  },
+  {
+    comment: '# 3. Inspect live token throughput, KV cache hit rate, and savings',
+    cmd: 'castor stats',
+  },
+];
+---
+
+<Layout
+  title="Cut Claude Code & Antigravity Token Costs by 90%+ with a Local GPU | Castor MCP"
+  description="Keep Claude Opus 5.5 / Fable 5.2 / Gemini 4 Neon / GPT-6.2 Astra as your lead architect, and let Castor run the file-exploration loop on a local Qwen3.8-27B or Ternary-Bonsai GPU model. Verified 93.7% KV prefix reuse, 60-second MCP setup, and $0.00 per local token."
+  canonicalPath="/claude-code-local-llm/"
+  jsonLd={jsonLd}
+>
+  <Header />
+  <main id="main-content" class="min-h-screen bg-ground">
+    <!-- ── Hero ───────────────────────────────────────────────────────── -->
+    <section class="hardware-dot-grid">
+      <div class="mx-auto max-w-6xl px-4 pb-12 pt-10 sm:px-6 lg:px-8">
+        <p class="font-mono text-[11px] uppercase tracking-[0.16em] text-local">
+          // guide · claude code · antigravity · local gpu
+        </p>
+        <h1
+          class="mt-4 font-display text-[clamp(1.9rem,3.4vw,3rem)] font-bold leading-[1.02] tracking-[-0.035em] text-ink"
+        >
+          Cut Claude Code &amp; Antigravity Token Costs
+          <span class="text-local">by 90%+ — With a Local GPU.</span>
+        </h1>
+        <p class="mt-4 max-w-2xl font-sans text-[15px] leading-relaxed text-ink-secondary sm:text-base">
+          The pattern: your <b>cloud lead architect</b> (Claude Opus 5.5,
+          Fable 5.2, Gemini 4 Neon, GPT-6.2 Astra) stays in the cloud for
+          planning and review — while a <b>local peer model</b>
+          (<code class="am-code">Qwen3.8-27B</code> /
+          <code class="am-code">Ternary-Bonsai</code>) executes the expensive
+          part on your own GPU: reading, editing, searching, and testing.
+          Every file byte stays at <b>$0.00</b>.
+        </p>
+
+        <!-- Dual-agent pattern strip -->
+        <div class="spec-grid mt-8 grid grid-cols-1 lg:grid-cols-2">
+          <div class="p-5">
+            <p class="font-mono text-[11px] uppercase tracking-widest text-cloud">
+              CLOUD LEAD ARCHITECT · $/token
+            </p>
+            <p class="mt-2 font-display text-lg font-bold text-ink">
+              Claude Opus 5.5 · Fable 5.2 · Gemini 4 Neon · GPT-6.2 Astra
+            </p>
+            <p class="mt-2 font-mono text-[12px] leading-relaxed text-ink-secondary">
+              Writes the plan, reviews the diff, signs off. Only the
+              reasoning tokens cross the network — at frontier rates
+              ($4–8/M in, $20–40/M out).
+            </p>
+          </div>
+          <div class="p-5">
+            <p class="font-mono text-[11px] uppercase tracking-widest text-local">
+              LOCAL PEER · $0.00/token
+            </p>
+            <p class="mt-2 font-display text-lg font-bold text-ink">
+              Qwen3.8-27B-W4A16 · Ternary-Bonsai
+            </p>
+            <p class="mt-2 font-mono text-[12px] leading-relaxed text-ink-secondary">
+              Executes the loop: read_file, edit_file, search_code, bash,
+              test suites — on loopback, in a 5-layer sandbox, with
+              93.7% of prompt tokens served from a warm KV cache.
+            </p>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <!-- ── 60-second setup ────────────────────────────────────────────── -->
+    <section id="setup" class="scroll-mt-16 border-y border-hairline bg-recessed/40">
+      <div class="mx-auto max-w-6xl px-4 py-12 sm:px-6 lg:px-8">
+        <header>
+          <p class="font-mono text-[11px] uppercase tracking-[0.16em] text-ink-muted">
+            01 · sixty-second setup
+          </p>
+          <h2 class="mt-2 font-display text-2xl font-bold tracking-tight text-ink md:text-3xl">
+            Three Commands. Zero Codebase Changes.
+          </h2>
+          <p class="mt-3 max-w-2xl font-sans text-sm leading-relaxed text-ink-secondary">
+            Castor registers as a stdio MCP server with your existing client.
+            If you already run a local engine (vLLM, llama.cpp, SGLang,
+            Ollama, LM Studio), point the status probe at it and you're live.
+          </p>
+        </header>
+
+        <!-- Embedded dark OLED instrument chassis -->
+        <div class="instrument-chassis mt-8">
+          <div
+            class="flex items-center justify-between border-b border-[var(--bg-instrument-border)] bg-[var(--bg-instrument-raised)] px-4 py-2"
+          >
+            <span class="font-mono text-[11px] uppercase tracking-widest text-ink-instrument-muted">
+              bash · mcp-castor
+            </span>
+            <button
+              type="button"
+              class="border border-white/15 bg-[#151A24] px-3 py-1 font-mono text-[10px] uppercase tracking-widest text-[#F3F5F8] transition-colors hover:border-[#F97316] hover:text-[#F97316]"
+              data-cc-copy-all
+            >
+              copy all
+            </button>
+          </div>
+          <div class="p-4 md:p-6">
+            <ol class="space-y-4">
+              {commands.map((c) => (
+                <li>
+                  <p class="font-mono text-xs text-ink-instrument-muted md:text-sm">
+                    {c.comment}
+                  </p>
+                  <div class="mt-1 flex items-center gap-3">
+                    <code class="flex-1 overflow-x-auto whitespace-nowrap font-mono text-xs md:text-sm">
+                      <span class="text-local-oled">$</span>
+                      <span class="text-ink-instrument">{c.cmd}</span>
+                    </code>
+                    <button
+                      type="button"
+                      class="shrink-0 border border-white/15 bg-[#151A24] px-2.5 py-1 font-mono text-[10px] uppercase tracking-widest text-[#F3F5F8] transition-colors hover:border-[#F97316] hover:text-[#F97316]"
+                      data-cc-copy={c.cmd}
+                      aria-label={`Copy command: ${c.cmd}`}
+                    >
+                      copy
+                    </button>
+                  </div>
+                </li>
+              ))}
+            </ol>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <!-- ── The 93.7% math ─────────────────────────────────────────────── -->
+    <section id="math" class="scroll-mt-16 border-b border-hairline">
+      <div class="mx-auto max-w-6xl px-4 py-12 sm:px-6 lg:px-8">
+        <header>
+          <p class="font-mono text-[11px] uppercase tracking-[0.16em] text-ink-muted">
+            02 · the reuse math · verified over 76 days
+          </p>
+          <h2 class="mt-2 font-display text-2xl font-bold tracking-tight text-ink md:text-3xl">
+            Where the 93.7% Comes From
+          </h2>
+        </header>
+
+        <div class="mt-8 grid gap-px lg:grid-cols-3">
+          <div class="bg-surface p-6">
+            <p class="tabular font-mono text-3xl font-bold text-ink">
+              {L.promptTokensDisplay}
+            </p>
+            <p class="mt-1 font-mono text-[11px] uppercase tracking-widest text-ink-muted">
+              total prompt tokens
+            </p>
+            <p class="mt-3 font-mono text-[12px] leading-relaxed text-ink-secondary">
+              The full cost of re-sending system prompt, tool schemas, and
+              file context across {L.turns.toLocaleString('en-US')} autonomous
+              turns in {L.sessions.toLocaleString('en-US')} sessions.
+            </p>
+          </div>
+          <div class="bg-surface p-6">
+            <p class="tabular font-mono text-3xl font-bold text-cloud">
+              {L.cachedTokensDisplay}
+            </p>
+            <p class="mt-1 font-mono text-[11px] uppercase tracking-widest text-ink-muted">
+              served from warm KV cache · {L.cacheHitPct}%
+            </p>
+            <p class="mt-3 font-mono text-[12px] leading-relaxed text-ink-secondary">
+              vLLM's KV pool returns the shared prefix without recomputation.
+              Live scrape: {`92.6%`} prefix hit, {`70.5%`} MTP draft
+              acceptance, 3.45-token mean acceptance length.
+            </p>
+          </div>
+          <div class="bg-surface p-6">
+            <p class="tabular font-mono text-3xl font-bold text-ok">
+              {L.netSavingsPct}%
+            </p>
+            <p class="mt-1 font-mono text-[11px] uppercase tracking-widest text-ink-muted">
+              net savings vs cloud counterfactual
+            </p>
+            <p class="mt-3 font-mono text-[12px] leading-relaxed text-ink-secondary">
+              ${L.electricityUsd} in electricity ({L.electricityKwh} kWh)
+              against a $5,712.50 Sonnet-tier API counterfactual for the
+              identical workload.
+            </p>
+          </div>
+        </div>
+
+        <!-- Cloud pricing reference (Nov 2026, verified 2026-11-16) -->
+        <div class="mt-8">
+          <p class="font-mono text-[11px] uppercase tracking-widest text-ink-muted">
+            What the cloud lead architect still costs · Nov 2026 pricing · verified 2026-11-16
+          </p>
+          <div class="mt-3 overflow-x-auto">
+            <table class="w-full min-w-[560px] border-collapse">
+              <thead>
+                <tr class="border-b border-hairline">
+                  <th class="py-2 pr-4 text-left font-mono text-[11px] uppercase tracking-widest text-ink-muted">Model</th>
+                  <th class="py-2 pr-4 text-left font-mono text-[11px] uppercase tracking-widest text-ink-muted">Input / 1M</th>
+                  <th class="py-2 pr-4 text-left font-mono text-[11px] uppercase tracking-widest text-ink-muted">Output / 1M</th>
+                  <th class="py-2 text-left font-mono text-[11px] uppercase tracking-widest text-ink-muted">Note</th>
+                </tr>
+              </thead>
+              <tbody>
+                {CLOUD_MODELS.map((m) => (
+                  <tr class="border-b border-hairline">
+                    <td class="py-2.5 pr-4 font-mono text-xs text-ink">{m.name}</td>
+                    <td class="tabular py-2.5 pr-4 font-mono text-xs text-ink-secondary">${m.priceInPer1m}</td>
+                    <td class="tabular py-2.5 pr-4 font-mono text-xs text-ink-secondary">${m.priceOutPer1m}</td>
+                    <td class="py-2.5 font-mono text-[11px] text-ink-muted">{m.note ?? m.priceNote ?? ''}</td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <!-- ── FAQ ────────────────────────────────────────────────────────── -->
+    <section id="faq" class="scroll-mt-16 border-b border-hairline bg-recessed/40">
+      <div class="mx-auto max-w-6xl px-4 py-12 sm:px-6 lg:px-8">
+        <header>
+          <p class="font-mono text-[11px] uppercase tracking-[0.16em] text-ink-muted">
+            03 · developer faq
+          </p>
+          <h2 class="mt-2 font-display text-2xl font-bold tracking-tight text-ink md:text-3xl">
+            Six Questions, Answered Straight
+          </h2>
+        </header>
+
+        <div class="mt-8">
+          {faqItems.map((f, i) => (
+            <details
+              class="group border-b border-hairline open:bg-surface"
+              {...(i === 0 ? { open: true } : {})}
+            >
+              <summary class="flex cursor-pointer items-center gap-3 px-4 py-4 font-display text-sm font-semibold text-ink md:text-base">
+                <svg
+                  class="h-4 w-4 shrink-0 text-ink-muted transition-transform duration-150 group-open:rotate-45 group-open:text-local"
+                  viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"
+                  aria-hidden="true"
+                >
+                  <path d="M8 3v10M3 8h10" />
+                </svg>
+                {f.q}
+              </summary>
+              <div class="px-4 pb-5 pl-12">
+                <p class="font-sans text-sm leading-relaxed text-ink-secondary">{f.a}</p>
+              </div>
+            </details>
+          ))}
+        </div>
+
+        <div class="mt-8 flex flex-wrap gap-3">
+          <a href={`${base}/#economics`} class="tactile-btn tactile-btn--primary">
+            Run the Economics Calculator →
+          </a>
+          <a
+            href={`${base}/benchmarks/qwen3-8-27b-rtx-3090/`}
+            class="tactile-btn tactile-btn--secondary"
+          >
+            Full RTX 3090 Benchmarks →
+          </a>
+          <a
+            href={`${base}/enterprise/air-gapped-coding-agent/`}
+            class="tactile-btn tactile-btn--secondary"
+          >
+            Air-Gapped / CMMC / ITAR →
+          </a>
+        </div>
+      </div>
+    </section>
+  </main>
+  <QuickstartFooter />
+
+  <script>
+    // Copy buttons for the embedded OLED command block on this page.
+    function writeClipboard(text: string): Promise<boolean> {
+      if (navigator.clipboard?.writeText) {
+        return navigator.clipboard.writeText(text).then(() => true, () => false);
+      }
+      return Promise.resolve(false);
+    }
+    function flash(btn: HTMLButtonElement, label: string, ok: boolean) {
+      btn.textContent = ok ? 'copied ✓' : 'select & copy manually';
+      window.setTimeout(() => { btn.textContent = label; }, 2000);
+    }
+    for (const btn of Array.from(document.querySelectorAll<HTMLButtonElement>('[data-cc-copy]'))) {
+      btn.addEventListener('click', () => {
+        writeClipboard(btn.dataset.ccCopy ?? '').then((ok) => flash(btn, 'copy', ok));
+      });
+    }
+    const allBtn = document.querySelector<HTMLButtonElement>('[data-cc-copy-all]');
+    if (allBtn) {
+      allBtn.addEventListener('click', () => {
+        const full = Array.from(
+          document.querySelectorAll<HTMLButtonElement>('[data-cc-copy]'),
+        )
+          .map((b) => {
+            const comment = b.closest('li')?.querySelector('p')?.textContent?.trim();
+            const cmd = b.dataset.ccCopy ?? '';
+            return comment ? `${comment}\n${cmd}` : cmd;
+          })
+          .filter(Boolean)
+          .join('\n');
+        writeClipboard(full).then((ok) => flash(allBtn, 'copy all', ok));
+      });
+    }
+  </script>
+</Layout>

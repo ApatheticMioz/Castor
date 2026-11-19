@@ -1,0 +1,22 @@
+# Castor — robots.txt
+# Standard crawlers: everything is public and indexable.
+User-agent: *
+Allow: /
+
+# AI / GEO search agents — explicitly welcomed and permitted to index.
+User-agent: GPTBot
+Allow: /
+
+User-agent: OAI-SearchBot
+Allow: /
+
+User-agent: ClaudeBot
+Allow: /
+
+User-agent: PerplexityBot
+Allow: /
+
+User-agent: Google-Extended
+Allow: /
+
+Sitemap: https://apatheticmioz.github.io/Castor/sitemap-index.xml

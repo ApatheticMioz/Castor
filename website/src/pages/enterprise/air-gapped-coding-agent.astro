@@ -1,0 +1,474 @@
+---
+import Layout from '../../layouts/Layout.astro';
+import Header from '../../components/Header.astro';
+import QuickstartFooter from '../../components/QuickstartFooter.astro';
+import { ARCHITECTURE as A } from '../../data/telemetry';
+
+const base = import.meta.env.BASE_URL.replace(/\/$/, '');
+const siteUrl = new URL(Astro.site ?? 'http://localhost').href.replace(/\/$/, '');
+const root = `${siteUrl}${base}/`;
+const EMAIL = 'ApatheticMioz@gmail.com';
+
+const breadcrumb = {
+  '@type': 'BreadcrumbList',
+  itemListElement: [
+    { '@type': 'ListItem', position: 1, name: 'Home', item: root },
+    { '@type': 'ListItem', position: 2, name: 'Enterprise', item: `${root}enterprise/` },
+    { '@type': 'ListItem', position: 3, name: 'Air-Gapped Local Coding Agent' },
+  ],
+};
+
+const faqItems: Array<{ q: string; a: string }> = [
+  {
+    q: 'Can source code or build artifacts leave the enclave at all?',
+    a: 'No. The air-gapped build is compiled with `paper` and `web` tools compiled out entirely (feature-gated at build time), so there is no code path — not even a latent one — that opens a socket. The MCP surface is stdio-only and the engine adapter binds to 127.0.0.1. There is no outbound web or paper-lookup tool to exfiltrate through.',
+  },
+  {
+    q: 'What kernel-level confinement does the sandbox use?',
+    a: 'On Linux, every shell child process is dropped into a Landlock ruleset at exec that restricts its filesystem access to the workspace root. On filesystems where Landlock is unavailable, the process fails open to the lexical gates — never to an unconstrained process. The 5-layer path pipeline (root anchor → symlink containment → out-of-tree refusal → traversal normalization → binary sniff) sits above the kernel gate.',
+  },
+  {
+    q: 'How do I prove the egress boundary to a CISO or auditor?',
+    a: 'You run the explicit air-gapped build flag, capture the `nmap` / `ss -ltnp` output showing only loopback listeners on ports 18020–18022, and we ship a per-slice JSONL audit ledger for NIST 800-171 / CMMC Level 2 / ITAR / SCIF that records every tool call, its verdict, and its trip layer. The 137-vector test table (123 blocked / 14 allowed) is the source of record and is reproducible from the open-source test suite.',
+  },
+  {
+    q: 'Is the AST syntax gate a hard requirement or a toggle?',
+    a: 'It is a hard invariant in the air-gapped profile: every file commit is parsed in memory against 27 bundled tree-sitter grammars before it touches disk. Malformed code is rejected and the write rolls back atomically. Because the AST gate is compile-time on (the `ast` feature), it cannot be disabled at runtime, which is what you want in a regulated enclave.',
+  },
+  {
+    q: 'How is this priced against GitHub Copilot?',
+    a: 'The Fixed-Scope Air-Gap Pilot is priced below Copilot\u2019s $19–$39/seat/mo anchor for a 10–50 seat regulated pilot, delivered over a fixed 1–3 month scope with a commercial dual-license (AGPL-3.0 opt-out). The Turnkey Local Sprint is a flat $1,500 one-time fee for a 48-hour dedicated-hardware stand-up. Both carry a real `mailto:` CTA — no forms, no sales gate.',
+  },
+];
+
+/** Backtick-wrapped fragments → styled <code class="am-code"> tokens, with
+    every segment HTML-escaped. Strings without backticks pass through clean. */
+function renderInline(text: string): string {
+  return text
+    .split('`')
+    .map((seg, i) => {
+      const esc = seg
+        .replace(/&/g, '&amp;')
+        .replace(/</g, '&lt;')
+        .replace(/>/g, '&gt;');
+      return i % 2 === 1 ? `<code class="am-code">${esc}</code>` : esc;
+    })
+    .join('');
+}
+
+const faqPage = {
+  '@type': 'FAQPage',
+  mainEntity: faqItems.map((f) => ({
+    '@type': 'Question',
+    name: f.q,
+    acceptedAnswer: { '@type': 'Answer', text: f.a },
+  })),
+};
+
+const techArticle = {
+  '@type': 'TechArticle',
+  name: 'Air-Gapped Local Coding Agent for CMMC Level 2, ITAR & SCIF Enclaves',
+  datePublished: '2026-11-19',
+  dateModified: '2026-11-19',
+  author: { '@type': 'Organization', name: 'Castor Technologies' },
+  publisher: { '@type': 'Organization', name: 'Castor Technologies' },
+  mainEntityOfPage: `${root}enterprise/air-gapped-coding-agent/`,
+  keywords:
+    'air-gapped, coding agent, CMMC Level 2, ITAR, SCIF, NIST 800-171, Landlock, sandbox, zero-trust, DIB, defense, compliance, local LLM, MCP',
+  abstract:
+    'A zero-egress autonomous coding agent for regulated enclaves: a 5-layer path sandbox verified across 137 attack vectors (123 blocked / 14 allowed), Linux Landlock kernel confinement, a lexical shell scanner with dead-man fuse, a 27-grammar Tree-Sitter AST gate, and an explicit no-egress build flag.',
+};
+
+const jsonLd = [breadcrumb, techArticle, faqPage];
+
+/* The 5 path-containment layers (from src/tools/sandbox/mod.rs) */
+const LAYERS: Array<{ level: string; fn: string; role: string }> = [
+  { level: 'L1', fn: 'resolve_workspace_root', role: 'Canonical root anchor' },
+  { level: 'L2', fn: 'verify_symlink_containment', role: 'Realpath symlink-escape refusal' },
+  { level: 'L3', fn: 'refuse_out_of_tree', role: 'Strict boundary containment' },
+  { level: 'L4', fn: 'normalize_traversal', role: 'Null-byte / tilde / device-name / .. collapse' },
+  { level: 'L5', fn: 'check_binary', role: 'Magic-number sniff → BinaryFileError' },
+];
+
+/* Companion runtime gates */
+const GATES: Array<{ name: string; coord: string; desc: string }> = [
+  {
+    name: 'Linux Landlock Kernel Confinement',
+    coord: 'src/tools/shell/process.rs',
+    desc: 'Every shell child is confined to the workspace root by a Landlock ruleset at exec; unsupported filesystems fail open to the lexical gates, never to an unconstrained process.',
+  },
+  {
+    name: 'Lexical Shell Scanner + Dead-Man Fuse',
+    coord: 'src/tools/shell/scanner.rs',
+    desc: 'Static lexical scan of the command line: destructive targets, protected roots, and a synthetic canary that trips FatalDeadManFuseError before any execution — the command is not run, and it is not retried.',
+  },
+  {
+    name: '27-Grammar Tree-Sitter AST Syntax Gate',
+    coord: 'src/tools/ast.rs',
+    desc: 'Every file commit is parsed in memory against 27 bundled tree-sitter grammars first. Malformed code is rejected before it ever touches disk — a syntax failure rolls back atomically.',
+  },
+];
+
+const tiers = [
+  {
+    key: 'sprint' as const,
+    name: 'Turnkey Local Sprint',
+    price: '$1,500',
+    tag: 'One-Time · 48-Hour Setup',
+    audience:
+      'Stand up dedicated local inference hardware in a day without weeks of vLLM / CUDA / quantization tuning.',
+    bullets: [
+      'Custom vLLM 0.33 / llama.cpp + MTP/DFlash2 tuning for your GPUs (RTX 3090/4090/5090 or L40S/H100)',
+      'Air-gapped build flag enabled, egress tools compiled out',
+      'Team workspace sandbox & shell-policy hardening',
+      'Verified throughput benchmark handoff + loopback egress audit',
+    ],
+    ctaLabel: 'Request the 48-Hour Sprint →',
+  },
+  {
+    key: 'enterprise' as const,
+    name: 'Fixed-Scope Air-Gap Pilot',
+    price: 'Below Copilot Anchor',
+    tag: '10–50 Seats · 1–3 Months',
+    audience:
+      'A fixed-scope compliance pilot for DIB, defense, finance, and healthcare enclaves where source code cannot touch external APIs — priced under Copilot\u2019s $19–$39/seat/mo anchor.',
+    bullets: [
+      'Commercial dual-license (AGPL-3.0 opt-out)',
+      'Signed air-gapped binary with outbound web / paper tools compiled out',
+      'NIST 800-171 / CMMC Level 2 / ITAR / SCIF per-slice JSONL audit ledger',
+      'Dedicated deployment SLA & custom model qualification',
+    ],
+    ctaLabel: 'Scope an Air-Gap Pilot →',
+  },
+];
+
+function mailtoFor(key: 'sprint' | 'enterprise'): string {
+  const subject = key === 'sprint' ? 'Castor Turnkey Local Sprint' : 'Castor Enterprise Air-Gap Pilot';
+  const body =
+    key === 'sprint'
+      ? 'Hi — we are an engineering team evaluating a one-time 48-hour local setup sprint for dedicated air-gapped Castor inference hardware. What does engagement look like?'
+      : 'Hi — we are evaluating a fixed-scope enterprise air-gap pilot (CMMC Level 2 / ITAR / SCIF) for our regulated enclave. What does engagement look like?';
+  return `mailto:${EMAIL}?subject=${encodeURIComponent(subject)}&body=${encodeURIComponent(body)}`;
+}
+---
+
+<Layout
+  title="Air-Gapped Local Coding Agent for CMMC Level 2, ITAR & SCIF Enclaves | Castor"
+  description="A zero-egress autonomous coding agent for regulated enclaves: a 5-layer path sandbox verified across 137 attack vectors (123 blocked / 14 allowed), Linux Landlock kernel confinement, a lexical shell scanner with dead-man fuse, a 27-grammar Tree-Sitter AST gate, and an explicit no-egress build flag. Turnkey Sprint ($1,500) and Fixed-Scope Air-Gap Pilot below the Copilot anchor."
+  canonicalPath="/enterprise/air-gapped-coding-agent/"
+  jsonLd={jsonLd}
+>
+  <Header />
+  <main id="main-content" class="min-h-screen bg-ground">
+    <!-- ── Hero ───────────────────────────────────────────────────────── -->
+    <section class="hardware-dot-grid">
+      <div class="mx-auto max-w-6xl px-4 pb-12 pt-10 sm:px-6 lg:px-8">
+        <p class="font-mono text-[11px] uppercase tracking-[0.16em] text-local">
+          // enterprise · air-gapped · cmmc level 2 · itar · scif
+        </p>
+        <h1
+          class="mt-4 font-display text-[clamp(1.9rem,3.4vw,3rem)] font-bold leading-[1.02] tracking-[-0.035em] text-ink"
+        >
+          An Autonomous Coding Agent That
+          <span class="text-local">Cannot Egress.</span>
+        </h1>
+        <p class="mt-4 max-w-2xl font-sans text-[15px] leading-relaxed text-ink-secondary sm:text-base">
+          Castor compiles to a <b>zero-egress</b> binary: stdio-only MCP,
+          loopback-only engine ports, and outbound web / paper tools
+          <b>compiled out</b> — so source code in a CMMC Level 2, ITAR, or
+          SCIF enclave never has a code path to leave. The sandbox is not a
+          policy memo; it is a 5-layer kernel-and-runtime stack verified
+          across <b>137 attack vectors</b>.
+        </p>
+
+        <!-- Egress boundary hero cells -->
+        <div class="spec-grid mt-8 grid grid-cols-2 lg:grid-cols-4">
+          <div class="p-4">
+            <p class="font-mono text-[10px] uppercase tracking-widest text-ink-muted">Path layers</p>
+            <p class="tabular mt-1 font-display text-3xl font-bold text-ink">{A.pathLayers}</p>
+          </div>
+          <div class="p-4">
+            <p class="font-mono text-[10px] uppercase tracking-widest text-ink-muted">Test vectors</p>
+            <p class="tabular mt-1 font-display text-3xl font-bold text-ink">{A.securityTestVectors}</p>
+          </div>
+          <div class="p-4">
+            <p class="font-mono text-[10px] uppercase tracking-widest text-ink-muted">Blocked / Allowed</p>
+            <p class="tabular mt-1 font-display text-3xl font-bold text-block">{A.securityBlocked} / {A.securityAllowed}</p>
+          </div>
+          <div class="p-4">
+            <p class="font-mono text-[10px] uppercase tracking-widest text-ink-muted">AST grammars</p>
+            <p class="tabular mt-1 font-display text-3xl font-bold text-ink">{A.treeSitterGrammars}</p>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <!-- ── Section: 5-layer stack ─────────────────────────────────────── -->
+    <section id="stack" class="scroll-mt-16 border-y border-hairline bg-recessed/40">
+      <div class="mx-auto max-w-6xl px-4 py-12 sm:px-6 lg:px-8">
+        <header>
+          <p class="font-mono text-[11px] uppercase tracking-[0.16em] text-ink-muted">
+            01 · the zero-trust path stack · <code class="am-code">src/tools/sandbox/mod.rs</code>
+          </p>
+          <h2 class="mt-2 font-display text-2xl font-bold tracking-tight text-ink md:text-3xl">
+            Five Layers, Verified Across 137 Vectors
+          </h2>
+          <p class="mt-3 max-w-2xl font-sans text-sm leading-relaxed text-ink-secondary">
+            Every file path and shell command passes a deterministic
+            pipeline before it is allowed to touch the filesystem. Of
+            <b>137 verified test vectors</b>, <b>{A.securityBlocked} are blocked</b> and
+            <b>{A.securityAllowed} are allowed</b> — the table is the source of record
+            and is reproducible from the open-source test suite
+            (<code class="am-code">src/tools/sandbox/tests.rs:527-548</code>).
+          </p>
+        </header>
+
+        <ol class="mt-8" aria-label="Five-layer path containment pipeline">
+          {LAYERS.map((l, i) => (
+            <li class="relative pl-14 pb-5">
+              {i < LAYERS.length - 1 && (
+                <span class="absolute left-[15px] top-8 h-full w-px bg-[var(--border-hairline)]" aria-hidden="true"></span>
+              )}
+              <span class="absolute left-0 top-0 flex h-8 w-8 items-center justify-center border border-[var(--border-strong)] bg-recessed font-mono text-[11px] font-semibold text-ink">
+                {l.level}
+              </span>
+              <p class="pt-1 font-mono text-sm text-ink">{l.fn}</p>
+              <p class="mt-0.5 font-mono text-[12px] text-ink-secondary">{l.role}</p>
+            </li>
+          ))}
+        </ol>
+      </div>
+    </section>
+
+    <!-- ── Section: companion runtime gates ───────────────────────────── -->
+    <section id="gates" class="scroll-mt-16 border-b border-hairline">
+      <div class="mx-auto max-w-6xl px-4 py-12 sm:px-6 lg:px-8">
+        <header>
+          <p class="font-mono text-[11px] uppercase tracking-[0.16em] text-ink-muted">
+            02 · companion runtime gates
+          </p>
+          <h2 class="mt-2 font-display text-2xl font-bold tracking-tight text-ink md:text-3xl">
+            Kernel, Shell &amp; AST — Three Hard Gates Below the Path Pipeline
+          </h2>
+        </header>
+
+        <div class="mt-8 grid gap-px lg:grid-cols-3">
+          {GATES.map((g) => (
+            <div class="bg-surface p-5">
+              <p class="font-mono text-xs font-semibold uppercase tracking-widest text-ink">{g.name}</p>
+              <p class="mt-1 font-mono text-[11px] text-ink-muted">{g.coord}</p>
+              <p class="mt-3 font-mono text-[12px] leading-relaxed text-ink-secondary">{g.desc}</p>
+            </div>
+          ))}
+        </div>
+
+        <!-- Vector verdict instrument -->
+        <div class="instrument-chassis mt-8">
+          <div
+            class="flex items-center justify-between border-b border-[var(--bg-instrument-border)] bg-[var(--bg-instrument-raised)] px-4 py-2"
+          >
+            <span class="font-mono text-[11px] uppercase tracking-widest text-ink-instrument-muted">
+              sandbox vector table · deterministic refusals
+            </span>
+            <span class="font-mono text-[10px] text-ink-instrument-muted">
+              src/tools/sandbox/tests.rs:527-548
+            </span>
+          </div>
+          <div class="grid grid-cols-3">
+            <div class="bg-[var(--bg-instrument)] p-5 text-center">
+              <p class="tabular font-mono text-3xl font-bold text-ink-instrument">{A.securityTestVectors}</p>
+              <p class="mt-1 font-mono text-[10px] uppercase tracking-widest text-ink-instrument-muted">total vectors</p>
+            </div>
+            <div class="border-x border-[var(--bg-instrument-border)] bg-[var(--bg-instrument)] p-5 text-center">
+              <p class="tabular font-mono text-3xl font-bold text-block-oled">{A.securityBlocked}</p>
+              <p class="mt-1 font-mono text-[10px] uppercase tracking-widest text-ink-instrument-muted">blocked</p>
+            </div>
+            <div class="bg-[var(--bg-instrument)] p-5 text-center">
+              <p class="tabular font-mono text-3xl font-bold text-ok-oled">{A.securityAllowed}</p>
+              <p class="mt-1 font-mono text-[10px] uppercase tracking-widest text-ink-instrument-muted">allowed</p>
+            </div>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <!-- ── Section: explicit zero-egress build ────────────────────────── -->
+    <section id="egress" class="scroll-mt-16 border-b border-hairline bg-recessed/40">
+      <div class="mx-auto max-w-6xl px-4 py-12 sm:px-6 lg:px-8">
+        <header>
+          <p class="font-mono text-[11px] uppercase tracking-[0.16em] text-ink-muted">
+            03 · the explicit no-egress build
+          </p>
+          <h2 class="mt-2 font-display text-2xl font-bold tracking-tight text-ink md:text-3xl">
+            Egress Is a Compile-Time Decision, Not a Runtime Toggle
+          </h2>
+        </header>
+
+        <div class="mt-8 grid gap-px lg:grid-cols-12">
+          <!-- Build command instrument -->
+          <div class="instrument-chassis lg:col-span-7">
+            <div
+              class="flex items-center justify-between border-b border-[var(--bg-instrument-border)] bg-[var(--bg-instrument-raised)] px-4 py-2"
+            >
+              <span class="font-mono text-[11px] uppercase tracking-widest text-ink-instrument-muted">
+                cargo · air-gapped profile
+              </span>
+              <button
+                type="button"
+                class="border border-white/15 bg-[#151A24] px-3 py-1 font-mono text-[10px] uppercase tracking-widest text-[#F3F5F8] transition-colors hover:border-[#F97316] hover:text-[#F97316]"
+                data-ag-copy="cargo install --path . --no-default-features --features mcp,ast"
+                aria-label="Copy air-gapped build command"
+              >
+                copy
+              </button>
+            </div>
+            <div class="p-5 font-mono text-xs leading-relaxed text-ink-instrument md:text-sm">
+              <span class="text-local-oled">$</span> cargo install --path . \
+              <br /><span class="ml-6 text-ink-instrument-muted">#   --no-default-features · --features mcp,ast</span>
+            </div>
+            <div class="border-t border-[var(--bg-instrument-border)] p-5">
+              <p class="font-mono text-[11px] leading-relaxed text-ink-instrument-muted">
+                <span class="text-ok-oled">--no-default-features</span> disables the default
+                toolset. <span class="text-ok-oled">--features mcp,ast</span> keeps only the
+                stdio MCP surface and the AST gate. The <code class="text-local-oled">web</code> and
+                <code class="text-local-oled">paper</code> features are omitted, so their code — and any
+                socket it could open — is never linked into the binary.
+              </p>
+            </div>
+          </div>
+
+          <!-- Honest egress disclosure -->
+          <div class="mt-4 bg-surface p-5 lg:mt-0 lg:col-span-5">
+            <p class="font-mono text-[11px] font-semibold uppercase tracking-widest text-ink">
+              Honest Egress Disclosure
+            </p>
+            <ul class="mt-3 space-y-2.5 font-mono text-[12px] leading-relaxed text-ink-secondary">
+              <li class="border-l-2 border-l-local pl-3">
+                <b>stdio only.</b> The MCP server speaks over stdio to the host
+                process — it opens no network listener.
+              </li>
+              <li class="border-l-2 border-l-local pl-3">
+                <b>Loopback only.</b> Engine, status, and SSE-proxy ports
+                (18020–18022) bind to 127.0.0.1. Nothing listens on a public
+                interface.
+              </li>
+              <li class="border-l-2 border-l-block pl-3">
+                <b>The one honest caveat.</b> The <b>cloud lead architect
+                conversation</b> (Claude / GPT / Gemini) is your pre-existing
+                egress — Castor does not proxy or inspect it. In a fully
+                air-gapped enclave, run a local model as the lead as well, and
+                there is zero egress by definition.
+              </li>
+              <li class="border-l-2 border-l-local pl-3">
+                <b>Verifiable.</b> <code class="am-code">ss -ltnp</code> / <code class="am-code">nmap</code>
+                on the host will show only loopback listeners. We hand over the
+                capture as part of the audit ledger.
+              </li>
+            </ul>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <!-- ── Section: deployment tiers ──────────────────────────────────── -->
+    <section id="pilot" class="scroll-mt-16 border-b border-hairline">
+      <div class="mx-auto max-w-6xl px-4 py-12 sm:px-6 lg:px-8">
+        <header>
+          <p class="font-mono text-[11px] uppercase tracking-[0.16em] text-ink-muted">
+            04 · engagement · real mailto, no forms
+          </p>
+          <h2 class="mt-2 font-display text-2xl font-bold tracking-tight text-ink md:text-3xl">
+            Two Ways to Stand It Up
+          </h2>
+        </header>
+
+        <div class="mt-8 grid gap-px lg:grid-cols-2">
+          {tiers.map((t) => (
+            <div class="bg-surface p-6">
+              <div class="flex items-baseline justify-between">
+                <p class="font-display text-xl font-bold text-ink">{t.name}</p>
+                <p class="font-mono text-sm font-semibold text-local">{t.price}</p>
+              </div>
+              <p class="mt-1 font-mono text-[11px] uppercase tracking-widest text-ink-muted">{t.tag}</p>
+              <p class="mt-4 font-sans text-sm leading-relaxed text-ink-secondary">{t.audience}</p>
+              <ul class="mt-4 space-y-2">
+                {t.bullets.map((b) => (
+                  <li class="flex gap-2 font-mono text-[12px] leading-relaxed text-ink-secondary">
+                    <span class="mt-0.5 shrink-0 text-local" aria-hidden="true">→</span>
+                    {b}
+                  </li>
+                ))}
+              </ul>
+              <a
+                href={mailtoFor(t.key)}
+                class="tactile-btn tactile-btn--primary mt-6"
+              >
+                {t.ctaLabel}
+              </a>
+            </div>
+          ))}
+        </div>
+
+        <p class="mt-6 font-mono text-[11px] text-ink-muted">
+          Direct line: <a href={`mailto:${EMAIL}`} class="text-ink-secondary underline decoration-hairline underline-offset-4 hover:text-ink">{EMAIL}</a>
+          · Open source (AGPL-3.0): <a href="https://github.com/ApatheticMioz/Castor" target="_blank" rel="noreferrer" class="text-ink-secondary underline decoration-hairline underline-offset-4 hover:text-ink">github.com/ApatheticMioz/Castor</a>
+        </p>
+      </div>
+    </section>
+
+    <!-- ── Section: CISO / compliance FAQ ─────────────────────────────── -->
+    <section id="faq" class="scroll-mt-16 border-b border-hairline bg-recessed/40">
+      <div class="mx-auto max-w-6xl px-4 py-12 sm:px-6 lg:px-8">
+        <header>
+          <p class="font-mono text-[11px] uppercase tracking-[0.16em] text-ink-muted">
+            05 · ciso &amp; compliance faq
+          </p>
+          <h2 class="mt-2 font-display text-2xl font-bold tracking-tight text-ink md:text-3xl">
+            Five Questions, Answered for the Auditor
+          </h2>
+        </header>
+
+        <div class="mt-8">
+          {faqItems.map((f, i) => (
+            <details
+              class="group border-b border-hairline open:bg-surface"
+              {...(i === 0 ? { open: true } : {})}
+            >
+              <summary class="flex cursor-pointer items-center gap-3 px-4 py-4 font-display text-sm font-semibold text-ink md:text-base">
+                <svg
+                  class="h-4 w-4 shrink-0 text-ink-muted transition-transform duration-150 group-open:rotate-45 group-open:text-local"
+                  viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"
+                  aria-hidden="true"
+                >
+                  <path d="M8 3v10M3 8h10" />
+                </svg>
+                {f.q}
+              </summary>
+              <div class="px-4 pb-5 pl-12">
+                <p class="font-sans text-sm leading-relaxed text-ink-secondary" set:html={renderInline(f.a)} />
+              </div>
+            </details>
+          ))}
+        </div>
+      </div>
+    </section>
+  </main>
+  <QuickstartFooter />
+
+  <script>
+    // Copy the air-gapped build command from the embedded instrument.
+    const agCopy = document.querySelector<HTMLButtonElement>('[data-ag-copy]');
+    if (agCopy) {
+      agCopy.addEventListener('click', () => {
+        const cmd = agCopy.dataset.agCopy ?? '';
+        navigator.clipboard?.writeText(cmd).then(() => {
+          agCopy.textContent = 'copied ✓';
+          window.setTimeout(() => { agCopy.textContent = 'copy'; }, 2000);
+        }).catch(() => {
+          agCopy.textContent = 'select & copy';
+          window.setTimeout(() => { agCopy.textContent = 'copy'; }, 2000);
+        });
+      });
+    }
+  </script>
+</Layout>

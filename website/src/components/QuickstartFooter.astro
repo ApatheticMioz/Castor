@@ -37,6 +37,29 @@ const midLinks = [
   { label: 'Commercial Deployments', href: `${GITHUB}/blob/main/docs/commercial-deployments.md` },
   { label: EMAIL, href: `mailto:${EMAIL}` },
 ];
+
+// "Deep Dives & Guides" — the three high-intent SEO landing pages + the
+// machine-readable llms.txt, so crawlers and visitors discover every route
+// in one click. Base-prefixed so links resolve on both Vercel ('/') and
+// GitHub Pages ('/Castor').
+const diveLinks = [
+  {
+    label: 'Qwen3.8-27B on RTX 3090 Benchmarks',
+    href: `${base}/benchmarks/qwen3-8-27b-rtx-3090`,
+  },
+  {
+    label: 'Cut Claude Code & Antigravity Token Costs',
+    href: `${base}/claude-code-local-llm`,
+  },
+  {
+    label: 'Air-Gapped Local Coding Agent (CMMC / ITAR / SCIF)',
+    href: `${base}/enterprise/air-gapped-coding-agent`,
+  },
+  {
+    label: 'llms.txt (machine-readable spec)',
+    href: `${base}/llms.txt`,
+  },
+];
 ---
 
 <section
@@ -105,6 +128,24 @@ const midLinks = [
 </section>
 
 <footer class="border-t border-hairline bg-ground">
+  <!-- Deep Dives & Guides: high-intent SEO pages + machine-readable spec -->
+  <div class="border-b border-hairline">
+    <div class="mx-auto max-w-6xl px-6 py-5">
+      <p class="font-mono text-[11px] uppercase tracking-widest text-ink-muted">
+        Deep Dives &amp; Guides
+      </p>
+      <nav aria-label="Deep dives and guides" class="mt-3 flex flex-wrap gap-x-6 gap-y-2">
+        {diveLinks.map((l) => (
+          <a
+            href={l.href}
+            class="font-mono text-[12px] text-ink-secondary underline decoration-hairline underline-offset-4 transition-colors hover:text-local"
+          >
+            {l.label} →
+          </a>
+        ))}
+      </nav>
+    </div>
+  </div>
   <div
     class="mx-auto flex max-w-6xl flex-col gap-8 px-6 py-10 lg:flex-row lg:items-center lg:justify-between"
   >

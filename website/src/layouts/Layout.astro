@@ -19,18 +19,26 @@ import '../styles/global.css';
 interface Props {
   title: string;
   description: string;
+  /** Canonical path on the deployment root, e.g. '/' or '/deploy/air-gapped/'. */
+  canonicalPath?: string;
+  /** Optional page-specific schema.org object (or array) emitted alongside the
+      base SoftwareApplication node (e.g. FAQPage, TechArticle, BreadcrumbList). */
+  jsonLd?: Record<string, unknown> | Record<string, unknown>[];
 }
 
-const { title, description } = Astro.props;
+const { title, description, canonicalPath = '/', jsonLd } = Astro.props;
 // Deployment base path: '/' on Vercel, '/Castor' on GitHub Pages.
 // BASE_URL is injected by Astro from `base` in astro.config.mjs; stripping the
 // trailing slash keeps `${base}/assets/...` free of double slashes at both
 // targets.
 const base = import.meta.env.BASE_URL.replace(/\/$/, '');
-const siteRoot = Astro.site ? new URL('', Astro.site) : new URL('http://localhost');
-const canonical = new URL(Astro.url.pathname, siteRoot).href;
-// OG image absolute URL: site origin + deployment base + asset path.
-const ogImage = `${new URL(Astro.site!).href.replace(/\/$/, '')}${base}/assets/pure1_dioscuri_dyad.svg`;
+// Site origin (no trailing slash) + base => absolute canonical + OG URLs.
+const siteUrl = (Astro.site ? new URL(Astro.site) : new URL('http://localhost'))
+  .href.replace(/\/$/, '');
+// Clean per-page canonical: site + base + path (default '/' => deployment root).
+const canonical = `${siteUrl}${base}${canonicalPath}`;
+// Shared OG / Twitter card: the 1200×630 Swiss-paper + OLED social card.
+const ogImage = `${siteUrl}${base}/assets/og-card.png`;
 
 const meta: Array<Record<string, string>> = [
   { name: 'description', content: description },
@@ -43,14 +51,50 @@ const meta: Array<Record<string, string>> = [
   { property: 'og:description', content: description },
   { property: 'og:url', content: canonical },
   { property: 'og:image', content: ogImage },
-  { name: 'twitter:card', content: 'summary' },
+  { property: 'og:image:width', content: '1200' },
+  { property: 'og:image:height', content: '630' },
+  { property: 'og:image:alt', content: title },
+  { name: 'twitter:card', content: 'summary_large_image' },
   { name: 'twitter:title', content: title },
   { name: 'twitter:description', content: description },
+  { name: 'twitter:image', content: ogImage },
 ];
 
 const links: Array<Record<string, string>> = [
   { rel: 'icon', type: 'image/svg+xml', href: `${base}/assets/favicon.svg` },
 ];
+
+// ── Structured data (GEO / AI search) ───────────────────────────────
+// A single JSON-LD block: the fixed SoftwareApplication node plus any
+// page-specific node(s) (FAQPage / TechArticle / BreadcrumbList) passed in.
+// `@context` is set once so child nodes inherit it.
+const softwareApplication: Record<string, unknown> = {
+  '@type': 'SoftwareApplication',
+  name: 'Castor',
+  alternateName: 'mcp-castor',
+  softwareVersion: '1.5.0',
+  applicationCategory: 'DeveloperApplication',
+  operatingSystem: 'Windows, Linux, macOS',
+  license: 'https://www.gnu.org/licenses/agpl-3.0.en.html',
+  url: canonical,
+  description,
+  offers: { '@type': 'Offer', price: '0', priceCurrency: 'USD' },
+  codeRepository: 'https://github.com/ApatheticMioz/Castor',
+  sameAs: [
+    'https://github.com/ApatheticMioz/Castor',
+    'https://www.npmjs.com/package/mcp-castor',
+  ],
+};
+// A JSON-LD graph: `@context` plus an `@graph` array containing the
+// SoftwareApplication node and any page-specific node(s). Always emitted
+// (the index page carries SoftwareApplication alone; subpages add FAQPage /
+// TechArticle / BreadcrumbList, etc.).
+const graph: Record<string, unknown>[] = [softwareApplication];
+if (jsonLd) graph.push(...(Array.isArray(jsonLd) ? jsonLd : [jsonLd]));
+const jsonLdGraph: Record<string, unknown> = {
+  '@context': 'https://schema.org',
+  '@graph': graph,
+};
 ---
 
 <!doctype html>
@@ -63,6 +107,7 @@ const links: Array<Record<string, string>> = [
     <link rel="canonical" href={canonical} />
     {meta.map((m) => <meta {...m} />)}
     {links.map((l) => <link {...l} />)}
+    <script type="application/ld+json" set:html={JSON.stringify(jsonLdGraph)} />
     <script is:inline>
       // Pre-paint theme restore. Runs inline in <head>, before first paint, so
       // there is zero flash of the wrong theme:
