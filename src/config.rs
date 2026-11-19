@@ -468,14 +468,36 @@ pub fn load_with(get_env: impl Fn(&str) -> Option<String>) -> Result<LoadedConfi
 
     let file_ports = file.and_then(|f| f.ports.as_ref());
 
+    let (ports, (src_port_engine, src_port_status, src_port_proxy)) = {
+        let (engine, src_port_engine) =
+            pick_u16(env_port_engine, file_ports.and_then(|p| p.engine), 18020);
+        let (status, src_port_status) =
+            pick_u16(env_port_status, file_ports.and_then(|p| p.status), 18021);
+        let (proxy, src_port_proxy) =
+            pick_u16(env_port_proxy, file_ports.and_then(|p| p.proxy), 18022);
+        (
+            Ports {
+                engine,
+                status,
+                proxy,
+            },
+            (src_port_engine, src_port_status, src_port_proxy),
+        )
+    };
+
     let (model, src_model) = pick_str(env_str("CASTOR_MODEL"), file.and_then(|f| f.model.clone()));
-    // `base_url` defaults to the Swarm endpoint so that the engine can be
-    // discovered at boot. The binary's out-of-the-box default is the Swarm
-    // baseline (see `SWARM_BASE_URL`), which is the only built-in profile.
+    // `base_url` defaults to the Swarm endpoint (on `ports.engine` when a custom
+    // engine port was configured without an explicit `base_url`) so the engine
+    // is discovered consistently across ports and URLs.
+    let default_base_url = if ports.engine != 18020 && ports.engine != 0 {
+        format!("http://127.0.0.1:{}/v1", ports.engine)
+    } else {
+        SWARM_BASE_URL.to_string()
+    };
     let (base_url, src_base_url) = pick_str_default(
         env_str("CASTOR_BASE_URL"),
         file.and_then(|f| f.base_url.clone()),
-        SWARM_BASE_URL.to_string(),
+        default_base_url,
     );
     let (api_key, src_api_key) = pick_str(
         env_str("CASTOR_API_KEY"),
@@ -573,23 +595,6 @@ pub fn load_with(get_env: impl Fn(&str) -> Option<String>) -> Result<LoadedConfi
         pick_usize(env_usize("CASTOR_TOOL_SPILL_BYTES")?, None, 16384);
     let (workspace_skeleton_prefix, src_workspace_skeleton_prefix) =
         pick_bool(env_bool("CASTOR_WORKSPACE_SKELETON")?, true);
-
-    let (ports, (src_port_engine, src_port_status, src_port_proxy)) = {
-        let (engine, src_port_engine) =
-            pick_u16(env_port_engine, file_ports.and_then(|p| p.engine), 18020);
-        let (status, src_port_status) =
-            pick_u16(env_port_status, file_ports.and_then(|p| p.status), 18021);
-        let (proxy, src_port_proxy) =
-            pick_u16(env_port_proxy, file_ports.and_then(|p| p.proxy), 18022);
-        (
-            Ports {
-                engine,
-                status,
-                proxy,
-            },
-            (src_port_engine, src_port_status, src_port_proxy),
-        )
-    };
 
     Ok(LoadedConfig {
         config: Config {
@@ -1168,7 +1173,12 @@ mod tests {
             "env-bu",
             "file-bu",
             SWARM_BASE_URL,
-            |l| (l.config.base_url.clone().unwrap_or_default(), l.sources.base_url),
+            |l| {
+                (
+                    l.config.base_url.clone().unwrap_or_default(),
+                    l.sources.base_url,
+                )
+            },
         );
         check_str_field("CASTOR_API_KEY", "api_key", "env-key", "file-key", |l| {
             (l.config.api_key.clone(), l.sources.api_key)
@@ -1278,10 +1288,7 @@ mod tests {
                 l.config.max_concurrent_tasks,
                 l.sources.max_concurrent_tasks
             ),
-            (
-                SWARM_MAX_CONCURRENT_TASKS,
-                Source::Default
-            )
+            (SWARM_MAX_CONCURRENT_TASKS, Source::Default)
         );
     }
 
@@ -1369,10 +1376,7 @@ mod tests {
                 l.config.max_concurrent_tasks,
                 l.sources.max_concurrent_tasks
             ),
-            (
-                SWARM_MAX_CONCURRENT_TASKS,
-                Source::Default
-            )
+            (SWARM_MAX_CONCURRENT_TASKS, Source::Default)
         );
         assert_eq!(
             (l.config.tool_prefix.as_str(), l.sources.tool_prefix),
@@ -1605,7 +1609,10 @@ mod tests {
         // supplies the Swarm launcher at boot time for non-llama backends).
         let l = load_case(&[], None);
         assert_eq!(
-            (l.config.max_concurrent_tasks, l.sources.max_concurrent_tasks),
+            (
+                l.config.max_concurrent_tasks,
+                l.sources.max_concurrent_tasks
+            ),
             (SWARM_MAX_CONCURRENT_TASKS, Source::Default)
         );
         assert_eq!(
@@ -1625,10 +1632,7 @@ mod tests {
             (Some(SWARM_BASE_URL), Source::Default)
         );
         assert_eq!(
-            (
-                l.config.launch_command.as_deref(),
-                l.sources.launch_command
-            ),
+            (l.config.launch_command.as_deref(), l.sources.launch_command),
             (None, Source::Default)
         );
         assert_eq!(
@@ -1702,7 +1706,10 @@ mod tests {
         assert_eq!(l.profile_name.as_deref(), Some("turbo"));
         assert_eq!(l.config.max_context, Some(245760)); // from the profile
         assert_eq!(
-            (l.config.max_concurrent_tasks, l.sources.max_concurrent_tasks),
+            (
+                l.config.max_concurrent_tasks,
+                l.sources.max_concurrent_tasks
+            ),
             (SWARM_MAX_CONCURRENT_TASKS, Source::Default)
         );
         assert_eq!(l.config.engine_type.as_deref(), None);
@@ -1789,5 +1796,16 @@ mod tests {
 
         let absent = resolve_default_launch_command_from(Some(&other_cwd), Some(&other_cwd));
         assert!(absent.is_none());
+    }
+
+    #[test]
+    fn base_url_tracks_custom_engine_port_when_unset() {
+        let l = load_case(&[("CASTOR_PORT_ENGINE", "19090")], None);
+        assert_eq!(l.config.ports.engine, 19090);
+        assert_eq!(
+            l.config.base_url.as_deref(),
+            Some("http://127.0.0.1:19090/v1")
+        );
+        assert_eq!(l.sources.base_url, Source::Default);
     }
 }

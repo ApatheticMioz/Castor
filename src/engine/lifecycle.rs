@@ -96,6 +96,11 @@ impl EngineLifecycle {
         self.legacy_canary().await
     }
 
+    fn canary_models_url(&self) -> String {
+        api_url(&self.config, "models")
+            .unwrap_or_else(|_| format!("http://127.0.0.1:{}/v1/models", self.config.ports.engine))
+    }
+
     /// The model id validated by the canary: the auto-bound model when
     /// `config.model` is `None`/`"auto"` (the engine's single served model),
     /// or the configured model when it matches a served id/alias.
@@ -110,8 +115,12 @@ impl EngineLifecycle {
             None => true,
             Some(m) => m.is_empty() || m == "auto",
         };
-        let url = format!("http://127.0.0.1:{}/v1/models", self.config.ports.engine);
-        let res = self.client.get(&url).send().await.ok()?;
+        let url = self.canary_models_url();
+        let mut req = self.client.get(&url);
+        if let Some(key) = &self.config.api_key {
+            req = req.bearer_auth(key);
+        }
+        let res = req.send().await.ok()?;
         if res.status() != 200 {
             return None;
         }
@@ -136,13 +145,10 @@ impl EngineLifecycle {
         for m in &ids {
             let id = m.get("id").and_then(|i| i.as_str());
             let id_match = id.is_some_and(|s| s.eq_ignore_ascii_case(model));
-            let alias_match = m
-                .get("aliases")
-                .and_then(|a| a.as_str())
-                .is_some_and(|s| {
-                    s.split(|c: char| c.is_whitespace() || c == ',')
-                        .any(|alias| alias.eq_ignore_ascii_case(model))
-                });
+            let alias_match = m.get("aliases").and_then(|a| a.as_str()).is_some_and(|s| {
+                s.split(|c: char| c.is_whitespace() || c == ',')
+                    .any(|alias| alias.eq_ignore_ascii_case(model))
+            });
             if id_match || alias_match {
                 matched = id.map(str::to_string);
                 break;
@@ -159,8 +165,12 @@ impl EngineLifecycle {
         if is_auto {
             return self.canary_model().await.is_some();
         }
-        let url = format!("http://127.0.0.1:{}/v1/models", self.config.ports.engine);
-        let res = match self.client.get(&url).send().await {
+        let url = self.canary_models_url();
+        let mut req = self.client.get(&url);
+        if let Some(key) = &self.config.api_key {
+            req = req.bearer_auth(key);
+        }
+        let res = match req.send().await {
             Ok(r) => r,
             Err(_) => return false,
         };
@@ -1213,5 +1223,18 @@ mod tests {
             !Path::new(&format!("/proc/{pid}")).exists(),
             "group should be dead"
         );
+    }
+
+    #[tokio::test]
+    async fn canary_honors_configured_base_url_without_loopback_port() {
+        let state = tmp_state();
+        let (base, _port) = start_mock(vec!["remote-model".into()], 0).await;
+        let mut cfg = test_config(&state, None, None);
+        cfg.model = None;
+        cfg.ports.engine = 0; // unused when base_url is configured
+        cfg.base_url = Some(format!("{base}/v1"));
+        let lc = EngineLifecycle::new(&cfg, &state);
+        assert!(lc.canary().await);
+        assert_eq!(lc.canary_model().await.as_deref(), Some("remote-model"));
     }
 }

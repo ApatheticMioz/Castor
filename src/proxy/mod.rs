@@ -43,18 +43,23 @@ pub struct ProxyServer {
 }
 
 struct Inner {
-    upstream: SocketAddr,
+    upstream_root: String,
     locks: Locks,
     client: reqwest::Client,
 }
 
 impl ProxyServer {
     pub fn new(state: &StateDir, upstream: SocketAddr) -> Self {
+        Self::from_upstream_url(state, format!("http://{upstream}"))
+    }
+
+    pub fn from_upstream_url(state: &StateDir, upstream_root: impl Into<String>) -> Self {
         let locks = Locks::from_state(state);
         let client = reqwest::Client::new();
+        let root = upstream_root.into().trim_end_matches('/').to_string();
         Self {
             inner: Arc::new(Inner {
-                upstream,
+                upstream_root: root,
                 locks,
                 client,
             }),
@@ -64,7 +69,7 @@ impl ProxyServer {
     /// Acquire the singleton lock. Returns `true` if we own it, `false` if
     /// another live process holds it (caller should exit 0).
     pub fn try_acquire_lock(&self) -> bool {
-        match self.inner.locks.acquire("proxy", LOCK_TTL_MS) {
+        match self.inner.locks.acquire_live("proxy", LOCK_TTL_MS) {
             Ok(AcquireResult::Acquired) => true,
             Ok(AcquireResult::HeldBy { .. }) => false,
             Err(e) => {
@@ -72,6 +77,20 @@ impl ProxyServer {
                 false
             }
         }
+    }
+
+    /// Acquire the singleton lock with short backoff to absorb startup races
+    /// when launched by `ensure_proxy_server_for_upstream`.
+    pub async fn try_acquire_lock_with_retry(&self, retries: usize, delay_ms: u64) -> bool {
+        for i in 0..=retries {
+            if self.try_acquire_lock() {
+                return true;
+            }
+            if i < retries {
+                tokio::time::sleep(Duration::from_millis(delay_ms)).await;
+            }
+        }
+        false
     }
 
     /// Release the singleton lock (best-effort).
@@ -93,7 +112,7 @@ impl ProxyServer {
         let listener = tokio::net::TcpListener::bind(addr).await?;
         eprintln!(
             "[castor-proxy] listening on {addr} -> {}",
-            self.inner.upstream
+            self.inner.upstream_root
         );
         axum::serve(listener, self.router()).await
     }
@@ -119,7 +138,7 @@ async fn health_handler(State(server): State<ProxyServer>) -> Response {
     let body = json!({
         "status": "ok",
         "service": "castor-proxy",
-        "upstream": server.inner.upstream.to_string(),
+        "upstream": server.inner.upstream_root,
         "pid": std::process::id(),
     });
     (StatusCode::OK, body.to_string()).into_response()
@@ -173,10 +192,10 @@ async fn proxy_handler(
     }
 
     // Forward to the upstream engine.
-    let upstream_url = format!("http://{}{}{}", server.inner.upstream, path, query);
+    let upstream_url = format!("{}{}{}", server.inner.upstream_root, path, query);
     let mut req_builder = server.inner.client.request(method, &upstream_url);
     for (name, value) in &headers {
-        if name.as_str() != "host" {
+        if name != axum::http::header::HOST && name != axum::http::header::CONTENT_LENGTH {
             req_builder = req_builder.header(name, value);
         }
     }
@@ -291,6 +310,23 @@ fn passthrough_stream(
 // Spawn helper (used by the `mcp` subcommand)
 // ---------------------------------------------------------------------------
 
+/// Derive the upstream server root URL (scheme + host + port + optional path
+/// prefix, without trailing `/v1`) dynamically from CLI override or `Config`.
+pub fn resolve_upstream_root(
+    config: &crate::config::Config,
+    engine_port_override: Option<u16>,
+) -> String {
+    if let Some(port) = engine_port_override {
+        return format!("http://127.0.0.1:{port}");
+    }
+    if let Some(base) = config.base_url.as_deref()
+        && let Some(root) = crate::engine::backend::server_root(base)
+    {
+        return root.trim_end_matches('/').to_string();
+    }
+    format!("http://127.0.0.1:{}", config.ports.engine)
+}
+
 /// Best-effort, non-blocking bring-up of the proxy, invoked by the `mcp`
 /// subcommand before it starts serving.
 ///
@@ -298,8 +334,22 @@ fn passthrough_stream(
 /// `ensure_status_server`). Every step is best-effort: a failure is logged
 /// to stderr and swallowed. This never blocks the MCP server from starting.
 pub async fn ensure_proxy_server(state: &StateDir, proxy_port: u16, engine_port: u16) {
-    let upstream = SocketAddr::from(([127, 0, 0, 1], engine_port));
-    let server = ProxyServer::new(state, upstream);
+    ensure_proxy_server_for_upstream(
+        state,
+        proxy_port,
+        &format!("http://127.0.0.1:{engine_port}"),
+    )
+    .await;
+}
+
+/// Same best-effort proxy bring-up using a resolved upstream URL root (supports
+/// non-default `CASTOR_BASE_URL` hosts, ports, and path prefixes).
+pub async fn ensure_proxy_server_for_upstream(
+    state: &StateDir,
+    proxy_port: u16,
+    upstream_root: &str,
+) {
+    let server = ProxyServer::from_upstream_url(state, upstream_root);
 
     // 1. lock.
     let acquired = server.try_acquire_lock();
@@ -308,10 +358,11 @@ pub async fn ensure_proxy_server(state: &StateDir, proxy_port: u16, engine_port:
     let already_up = probe_port(proxy_port).await;
 
     if acquired && !already_up {
-        // 3. spawn (detached child re-acquires the lock).
-        spawn_detached(state, proxy_port, engine_port);
-        // 4. release so the child can take the lock.
+        // Release before spawning so the detached child acquires cleanly
+        // without waiting on a parent hold.
         server.release_lock();
+        // 3. spawn (detached child re-acquires the lock).
+        spawn_detached(state, proxy_port, upstream_root);
     } else {
         if acquired {
             server.release_lock();
@@ -333,7 +384,7 @@ async fn probe_port(port: u16) -> bool {
 
 /// Spawn the proxy as a fully detached child process (new process group on
 /// Unix, stdio nulled). Never waits for the child.
-fn spawn_detached(state: &StateDir, proxy_port: u16, engine_port: u16) {
+fn spawn_detached(state: &StateDir, proxy_port: u16, upstream_root: &str) {
     let Some(exe) = std::env::current_exe().ok() else {
         eprintln!("[castor] cannot determine current exe; skipping proxy spawn");
         return;
@@ -345,8 +396,8 @@ fn spawn_detached(state: &StateDir, proxy_port: u16, engine_port: u16) {
         .arg(&state_str)
         .arg("--port")
         .arg(proxy_port.to_string())
-        .arg("--engine-port")
-        .arg(engine_port.to_string())
+        .arg("--upstream")
+        .arg(upstream_root)
         .stdin(std::process::Stdio::null())
         .stdout(std::process::Stdio::null())
         .stderr(std::process::Stdio::null());
@@ -580,5 +631,155 @@ mod tests {
         proxy.release_lock();
         assert!(proxy2.try_acquire_lock());
         proxy2.release_lock();
+    }
+
+    #[tokio::test]
+    async fn proxy_lock_reclaims_dead_pid_within_ttl() {
+        let state = tmp_state();
+        let upstream = SocketAddr::from(([127, 0, 0, 1], 18020));
+        let proxy = ProxyServer::new(&state, upstream);
+
+        #[cfg(unix)]
+        let mut child = std::process::Command::new("true").spawn().unwrap();
+        #[cfg(windows)]
+        let mut child = std::process::Command::new("cmd")
+            .args(["/c", "exit", "0"])
+            .spawn()
+            .unwrap();
+        let dead_pid = child.id();
+        let _ = child.wait();
+
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_millis() as u64;
+        std::fs::create_dir_all(state.locks()).unwrap();
+        std::fs::write(
+            state.locks().join("proxy.lock"),
+            serde_json::json!({ "pid": dead_pid, "held_at": now, "ttl": LOCK_TTL_MS }).to_string(),
+        )
+        .unwrap();
+
+        assert!(
+            proxy.try_acquire_lock(),
+            "in-TTL lock owned by dead pid must be reclaimed"
+        );
+        proxy.release_lock();
+    }
+
+    #[tokio::test]
+    async fn proxy_from_upstream_url_with_prefix_and_concurrent_burst() {
+        let app = Router::new()
+            .route(
+                "/api/v1/models",
+                routing::get(|| async { json!({"object":"list","data":[]}).to_string() }),
+            )
+            .route(
+                "/api/v1/chat/completions",
+                routing::post(|| async {
+                    Response::builder()
+                        .status(200)
+                        .header("content-type", "text/event-stream")
+                        .body(Body::from("data: {\"choices\":[{\"delta\":{\"content\":\"ok\"}}]}\n\ndata: [DONE]\n\n"))
+                        .unwrap()
+                }),
+            );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            let _ = axum::serve(listener, app).await;
+        });
+
+        let state = tmp_state();
+        let proxy = ProxyServer::from_upstream_url(&state, format!("http://{addr}/api/"));
+        let proxy_addr = proxy.serve_ephemeral().await.unwrap();
+
+        let client = reqwest::Client::new();
+        let health = client
+            .get(format!("http://{proxy_addr}/health"))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(health.status(), 200);
+        let health_json: serde_json::Value = health.json().await.unwrap();
+        assert_eq!(health_json["upstream"], format!("http://{addr}/api"));
+
+        let mut joins = Vec::new();
+        for i in 0..16 {
+            let c = client.clone();
+            joins.push(tokio::spawn(async move {
+                if i % 2 == 0 {
+                    let r = c
+                        .get(format!("http://{proxy_addr}/v1/models"))
+                        .send()
+                        .await
+                        .unwrap();
+                    assert_eq!(r.status(), 200);
+                } else {
+                    let r = c
+                        .post(format!("http://{proxy_addr}/v1/chat/completions"))
+                        .json(&json!({"model":"m","stream":true,"messages":[]}))
+                        .send()
+                        .await
+                        .unwrap();
+                    assert_eq!(r.status(), 200);
+                    let body = r.text().await.unwrap();
+                    assert!(body.contains("[DONE]"), "missing DONE: {body}");
+                }
+            }));
+        }
+        for j in joins {
+            j.await.unwrap();
+        }
+    }
+
+    #[tokio::test]
+    async fn proxy_rewrites_content_length_when_sanitizing_body() {
+        let app = Router::new().route(
+            "/v1/chat/completions",
+            routing::post(|body: Bytes| async move {
+                let v: serde_json::Value = serde_json::from_slice(&body).unwrap();
+                Response::builder()
+                    .status(200)
+                    .header("content-type", "application/json")
+                    .body(Body::from(v.to_string()))
+                    .unwrap()
+            }),
+        );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            let _ = axum::serve(listener, app).await;
+        });
+
+        let state = tmp_state();
+        let proxy = ProxyServer::new(&state, addr);
+        let proxy_addr = proxy.serve_ephemeral().await.unwrap();
+
+        let big_img = format!("data:image/png;base64,{}", "A".repeat(4096));
+        let payload = json!({
+            "model": "m",
+            "stream": false,
+            "messages": [{
+                "role": "user",
+                "content": [{"type": "image_url", "image_url": {"url": big_img}}]
+            }]
+        })
+        .to_string();
+        let res = reqwest::Client::new()
+            .post(format!("http://{proxy_addr}/v1/chat/completions"))
+            .header("content-type", "application/json")
+            .header("content-length", payload.len().to_string())
+            .body(payload)
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(res.status(), 200);
+        let parsed: serde_json::Value = res.json().await.unwrap();
+        let content_str = parsed.to_string();
+        assert!(
+            content_str.contains("Image file omitted") || content_str.contains("image_url"),
+            "unexpected upstream echo: {content_str}"
+        );
     }
 }

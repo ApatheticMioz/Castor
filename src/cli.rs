@@ -54,9 +54,12 @@ pub enum Command {
         /// Override the listen port
         #[arg(long)]
         port: Option<u16>,
-        /// Override the upstream engine port
+        /// Override the upstream engine port (localhost shorthand)
         #[arg(long)]
         engine_port: Option<u16>,
+        /// Override the full upstream engine root URL (e.g. http://127.0.0.1:18020)
+        #[arg(long)]
+        upstream: Option<String>,
     },
     /// Run the status / long-poll HTTP server (singleton)
     Status {
@@ -405,9 +408,10 @@ pub async fn run_server(
             // id the canary validated (never a second, inconsistent probe).
             let healthy = lc.canary().await;
             let line = if healthy {
-                let detected = lc.canary_model().await.unwrap_or_else(|| {
-                    config.model.clone().unwrap_or_else(|| "auto".into())
-                });
+                let detected = lc
+                    .canary_model()
+                    .await
+                    .unwrap_or_else(|| config.model.clone().unwrap_or_else(|| "auto".into()));
                 format!("healthy: model {detected} listed")
             } else {
                 "unhealthy: canary failed (engine not healthy)".to_string()
@@ -584,10 +588,11 @@ pub async fn run_with(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
             // (lock → probe → spawn if down → release). Never blocks serve.
             task::wait::ensure_status_server(&state, loaded.config.ports.status).await;
             // Best-effort, non-blocking bring-up of the stream proxy.
-            proxy::ensure_proxy_server(
+            let upstream_root = proxy::resolve_upstream_root(&loaded.config, None);
+            proxy::ensure_proxy_server_for_upstream(
                 &state,
                 loaded.config.ports.proxy,
-                loaded.config.ports.engine,
+                &upstream_root,
             )
             .await;
             mcp::serve(&loaded.config.tool_prefix).await?;
@@ -596,6 +601,7 @@ pub async fn run_with(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
             state_dir,
             port,
             engine_port,
+            upstream,
         } => {
             let loaded = config::load().map_err(|e| format!("config: {e}"))?;
             let state = match state_dir {
@@ -604,16 +610,18 @@ pub async fn run_with(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
             };
             let _ = state.ensure();
             let port = port.unwrap_or(loaded.config.ports.proxy);
-            let engine_port = engine_port.unwrap_or(loaded.config.ports.engine);
-            let upstream = std::net::SocketAddr::from(([127, 0, 0, 1], engine_port));
-            let server = proxy::ProxyServer::new(&state, upstream);
-            if !server.try_acquire_lock() {
+            let upstream_root = upstream
+                .unwrap_or_else(|| proxy::resolve_upstream_root(&loaded.config, engine_port));
+            let server = proxy::ProxyServer::from_upstream_url(&state, upstream_root);
+            if !server.try_acquire_lock_with_retry(20, 50).await {
                 // Another live process holds the singleton lock: exit 0 with a
                 // single stderr line (never fight a live keeper).
                 eprintln!("proxy already running");
                 return Ok(());
             }
-            server.serve(port).await?;
+            let res = server.clone().serve(port).await;
+            server.release_lock();
+            res?;
         }
         Command::Status { state_dir, port } => {
             let loaded = config::load().map_err(|e| format!("config: {e}"))?;
@@ -630,7 +638,9 @@ pub async fn run_with(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
                 eprintln!("status server already running");
                 return Ok(());
             }
-            server.serve(port).await?;
+            let res = server.clone().serve(port).await;
+            server.release_lock();
+            res?;
         }
         Command::Trace { state_dir, port } => {
             let loaded = config::load().map_err(|e| format!("config: {e}"))?;
@@ -719,7 +729,10 @@ pub async fn run_with(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
                 let use_color = !no_color
                     && std::io::stdout().is_terminal()
                     && std::env::var("NO_COLOR").is_err();
-                print!("{}", telemetry::rollup::format_stats_card_styled(&stats, use_color));
+                print!(
+                    "{}",
+                    telemetry::rollup::format_stats_card_styled(&stats, use_color)
+                );
             }
         }
         Command::Evo { action } => {
@@ -823,7 +836,10 @@ pub async fn run_with(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
                     rec["status"] = serde_json::json!("failed");
                     rec["reason"] = serde_json::json!(err_msg);
                     rec["ended_at"] = serde_json::json!(now);
-                    let _ = std::fs::write(&task_file, serde_json::to_string_pretty(&rec).unwrap_or_default());
+                    let _ = std::fs::write(
+                        &task_file,
+                        serde_json::to_string_pretty(&rec).unwrap_or_default(),
+                    );
                 }
                 prev_hook(info);
             }));
