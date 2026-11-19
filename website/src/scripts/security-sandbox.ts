@@ -1,8 +1,10 @@
 /**
- * Security Sandbox — defense-in-depth stack + interactive security vector probe.
- * Single source of truth for the 5 path layers (src/tools/sandbox/mod.rs), the 3
- * companion runtime gates, and the 7 probeable vector cases. Top-level DOM
- * access is guarded so the module is importable from Astro front matter (SSR).
+ * Security Sandbox — defense-in-depth stack + Live Attack-Vector Monitor.
+ * Single source of truth for the 5 path layers (src/tools/sandbox/mod.rs),
+ * the 3 companion runtime gates, and the 7 probeable vector cases.
+ * All exported data tables live strictly above boot(); every browser
+ * access is inside functions, and boot() sits at the very bottom —
+ * zero TDZ bugs, SSR-safe module import.
  */
 
 export interface PathLayer {
@@ -169,31 +171,45 @@ export const VECTOR_SUMMARY = {
 
 const REDUCED =
   typeof window !== 'undefined' &&
-  window.matchMedia &&
+  typeof window.matchMedia === 'function' &&
   window.matchMedia('(prefers-reduced-motion: reduce)').matches;
 
-function probeVector(vector: VectorCase): void {
-  const verdictEl = document.getElementById('security-vector-verdict');
-  const structEl = document.getElementById('security-vector-struct');
-  const sourceEl = document.getElementById('security-vector-source');
-  const tripLabelEl = document.getElementById('security-vector-triplayer');
-  if (!verdictEl || !structEl || !sourceEl || !tripLabelEl) return;
+const LAYER_DELAY_MS = 140; // crisp per-layer gate latch
 
-  const steps = Array.from(
-    document.querySelectorAll<HTMLElement>('#security-vector-probe [data-step]'),
-  );
-  if (steps.length === 0) return;
+interface ProbeEls {
+  probe: HTMLElement;
+  verdict: HTMLElement | null;
+  struct: HTMLElement | null;
+  source: HTMLElement | null;
+  tripLabel: HTMLElement | null;
+  steps: HTMLElement[];
+}
 
-  // A layer is "not reached" once the trace has tripped upstream of it.
+function collectEls(root: HTMLElement): ProbeEls | null {
+  const probe = root.querySelector<HTMLElement>('#security-vector-probe');
+  if (!probe) return null;
+  const steps = Array.from(probe.querySelectorAll<HTMLElement>('[data-step]'));
+  if (steps.length === 0) return null;
+  return {
+    probe,
+    verdict: root.querySelector<HTMLElement>('#security-vector-verdict'),
+    struct: root.querySelector<HTMLElement>('#security-vector-struct'),
+    source: root.querySelector<HTMLElement>('#security-vector-source'),
+    tripLabel: root.querySelector<HTMLElement>('#security-vector-triplayer'),
+    steps,
+  };
+}
+
+function notReachedFor(vector: VectorCase, i: number): boolean {
   const tripIndex = vector.trace.findIndex((t) => t.status === 'trip');
-  const notReached = (i: number): boolean =>
-    vector.verdict === 'blocked' && tripIndex >= 0 && i > tripIndex;
+  return vector.verdict === 'blocked' && tripIndex >= 0 && i > tripIndex;
+}
 
-  // Reset: all steps muted/pending, verdict pending.
-  steps.forEach((s, i) => {
+function resetTrace(els: ProbeEls, vector: VectorCase): void {
+  els.steps.forEach((s, i) => {
     s.classList.remove('is-pass', 'is-trip', 'is-allow', 'is-pending', 'is-muted');
     const status = s.querySelector('[data-status]');
-    if (notReached(i)) {
+    if (notReachedFor(vector, i)) {
       s.classList.add('is-muted');
       if (status) status.textContent = '—';
     } else {
@@ -201,77 +217,204 @@ function probeVector(vector: VectorCase): void {
       if (status) status.textContent = '···';
     }
   });
-  verdictEl.classList.remove('is-blocked', 'is-allowed', 'is-pending');
-  verdictEl.classList.add('is-pending');
-  verdictEl.textContent = 'TRACING…';
-  structEl.textContent = '—';
-  sourceEl.textContent = '—';
-  tripLabelEl.textContent = '—';
+  if (els.verdict) {
+    els.verdict.classList.remove('is-blocked', 'is-allowed');
+    els.verdict.textContent = 'TRACING…';
+  }
+  if (els.struct) els.struct.textContent = '—';
+  if (els.source) els.source.textContent = '—';
+  if (els.tripLabel) els.tripLabel.textContent = '—';
+}
 
-  const reveal = (s: HTMLElement, i: number): void => {
-    const step = vector.trace[i];
-    const status = s.querySelector('[data-status]');
-    if (notReached(i)) return; // stays muted
-    s.classList.remove('is-pending');
-    s.classList.add(
-      step.status === 'trip' ? 'is-trip' : step.status === 'allow' ? 'is-allow' : 'is-pass',
-    );
-    if (status) status.textContent = step.status === 'trip' ? 'TRIP' : 'PASS';
-  };
+function revealStep(els: ProbeEls, vector: VectorCase, i: number): void {
+  const s = els.steps[i];
+  if (notReachedFor(vector, i)) return; // stays muted
+  const step = vector.trace[i];
+  s.classList.remove('is-pending');
+  s.classList.add(step.status === 'trip' ? 'is-trip' : step.status === 'allow' ? 'is-allow' : 'is-pass');
+  const status = s.querySelector('[data-status]');
+  if (status) status.textContent = step.status === 'trip' ? 'TRIP' : 'PASS';
+}
 
-  const finalize = (): void => {
-    steps.forEach((s, i) => reveal(s, i));
-    const blocked = vector.verdict === 'blocked';
-    verdictEl.classList.remove('is-pending');
-    verdictEl.classList.add(blocked ? 'is-blocked' : 'is-allowed');
-    verdictEl.textContent = blocked ? 'BLOCKED' : 'ALLOWED (exit 0)';
-    structEl.textContent = vector.refusalStruct;
-    sourceEl.textContent = vector.source;
-    tripLabelEl.textContent = vector.tripLayer;
-  };
+function finalize(els: ProbeEls, vector: VectorCase): void {
+  els.steps.forEach((_s, i) => revealStep(els, vector, i));
+  if (!els.verdict) return;
+  const blocked = vector.verdict === 'blocked';
+  els.verdict.classList.remove('is-pending');
+  els.verdict.classList.add(blocked ? 'is-blocked' : 'is-allowed');
+  els.verdict.textContent = blocked ? 'BLOCKED' : 'ALLOWED (exit 0)';
+  if (els.struct) els.struct.textContent = vector.refusalStruct;
+  if (els.source) els.source.textContent = vector.source;
+  if (els.tripLabel) els.tripLabel.textContent = vector.tripLayer;
+}
+
+/**
+ * Probe one vector with 140 ms per-layer gate-latch tracing.
+ * Returns a Promise that resolves when the trace has fully settled,
+ * so the auto-demo can chain vectors sequentially.
+ */
+function probeVector(
+  els: ProbeEls,
+  vector: VectorCase,
+  root: HTMLElement,
+): Promise<void> {
+  const btn = root.querySelector<HTMLElement>(`[data-vector-id="${vector.id}"]`);
+  if (btn) btn.classList.add('is-probing');
+
+  resetTrace(els, vector);
 
   if (REDUCED) {
-    finalize();
+    finalize(els, vector);
+    if (btn) btn.classList.remove('is-probing');
+    return Promise.resolve();
+  }
+
+  return new Promise<void>((resolve) => {
+    for (let i = 0; i < els.steps.length; i++) {
+      if (notReachedFor(vector, i)) continue;
+      window.setTimeout(() => {
+        revealStep(els, vector, i);
+      }, LAYER_DELAY_MS * (i + 1));
+    }
+    const holdMs = LAYER_DELAY_MS * (els.steps.length - 1) + 380;
+    window.setTimeout(() => {
+      finalize(els, vector);
+      if (btn) btn.classList.remove('is-probing');
+      resolve();
+    }, holdMs);
+  });
+}
+
+function cancelPendingProbes(root: HTMLElement): void {
+  // Timers are per-run locals; nothing to cancel externally because each
+  // probe's resolve is idempotent — a new probe simply re-resets the DOM.
+  root.querySelectorAll<HTMLElement>('.ss-vector.is-probing').forEach((b) =>
+    b.classList.remove('is-probing'),
+  );
+}
+
+interface DemoState {
+  running: boolean;
+  token: number;
+  els: ProbeEls;
+  root: HTMLElement;
+  btn: HTMLButtonElement | null;
+}
+
+function setDemoButton(demo: DemoState, label: 'idle' | 'running'): void {
+  if (!demo.btn) return;
+  switch (label) {
+    case 'idle':
+      demo.btn.textContent = 'AUTO-DEMO ALL 7 ▶';
+      demo.btn.disabled = false;
+      demo.btn.classList.remove('is-disabled');
+      demo.btn.removeAttribute('aria-disabled');
+      break;
+    case 'running':
+      demo.btn.textContent = 'STOP DEMO ■';
+      demo.btn.disabled = false;
+      demo.btn.classList.remove('is-disabled');
+      demo.btn.removeAttribute('aria-disabled');
+      break;
+  }
+}
+
+function runAutoDemo(demo: DemoState): void {
+  if (REDUCED) {
+    // Reduced motion: explicit click still demos — instant jump through the
+    // vectors (probeVector resolves each in its final state, no motion),
+    // then settles on the final verdict.
+    void probeVector(demo.els, VECTOR_CASES[0], demo.root).then(() =>
+      probeVector(demo.els, VECTOR_CASES[VECTOR_CASES.length - 1], demo.root),
+    );
+    return;
+  }
+  if (demo.running) {
+    stopAutoDemo(demo);
     return;
   }
 
-  // Staggered layer-by-layer reveal, ~140 ms per layer.
-  const delay = 140;
-  steps.forEach((s, i) => {
-    if (notReached(i)) return;
-    setTimeout(() => {
-      reveal(s, i);
-      if (i === steps.length - 1) finalize();
-    }, delay * (i + 1));
-  });
+  demo.running = true;
+  demo.token++;
+  const token = demo.token;
+  setDemoButton(demo, 'running');
+
+  const step = (idx: number): void => {
+    if (token !== demo.token || !demo.running) return;
+    if (idx >= VECTOR_CASES.length) {
+      demo.running = false;
+      setDemoButton(demo, 'idle');
+      return;
+    }
+    probeVector(demo.els, VECTOR_CASES[idx], demo.root).then(() => {
+      if (token !== demo.token || !demo.running) return;
+      // Beat between vectors: 320 ms so each verdict is readable.
+      window.setTimeout(() => step(idx + 1), 320);
+    });
+  };
+  step(0);
+}
+
+function stopAutoDemo(demo: DemoState): void {
+  demo.running = false;
+  demo.token++;
+  cancelPendingProbes(demo.root);
+  setDemoButton(demo, 'idle');
 }
 
 function initSecuritySandbox(): void {
   const root = document.getElementById('security');
   if (!root) return;
 
-  const probe = root.querySelector<HTMLElement>('#security-vector-probe');
-  if (!probe) return;
+  const els = collectEls(root);
+  if (!els) return;
 
+  const demo: DemoState = {
+    running: false,
+    token: 0,
+    els,
+    root,
+    btn: root.querySelector<HTMLButtonElement>('#ss-auto-demo'),
+  };
+
+  // The auto-demo button is ALWAYS interactive: under reduced motion an
+  // explicit click jumps instantly through the vectors instead of playing
+  // the timed sequence — no permanently disabled button.
+  setDemoButton(demo, 'idle');
+  if (demo.btn) {
+    demo.btn.addEventListener('click', () => runAutoDemo(demo));
+  }
+
+  // Manual vector click: always pauses the auto-demo immediately.
   for (const vector of VECTOR_CASES) {
     const btn = root.querySelector<HTMLElement>(`[data-vector-id="${vector.id}"]`);
     if (btn) {
-      btn.addEventListener('click', () => probeVector(vector));
-      btn.addEventListener('keydown', (e) => {
+      const manual = (): void => {
+        if (demo.running) stopAutoDemo(demo);
+        void probeVector(els, vector, root);
+      };
+      btn.addEventListener('click', manual);
+      btn.addEventListener('keydown', (e: KeyboardEvent) => {
         if (e.key === 'Enter' || e.key === ' ') {
           e.preventDefault();
-          probeVector(vector);
+          manual();
         }
       });
     }
   }
 }
 
+/* ── bootSecuritySandbox() — the only DOM bootstrap, strictly at bottom */
+
+function bootSecuritySandbox(): void {
+  initSecuritySandbox();
+}
+
 if (typeof document !== 'undefined') {
   if (document.readyState === 'loading') {
-    document.addEventListener('DOMContentLoaded', () => initSecuritySandbox(), { once: true });
+    document.addEventListener('DOMContentLoaded', bootSecuritySandbox, { once: true });
   } else {
-    initSecuritySandbox();
+    bootSecuritySandbox();
   }
-  document.addEventListener('astro:after-swap', () => initSecuritySandbox());
+  document.addEventListener('astro:after-swap', bootSecuritySandbox);
 }

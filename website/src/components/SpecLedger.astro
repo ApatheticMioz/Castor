@@ -6,7 +6,6 @@ import {
   QWEN38_BENCHMARKS,
   QWEN38_MODEL_CARD_DATE,
   QWEN38_LICENSE,
-  formatInt,
 } from '../data/telemetry';
 
 const L = LEDGER_76DAY;
@@ -30,56 +29,103 @@ const TABS = [
   { id: 'tiers', label: 'VRAM Hardware Tiers (8–24 GB)' },
 ] as const;
 
-/** Ledger 76-day 8-cell grid rows: [kicker, value, sub, accent?]. */
-const ledgerRows: Array<[string, string, string, string]> = [
-  [
-    'Total Tokens Processed',
-    formatInt(L.totalTokens),
-    `${L.promptTokensDisplay} prompt · ${L.completionTokensDisplay} output`,
-    '',
-  ],
-  [
-    'KV Prefix Cache Hit',
-    `${L.cacheHitPct}%`,
-    `${L.cachedTokensDisplay} cached prompt tokens`,
-    'cloud',
-  ],
-  [
-    'Nov Effective Prefill Avg',
-    `${formatInt(L.novPrefillAvgTps)} tok/s`,
-    `p95 ${formatInt(L.novPrefillP95Tps)} · max ${formatInt(L.novPrefillMaxTps)}`,
-    '',
-  ],
-  [
-    'Nov Decode p50',
-    `${L.novDecodeP50Tps} tok/s`,
-    `p95 ${L.novDecodeP95Tps} · max ${L.novDecodeMaxTps} · peak ${formatInt(L.peakSpecBurstTps)} DFlash2 burst`,
-    'local',
-  ],
-  [
-    'Autonomous Turns',
-    formatInt(L.turns),
-    `${formatInt(L.sessions)} sessions · ${L.gpuComputeDisplay} GPU compute`,
-    '',
-  ],
-  [
-    'Sandboxed Tool Calls',
-    formatInt(L.toolCalls),
-    `${L.toolSuccessPct}% success · ${L.surgicalEditRatio}× surgical edit ratio`,
-    '',
-  ],
-  [
-    'Net Savings vs Cloud',
-    `$${L.netSavingsUsd.toLocaleString('en-US', { minimumFractionDigits: 2 })}`,
-    `$${L.cloudCounterfactualUsd.toLocaleString('en-US', { minimumFractionDigits: 2 })} Sonnet-tier vs $${L.electricityUsd} power · ${L.netSavingsPct}%`,
-    'ok',
-  ],
-  [
-    'Live RTX 3090 VRAM',
-    `${formatInt(H.gpu.vramUsedMiB)} MiB`,
-    `${formatInt(H.gpu.vramTotalMiB)} MiB total · ${H.gpu.powerDrawW} W · ${H.gpu.tempC} °C`,
-    'local',
-  ],
+/**
+ * Ledger 76-day 8-cell grid rows. Every headline value carries a rolling
+ * odometer (`data-count-to`); the static label keeps the exact string for
+ * no-JS / reduced-motion first paint, and the counter rewrites it once.
+ * valueStatic doubles as the initial text — clamp sizing below keeps
+ * `2,619,320,414` from clipping the right edge on 390 px viewports.
+ */
+const ledgerRows: Array<{
+  label: string;
+  value: string;
+  sub: string;
+  accent: '' | 'cloud' | 'local' | 'ok';
+  countTo: number;
+  decimals: number;
+  prefix: string;
+  suffix: string;
+}> = [
+  {
+    label: 'Total Tokens Processed',
+    value: L.totalTokens.toLocaleString('en-US'),
+    sub: `${L.promptTokensDisplay} prompt · ${L.completionTokensDisplay} output`,
+    accent: '',
+    countTo: L.totalTokens,
+    decimals: 0,
+    prefix: '',
+    suffix: '',
+  },
+  {
+    label: 'KV Prefix Cache Hit',
+    value: `${L.cacheHitPct}%`,
+    sub: `${L.cachedTokensDisplay} cached prompt tokens`,
+    accent: 'cloud',
+    countTo: L.cacheHitPct,
+    decimals: 1,
+    prefix: '',
+    suffix: '%',
+  },
+  {
+    label: 'Nov Effective Prefill Avg',
+    value: L.novPrefillAvgTps.toLocaleString('en-US'),
+    sub: `p95 ${L.novPrefillP95Tps.toLocaleString('en-US')} · max ${L.novPrefillMaxTps.toLocaleString('en-US')}`,
+    accent: '',
+    countTo: L.novPrefillAvgTps,
+    decimals: 0,
+    prefix: '',
+    suffix: ' tok/s',
+  },
+  {
+    label: 'Nov Decode p50',
+    value: `${L.novDecodeP50Tps} tok/s`,
+    sub: `p95 ${L.novDecodeP95Tps} · max ${L.novDecodeMaxTps} · peak ${L.peakSpecBurstTps.toLocaleString('en-US')} DFlash2 burst`,
+    accent: 'local',
+    countTo: L.novDecodeP50Tps,
+    decimals: 1,
+    prefix: '',
+    suffix: ' tok/s',
+  },
+  {
+    label: 'Autonomous Turns',
+    value: L.turns.toLocaleString('en-US'),
+    sub: `${L.sessions.toLocaleString('en-US')} sessions · ${L.gpuComputeDisplay} GPU compute`,
+    accent: '',
+    countTo: L.turns,
+    decimals: 0,
+    prefix: '',
+    suffix: '',
+  },
+  {
+    label: 'Sandboxed Tool Calls',
+    value: L.toolCalls.toLocaleString('en-US'),
+    sub: `${L.toolSuccessPct}% success · ${L.surgicalEditRatio}× surgical edit ratio`,
+    accent: '',
+    countTo: L.toolCalls,
+    decimals: 0,
+    prefix: '',
+    suffix: '',
+  },
+  {
+    label: 'Net Savings vs Cloud',
+    value: `$${L.netSavingsUsd.toLocaleString('en-US', { minimumFractionDigits: 2 })}`,
+    sub: `$${L.cloudCounterfactualUsd.toLocaleString('en-US', { minimumFractionDigits: 2 })} Sonnet-tier vs $${L.electricityUsd} power · ${L.netSavingsPct}%`,
+    accent: 'ok',
+    countTo: L.netSavingsUsd,
+    decimals: 2,
+    prefix: '$',
+    suffix: '',
+  },
+  {
+    label: 'Live RTX 3090 VRAM',
+    value: H.gpu.vramUsedMiB.toLocaleString('en-US'),
+    sub: `${H.gpu.vramTotalMiB.toLocaleString('en-US')} MiB total · ${H.gpu.powerDrawW} W · ${H.gpu.tempC} °C`,
+    accent: 'local',
+    countTo: H.gpu.vramUsedMiB,
+    decimals: 0,
+    prefix: '',
+    suffix: ' MiB',
+  },
 ];
 
 const accentClass: Record<string, string> = {
@@ -123,8 +169,9 @@ const qwenBars: Array<{ suite: string; score: number }> = [...QWEN38_BENCHMARKS]
     </div>
   </div>
 
-  <!-- 3-tab hardware switcher -->
   <div class="mx-auto max-w-6xl px-4 py-6 sm:px-6">
+    <!-- 3-tab hardware switchbank: active tab raised on pure surface with a
+         2px signal bar; inactive tabs sit recessed on the hairline grid. -->
     <div
       role="tablist"
       aria-label="Hardware telemetry views"
@@ -153,23 +200,29 @@ const qwenBars: Array<{ suite: string; score: number }> = [...QWEN38_BENCHMARKS]
       class="sl-panel mt-6"
     >
       <div class="spec-grid grid-cols-2 lg:grid-cols-4">
-        {ledgerRows.map((row, i) => (
-          <div class={`p-4 ${i % 2 === 1 ? 'cell-recessed' : ''}`}>
-            <p class="font-mono text-[11px] uppercase tracking-widest text-ink-muted">{row[0]}</p>
-            <p class={`tabular mt-2 break-words font-display text-[clamp(1.0rem,4.1vw,1.65rem)] font-bold leading-none tracking-tight ${accentClass[row[3]]}`}>
-              {row[1]}
+        {ledgerRows.map((row) => (
+          <div class="p-4">
+            <p class="font-mono text-[11px] uppercase tracking-widest text-ink-muted">{row.label}</p>
+            <p
+              class={`tabular mt-2 break-words font-display text-[clamp(1.0rem,4.1vw,1.65rem)] font-bold leading-none tracking-tight ${accentClass[row.accent]}`}
+              data-count-to={row.countTo}
+              data-decimals={row.decimals}
+              data-prefix={row.prefix}
+              data-suffix={row.suffix}
+            >
+              {row.value}
             </p>
             <p class="tabular mt-1 font-mono text-[11px] leading-relaxed text-ink-secondary">
-              {row[2]}
+              {row.sub}
             </p>
           </div>
         ))}
       </div>
 
-      <!-- Tool execution distribution strip -->
-      <div class="mt-px border border-hairline bg-ground p-4">
+      <!-- Tool execution distribution strip: 7 bars animate scaleX(0)→1 -->
+      <div class="mt-px border border-hairline bg-surface p-4">
         <p class="font-mono text-[11px] uppercase tracking-widest text-ink-muted">
-          Tool Execution Distribution · 63,901 sandboxed calls
+          Tool Execution Distribution · <span class="tabular text-ink-secondary">63,901</span> sandboxed calls
         </p>
         <div class="mt-3 space-y-2">
           {TOOL_SHARE.map((t) => (
@@ -177,10 +230,10 @@ const qwenBars: Array<{ suite: string; score: number }> = [...QWEN38_BENCHMARKS]
               <span class="tabular w-28 shrink-0 text-right font-mono text-[11px] text-ink-secondary sm:w-36">
                 {t.name}
               </span>
-              <span class="h-1 flex-1 bg-raised">
+              <span class="h-2 flex-1 bg-recessed">
                 <span
-                  class="block h-1 bg-local"
-                  style={`width:${(t.pct / TOOL_MAX_PCT) * 100}%`}
+                  class="sl-toolbar block h-2 bg-local"
+                  data-bar-width={`${((t.pct / TOOL_MAX_PCT) * 100).toFixed(2)}`}
                 ></span>
               </span>
               <span class="tabular w-12 shrink-0 text-right font-mono text-[11px] text-ink">
@@ -202,7 +255,7 @@ const qwenBars: Array<{ suite: string; score: number }> = [...QWEN38_BENCHMARKS]
     >
       <div class="spec-grid grid-cols-2 lg:grid-cols-4">
         {liveRows.map((row, i) => (
-          <div class={`p-4 ${i % 2 === 1 ? 'cell-recessed' : ''}`}>
+          <div class="p-4">
             <p class="font-mono text-[11px] uppercase tracking-widest text-ink-muted">{row[0]}</p>
             <p
               class={`tabular mt-2 break-words font-display text-[clamp(0.9rem,4.1vw,1.375rem)] font-bold leading-tight tracking-tight ${
@@ -223,7 +276,7 @@ const qwenBars: Array<{ suite: string; score: number }> = [...QWEN38_BENCHMARKS]
       </div>
 
       <!-- Qwen3.8-27B benchmark bar panel -->
-      <div class="mt-px border border-hairline bg-ground p-4">
+      <div class="mt-px border border-hairline bg-surface p-4">
         <div class="flex flex-wrap items-baseline justify-between gap-2">
           <p class="font-mono text-[11px] uppercase tracking-widest text-ink-muted">
             Qwen3.8-27B · Verified Vendor Benchmarks
@@ -238,8 +291,11 @@ const qwenBars: Array<{ suite: string; score: number }> = [...QWEN38_BENCHMARKS]
               <span class="tabular w-28 shrink-0 text-right font-mono text-[11px] text-ink-secondary sm:w-36">
                 {b.suite}
               </span>
-              <span class="h-1 flex-1 bg-raised">
-                <span class="block h-1 bg-cloud" style={`width:${b.score}%`}></span>
+              <span class="h-2 flex-1 bg-recessed">
+                <span
+                  class="sl-toolbar block h-2 bg-cloud"
+                  data-bar-width={b.score.toFixed(2)}
+                ></span>
               </span>
               <span class="tabular w-12 shrink-0 text-right font-mono text-[11px] text-ink">
                 {b.score.toFixed(1)}
@@ -253,7 +309,7 @@ const qwenBars: Array<{ suite: string; score: number }> = [...QWEN38_BENCHMARKS]
     <!-- Tab 3 · VRAM hardware tiers -->
     <div role="tabpanel" id="panel-tiers" aria-labelledby="tab-tiers" hidden class="sl-panel mt-6">
       <div class="spec-grid">
-        <div class="col-span-2 bg-ground px-4 py-3 lg:col-span-4">
+        <div class="col-span-2 bg-recessed px-4 py-3 lg:col-span-4">
           <div class="grid grid-cols-2 gap-x-4 font-mono text-[11px] uppercase tracking-widest text-ink-muted lg:grid-cols-4">
             <span>VRAM Tier</span>
             <span>Engine</span>
@@ -293,7 +349,8 @@ const qwenBars: Array<{ suite: string; score: number }> = [...QWEN38_BENCHMARKS]
 </section>
 
 <style>
-  /* 3-tab hardware switchbank: one raised tab with a 2px top signal bar. */
+  /* 3-tab hardware switchbank: recessed track, one raised active tab with
+     a 2px top signal bar (Cobalt default, Orange for the live engine tab). */
   .sl-tab {
     position: relative;
     font-family: var(--font-mono);
@@ -309,7 +366,7 @@ const qwenBars: Array<{ suite: string; score: number }> = [...QWEN38_BENCHMARKS]
     color: var(--ink-secondary);
   }
   .sl-tab.is-active {
-    background: var(--bg-raised);
+    background: var(--bg-surface);
     color: var(--ink-primary);
   }
   .sl-tab.is-active::before {
@@ -324,8 +381,28 @@ const qwenBars: Array<{ suite: string; score: number }> = [...QWEN38_BENCHMARKS]
   [id='tab-live'].is-active::before {
     background: var(--signal-local);
   }
+
+  /* Tool-distribution bars: rest at full width in CSS-free HTML output,
+     the script pre-scales them to 0 and animates to data-bar-width on
+     viewport entry (instant under reduced motion). */
+  .sl-toolbar {
+    display: block;
+    width: var(--bar-final, 100%);
+    height: 100%;
+    transform: scaleX(var(--bar-scale, 1));
+    transform-origin: left center;
+  }
+  .sl-toolbar.is-armed {
+    transform: scaleX(0);
+  }
+  .sl-toolbar.is-grown {
+    transform: scaleX(1);
+    transition: transform 0.9s cubic-bezier(0.22, 1, 0.36, 1);
+    transition-delay: var(--bar-delay, 0ms);
+  }
   @media (prefers-reduced-motion: reduce) {
-    .sl-tab {
+    .sl-tab,
+    .sl-toolbar {
       transition: none;
     }
   }

@@ -135,6 +135,8 @@ export function renderSubsystemDetail(s: Subsystem): string {
 
 /* ── Client wiring (guarded for SSR import) ─────────────────────────── */
 
+const REDUCED_MQ = '(prefers-reduced-motion: reduce)';
+
 function initArchitectureMap(): void {
   const root = document.getElementById('architecture');
   if (!root) return;
@@ -145,6 +147,23 @@ function initArchitectureMap(): void {
   if (nodes.length === 0 || !detail) return;
 
   const find = (id: string): Subsystem | undefined => SUBSYSTEMS.find((s) => s.id === id);
+
+  let swapToken = 0;
+  const setDetail = (sub: Subsystem): void => {
+    if (window.matchMedia(REDUCED_MQ).matches) {
+      swapToken++;
+      detail.innerHTML = renderSubsystemDetail(sub);
+      return;
+    }
+    // Crisp 180 ms fade/translate out, swap, fade in; token guards races.
+    const token = ++swapToken;
+    detail.classList.add('is-swapping');
+    window.setTimeout(() => {
+      if (token !== swapToken) return;
+      detail.innerHTML = renderSubsystemDetail(sub);
+      detail.classList.remove('is-swapping');
+    }, 180);
+  };
 
   const select = (id: string): void => {
     const sub = find(id);
@@ -159,7 +178,7 @@ function initArchitectureMap(): void {
       b.classList.toggle('is-active', active);
       b.setAttribute('aria-pressed', active ? 'true' : 'false');
     }
-    detail.innerHTML = renderSubsystemDetail(sub);
+    setDetail(sub);
   };
 
   nodes.forEach((n) => {

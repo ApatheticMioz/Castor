@@ -60,5 +60,5 @@ CLI equivalent: `vercel --prod` from this directory.
 - `.tactile-key` = hardware-pressed key surface (inset highlight, 3px radius, pressed state).
 - `.tabular` = tabular numerals for every telemetry readout.
 - Signals: `--signal-local` (amber) for local silicon / primary CTA, `--signal-cloud` (cobalt) for cloud / MCP, `--signal-ok` for PASS, `--signal-block` for security refusals.
-- No diffuse neon glows, no purple gradients, no rounded-2xl bloat.
+- No diffuse neon glows, no purple gradients, no oversized corner-radius bloat.
 - Full `prefers-reduced-motion: reduce` handling (Lenis skipped, transitions collapsed).

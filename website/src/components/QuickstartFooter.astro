@@ -1,8 +1,10 @@
 ---
 /**
- * Castor — 60-Second CLI Quickstart + Industrial Footer
- * Terminal block uses hand-authored CSS syntax classes only (zero runtime
- * highlighter). Copy buttons are real clipboard writes with visible feedback.
+ * Castor — 60-Second CLI Quickstart (embedded OLED instrument) + Industrial
+ * Footer. The terminal sits starkly on the warm paper ground as a machined
+ * dark chassis; the footer is pure Swiss Industrial Paper on --bg-ground
+ * with a 1px top hairline. Copy buttons are real clipboard writes with
+ * visible inline feedback — zero deprecated execCommand, zero CS4012 labels.
  */
 import { ARCHITECTURE } from '../data/telemetry';
 
@@ -33,11 +35,15 @@ const midLinks = [
   { label: 'Architecture Docs', href: `${GITHUB}/tree/main/docs` },
   { label: 'Engine Profiles', href: `${GITHUB}/blob/main/docs/engine-profiles.md` },
   { label: 'Commercial Deployments', href: `${GITHUB}/blob/main/docs/commercial-deployments.md` },
-  { label: `Contact (${EMAIL})`, href: `mailto:${EMAIL}` },
+  { label: EMAIL, href: `mailto:${EMAIL}` },
 ];
 ---
 
-<section class="mx-auto max-w-6xl px-6 py-16">
+<section
+  id="quickstart"
+  data-reveal
+  class="scroll-mt-16 mx-auto max-w-6xl px-6 py-16"
+>
   <header class="mb-8">
     <p class="font-mono text-[11px] uppercase tracking-widest text-ink-muted">
       {`// quickstart`} · sixty seconds from zero to telemetry
@@ -47,14 +53,17 @@ const midLinks = [
     </h2>
   </header>
 
-  <div class="border border-hairline bg-ground">
-    <div class="flex items-center justify-between border-b border-hairline bg-recessed px-4 py-2">
-      <span class="font-mono text-[11px] uppercase tracking-widest text-ink-muted">
+  <!-- Embedded dark OLED instrument chassis on the paper ground. -->
+  <div class="instrument-chassis">
+    <div
+      class="flex items-center justify-between border-b border-[var(--bg-instrument-border)] bg-[var(--bg-instrument-raised)] px-4 py-2"
+    >
+      <span class="font-mono text-[11px] uppercase tracking-widest text-ink-instrument-muted">
         bash · castor-cli
       </span>
       <button
         type="button"
-        class="tactile-key px-3 py-1 font-mono text-[10px] uppercase tracking-widest text-ink-secondary hover:text-ink"
+        class="border border-white/15 bg-[#151A24] px-3 py-1 font-mono text-[10px] uppercase tracking-widest text-[#F3F5F8] transition-colors hover:border-[#F97316] hover:text-[#F97316]"
         data-copy-all
       >
         copy all
@@ -64,18 +73,18 @@ const midLinks = [
     <div class="p-4 md:p-6">
       <ol class="space-y-4">
         {commands.map((c) => (
-          <li class="group relative">
-            <p class="font-mono text-xs text-ink-muted md:text-sm">
-              <span class="text-ink-muted">{c.comment}</span>
+          <li>
+            <p class="font-mono text-xs text-ink-instrument-muted md:text-sm">
+              {c.comment}
             </p>
             <div class="mt-1 flex items-center gap-3">
-              <code class="flex-1 overflow-x-auto whitespace-nowrap font-mono text-xs text-ink md:text-sm">
-                <span class="text-local">$</span>
-                <span class="text-ink">{c.cmd}</span>
+              <code class="flex-1 overflow-x-auto whitespace-nowrap font-mono text-xs md:text-sm">
+                <span class="text-local-oled">$</span>
+                <span class="text-ink-instrument">{c.cmd}</span>
               </code>
               <button
                 type="button"
-                class="tactile-key shrink-0 px-2.5 py-1 font-mono text-[10px] uppercase tracking-widest text-ink-muted hover:text-ink"
+                class="shrink-0 border border-white/15 bg-[#151A24] px-2.5 py-1 font-mono text-[10px] uppercase tracking-widest text-[#F3F5F8] transition-colors hover:border-[#F97316] hover:text-[#F97316]"
                 data-copy={c.cmd}
                 aria-label={`Copy command: ${c.cmd}`}
               >
@@ -89,14 +98,16 @@ const midLinks = [
   </div>
 
   <p class="mt-4 overflow-x-auto whitespace-nowrap font-mono text-[11px] tracking-wider text-ink-muted">
-    COMPATIBLE CLIENTS: CLAUDE CODE · ANTIGRAVITY · CURSOR · ANY MCP HOST
+    CLAUDE CODE · ANTIGRAVITY · CURSOR · ANY MCP HOST
     <span class="mx-3 text-hairline">|</span>
-    ENGINES: vLLM · llama.cpp · SGLANG · OLLAMA · LM STUDIO
+    vLLM · llama.cpp · SGLANG · OLLAMA · LM STUDIO
   </p>
 </section>
 
-<footer class="border-t border-hairline bg-recessed">
-  <div class="mx-auto flex max-w-6xl flex-col gap-8 px-6 py-10 lg:flex-row lg:items-start lg:justify-between">
+<footer class="border-t border-hairline bg-ground">
+  <div
+    class="mx-auto flex max-w-6xl flex-col gap-8 px-6 py-10 lg:flex-row lg:items-center lg:justify-between"
+  >
     <div class="flex items-center gap-3">
       <img
         src={`${base}/assets/logo.svg`}
@@ -108,9 +119,8 @@ const midLinks = [
         decoding="async"
       />
       <div>
-        <p class="font-display text-sm font-bold tracking-tight text-ink">CASTOR</p>
-        <p class="font-mono text-[11px] text-ink-muted">
-          Rust Agent Microkernel · v1.5.0 · GNU AGPL-3.0
+        <p class="font-display text-sm font-bold tracking-tight text-ink">
+          CASTOR · Rust Agent Microkernel · v1.5.0 · GNU AGPL-3.0
         </p>
       </div>
     </div>
@@ -126,10 +136,8 @@ const midLinks = [
       ))}
     </nav>
 
-    <p class="font-mono text-[11px] leading-relaxed text-ink-muted">
-      TELEMETRY SNAPSHOT: 2026-11-19
-      <br />
-      ZERO TRACKERS · ZERO COOKIES
+    <p class="font-mono text-[11px] text-ink-muted lg:text-right">
+      TELEMETRY SNAPSHOT: 2026-11-19 · ZERO TRACKERS · ZERO COOKIES
     </p>
   </div>
 </footer>
@@ -138,8 +146,6 @@ const midLinks = [
   // Real clipboard writes, real inline feedback. No modals, no fake success,
   // and no deprecated clipboard path: on non-secure contexts the button
   // reports the manual-copy fallback instead.
-  const hintDefault = 'copy';
-
   function writeClipboard(text: string): Promise<boolean> {
     if (navigator.clipboard?.writeText) {
       return navigator.clipboard.writeText(text).then(() => true, () => false);
@@ -148,27 +154,30 @@ const midLinks = [
   }
 
   function flash(btn: HTMLButtonElement, label: string, ok: boolean) {
-    btn.textContent = ok ? `${label} ✓` : 'select & copy manually';
-    btn.classList.toggle('text-ok', ok);
+    const original = ok ? label : 'select & copy manually';
+    btn.textContent = original;
+    btn.classList.toggle('text-white', ok);
     window.setTimeout(() => {
       btn.textContent = label;
-      btn.classList.remove('text-ok');
+      btn.classList.remove('text-white');
     }, 2000);
   }
 
-  for (const btn of Array.from(document.querySelectorAll<HTMLButtonElement>('[data-copy]'))) {
+  for (const btn of Array.from(
+    document.querySelectorAll<HTMLButtonElement>('#quickstart [data-copy]'),
+  )) {
     btn.addEventListener('click', () => {
       const cmd = btn.dataset.copy ?? '';
-      writeClipboard(cmd).then((ok) => flash(btn, hintDefault, ok));
+      writeClipboard(cmd).then((ok) => flash(btn, 'copy', ok));
     });
   }
 
-  const allBtn = document.querySelector<HTMLButtonElement>('[data-copy-all]');
+  const allBtn = document.querySelector<HTMLButtonElement>('#quickstart [data-copy-all]');
   if (allBtn) {
     allBtn.addEventListener('click', () => {
       // Copy all three commands with their comments for full context.
       const full = Array.from(
-        document.querySelectorAll<HTMLButtonElement>('[data-copy]'),
+        document.querySelectorAll<HTMLButtonElement>('#quickstart [data-copy]'),
       )
         .map((b) => {
           const comment = b.closest('li')?.querySelector('p')?.textContent?.trim();

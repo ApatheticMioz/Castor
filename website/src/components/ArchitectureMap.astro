@@ -44,11 +44,8 @@ const nodeSub: Record<string, string> = {
     <div
       class="grid grid-cols-1 gap-px border border-[var(--border-hairline)] bg-[var(--border-hairline)] lg:grid-cols-12"
     >
-      <!-- Left · schematic drafting board -->
-      <div
-        class="cell-recessed p-4 lg:col-span-7"
-        style="background-image: radial-gradient(circle, rgba(255, 255, 255, 0.04) 1px, transparent 1px); background-size: 24px 24px;"
-      >
+      <!-- Left · Swiss drafting board on pure surface + hardware dot grid -->
+      <div class="hardware-dot-grid bg-surface p-4 lg:col-span-7">
         <!-- SVG circuit schematic (responsive) -->
         <svg
           viewBox="0 0 720 560"
@@ -59,14 +56,15 @@ const nodeSub: Record<string, string> = {
           <style>
             .am-bus {
               fill: none;
-              stroke: rgba(255, 255, 255, 0.22);
+              stroke: var(--border-strong);
               stroke-width: 1;
             }
+            /* Animated directional flow dashes along the buses. */
             .am-pulse {
               fill: none;
-              stroke-width: 1;
-              stroke-dasharray: 4 12;
-              animation: am-pulse-flow 1.6s linear infinite;
+              stroke-width: 1.5;
+              stroke-dasharray: 4 10;
+              animation: am-pulse-flow 1.4s linear infinite;
             }
             .am-pulse-cloud {
               stroke: var(--signal-cloud);
@@ -76,12 +74,62 @@ const nodeSub: Record<string, string> = {
             }
             @keyframes am-pulse-flow {
               to {
-                stroke-dashoffset: -32;
+                stroke-dashoffset: -28;
+              }
+            }
+            /* Crisp 3px moving signal dots — no glow, no blur. */
+            .am-dot {
+              r: 3;
+              stroke: none;
+            }
+            .am-dot-cloud {
+              fill: var(--signal-cloud);
+              animation: am-dot-down 1.8s linear infinite;
+            }
+            .am-dot-local {
+              fill: var(--signal-local);
+              animation: am-dot-up 1.8s linear infinite;
+            }
+            @keyframes am-dot-down {
+              0% {
+                transform: translateY(0);
+                opacity: 0;
+              }
+              12% {
+                opacity: 1;
+              }
+              88% {
+                opacity: 1;
+              }
+              100% {
+                transform: translateY(76px);
+                opacity: 0;
+              }
+            }
+            @keyframes am-dot-up {
+              0% {
+                transform: translateY(0);
+                opacity: 0;
+              }
+              12% {
+                opacity: 1;
+              }
+              88% {
+                opacity: 1;
+              }
+              100% {
+                transform: translateY(-76px);
+                opacity: 0;
               }
             }
             @media (prefers-reduced-motion: reduce) {
               .am-pulse {
                 animation: none;
+              }
+              .am-dot-cloud,
+              .am-dot-local {
+                animation: none;
+                opacity: 0;
               }
             }
             .am-node {
@@ -89,16 +137,17 @@ const nodeSub: Record<string, string> = {
               outline: none;
             }
             .am-node rect {
-              fill: var(--bg-raised);
+              fill: var(--bg-surface);
               stroke: var(--border-strong);
+              stroke-width: 1;
               transition: stroke 120ms linear, fill 120ms linear;
             }
             .am-node:hover rect,
             .am-node:focus-visible rect {
-              stroke: var(--border-active);
+              stroke: var(--ink-primary);
             }
             .am-node.is-active rect {
-              fill: var(--bg-elevated);
+              fill: var(--signal-local-dim);
               stroke: var(--signal-local);
             }
             .am-node text {
@@ -122,7 +171,7 @@ const nodeSub: Record<string, string> = {
               width="400"
               height="76"
               fill="var(--bg-recessed)"
-              stroke="rgba(59, 130, 246, 0.45)"
+              stroke="var(--border-strong)"
             />
             <text x="176" y="44" fill="var(--signal-cloud)" font-size="13" font-weight="600">
               CLOUD LEAD ARCHITECT
@@ -135,7 +184,7 @@ const nodeSub: Record<string, string> = {
             </text>
           </g>
 
-          <!-- ── Bus: cloud → microkernel ────────────────────────── -->
+          <!-- ── Bus: cloud → microkernel (dashes + moving dots) ──── -->
           <path class="am-bus" d="M 360 92 V 120" />
           <path class="am-pulse am-pulse-cloud" d="M 360 92 V 120" />
           <path class="am-bus" d="M 150 120 H 570" />
@@ -145,6 +194,9 @@ const nodeSub: Record<string, string> = {
           <path class="am-pulse am-pulse-cloud" d="M 150 120 V 168" />
           <path class="am-pulse am-pulse-cloud" d="M 360 120 V 168" />
           <path class="am-pulse am-pulse-cloud" d="M 570 120 V 168" />
+          <circle class="am-dot am-dot-cloud" cx="150" cy="120" />
+          <circle class="am-dot am-dot-cloud" cx="360" cy="120" />
+          <circle class="am-dot am-dot-cloud" cx="570" cy="120" />
 
           <!-- ── Microkernel chassis ─────────────────────────────── -->
           <g class="am-tier">
@@ -153,7 +205,7 @@ const nodeSub: Record<string, string> = {
               y="132"
               width="624"
               height="296"
-              fill="rgba(6, 7, 9, 0.55)"
+              fill="var(--bg-recessed)"
               stroke="var(--border-strong)"
             />
             <text x="60" y="152" fill="var(--ink-primary)" font-size="13" font-weight="600">
@@ -164,7 +216,7 @@ const nodeSub: Record<string, string> = {
             </text>
           </g>
 
-          <!-- ── 6 subsystem nodes (3 × 2 grid) ──────────────────── -->
+          <!-- ── 6 subsystem nodes (3 × 2 grid, 190px wide boxes) ─── -->
           {grid.map(([id, label, x, y]) => (
             <g class="am-node" data-id={id} role="button" tabindex="0" aria-pressed="false">
               <rect x={x} y={y} width="190" height="56" />
@@ -175,15 +227,18 @@ const nodeSub: Record<string, string> = {
             </g>
           ))}
 
-          <!-- ── Bus: microkernel → local ────────────────────────── -->
+          <!-- ── Bus: microkernel → local (dashes + moving dots) ──── -->
           <path class="am-bus" d="M 150 428 V 468" />
           <path class="am-bus" d="M 360 428 V 468" />
           <path class="am-bus" d="M 570 428 V 468" />
           <path class="am-bus" d="M 150 448 H 570" />
           <path class="am-pulse am-pulse-local" d="M 150 448 H 360 V 468" />
           <path class="am-pulse am-pulse-local" d="M 570 448 H 360" />
+          <circle class="am-dot am-dot-local" cx="150" cy="468" />
+          <circle class="am-dot am-dot-local" cx="360" cy="468" />
+          <circle class="am-dot am-dot-local" cx="570" cy="468" />
 
-          <!-- ── Local tier (Amber) ──────────────────────────────── -->
+          <!-- ── Local tier (Orange) ──────────────────────────────── -->
           <g class="am-tier">
             <rect
               x="160"
@@ -191,7 +246,7 @@ const nodeSub: Record<string, string> = {
               width="400"
               height="76"
               fill="var(--bg-recessed)"
-              stroke="rgba(249, 115, 22, 0.45)"
+              stroke="var(--border-strong)"
             />
             <text x="176" y="496" fill="var(--signal-local)" font-size="13" font-weight="600">
               LOCAL PEER SILICON
@@ -220,17 +275,35 @@ const nodeSub: Record<string, string> = {
         </div>
       </div>
 
-      <!-- Right · Live Subsystem Inspector -->
-      <div class="flex flex-col border-l-0 border-t border-hairline lg:col-span-5 lg:border-l lg:border-t-0">
+      <!-- Right · Live Subsystem Inspector on pure surface -->
+      <div class="flex flex-col border-l-0 border-t border-hairline bg-surface lg:col-span-5 lg:border-l lg:border-t-0">
         <div class="flex-1 p-4">
           <p class="font-mono text-[11px] uppercase tracking-widest text-ink-muted">
             Live Subsystem Inspector
           </p>
-          <div id="am-detail" class="mt-3" set:html={renderSubsystemDetail(initial)}></div>
+          <div id="am-detail" class="am-detail mt-3" set:html={renderSubsystemDetail(initial)}></div>
         </div>
       </div>
     </div>
   </div>
-
-  <script src="../scripts/architecture-map.ts"></script>
 </section>
+
+<style>
+  /* Inspector content swaps with a crisp opacity/translate micro-transition. */
+  .am-detail {
+    opacity: 1;
+    transform: translateY(0);
+    transition: opacity 180ms ease, transform 180ms ease;
+  }
+  .am-detail.is-swapping {
+    opacity: 0;
+    transform: translateY(6px);
+  }
+  @media (prefers-reduced-motion: reduce) {
+    .am-detail {
+      transition: none;
+    }
+  }
+</style>
+
+<script src="../scripts/architecture-map.ts"></script>

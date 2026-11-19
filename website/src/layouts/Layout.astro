@@ -34,7 +34,9 @@ const ogImage = `${new URL(Astro.site!).href.replace(/\/$/, '')}${base}/assets/p
 
 const meta: Array<Record<string, string>> = [
   { name: 'description', content: description },
-  { name: 'theme-color', content: '#060709' },
+  // Default first paint is the Swiss paper ground; the pre-paint script below
+  // re-points this meta at the obsidian ground only when the user opted in.
+  { name: 'theme-color', content: '#F5F4F0' },
   { property: 'og:type', content: 'website' },
   { property: 'og:site_name', content: 'Castor Technologies' },
   { property: 'og:title', content: title },
@@ -61,29 +63,60 @@ const links: Array<Record<string, string>> = [
     <link rel="canonical" href={canonical} />
     {meta.map((m) => <meta {...m} />)}
     {links.map((l) => <link {...l} />)}
+    <script is:inline>
+      // Pre-paint theme restore. Runs inline in <head>, before first paint, so
+      // there is zero flash of the wrong theme:
+      //   · Default is ALWAYS light 'paper' (no attribute) — the signature
+      //     Swiss Industrial Paper aesthetic every first-time visitor sees.
+      //   · data-theme='dark' is applied ONLY when the user explicitly
+      //     saved 'dark' to localStorage via the tactile Light/Dark switch.
+      // Kept is:inline (no bundling) so it executes before the stylesheets
+      // are even parsed; all access is guarded so it can never throw.
+      try {
+        var t = localStorage.getItem('castor-theme');
+        if (t === 'dark') {
+          document.documentElement.setAttribute('data-theme', 'dark');
+          var tm = document.querySelector('meta[name="theme-color"]');
+          if (tm) tm.setAttribute('content', '#07090D');
+        }
+      } catch (e) {
+        /* storage unavailable — fall through to the light default */
+      }
+    </script>
   </head>
   <body>
     <!-- Keyboard-accessible skip link (WCAG 2.4.1): hidden until it receives
          keyboard focus, then it jumps past the sticky header to main content. -->
     <a
       href="#main-content"
-      class="sr-only focus:not-sr-only focus:fixed focus:left-4 focus:top-4 focus:z-[60] focus:border focus:border-hairline focus:bg-raised focus:px-4 focus:py-2 focus:font-mono focus:text-xs focus:text-ink focus:outline focus:outline-2 focus:outline-[var(--border-active)]"
+      class="skip-link sr-only focus:not-sr-only focus:fixed focus:left-4 focus:top-4 focus:z-[60]"
     >
       Skip to content
     </a>
     <slot />
     <script>
-      // Lenis smooth scroll + GSAP ScrollTrigger, plus a restrained
-      // below-the-fold entrance reveal for sections marked `data-reveal`.
-      // Bundled by Vite (content-hashed), executed after DOM parse.
+      // ── Castor motion bootstrap ───────────────────────────────────────
+      // Lenis smooth scroll + GSAP ScrollTrigger, bundled by Vite
+      // (content-hashed) and executed after DOM parse.
+      //
+      // Modules:
+      //   1. Scroll progress   — 2px International Orange bar, GPU-only
+      //                          (scaleX 0→1, origin left center).
+      //   2. Hero line reveal  — [data-hero-reveal] masked lines, 0.6 s
+      //                          power3.out stagger, on load.
+      //   3. Section reveal    — [data-reveal] single elements and
+      //                          [data-stagger-group] children, power3.out,
+      //                          clearProps on completion, 2.5 s safety
+      //                          fallback so nothing can ever stay hidden.
+      //   4. Odometer counters — [data-count-to] integers/decimals/currency,
+      //                          triggered once on viewport entry.
+      //   5. Theme hook        — 'castor:theme-change' CustomEvent for
+      //                          Canvas components re-reading CSS variables.
+      //
       // Hard safety nets:
-      //   · `prefers-reduced-motion: reduce` → no Lenis, no reveal; every
-      //     section stays at opacity 1 (nothing is ever pre-hidden).
-      //   · Above-the-fold content (Header, Hero, first sections) is never
-      //     animated, so the LCP paint is instant.
-      //   · Every reveal tween clears its transform/opacity props on
-      //     completion and a 2.5 s safety timer force-shows any section that
-      //     a flaky mobile scroll event never triggered.
+      //   · prefers-reduced-motion: reduce → no Lenis, no tweens; every
+      //     element stays at opacity 1 and counters jump to final value.
+      //   · Above-the-fold LCP paint is never delayed by reveal setup.
       import Lenis from 'lenis';
       import gsap from 'gsap';
       import { ScrollTrigger } from 'gsap/ScrollTrigger';
@@ -91,26 +124,61 @@ const links: Array<Record<string, string>> = [
 
       // All browser work is wrapped in an SSR guard so the module is safe to
       // evaluate during Astro's static build (no `window` / `matchMedia` on
-      // the server); the Lenis + ScrollTrigger wiring then runs on the
-      // client after DOM parse.
+      // the server); the wiring below runs on the client after DOM parse.
       if (typeof window !== 'undefined') {
         const REDUCED = matchMedia('(prefers-reduced-motion: reduce)');
         let lenis: Lenis | null = null;
-        let revealKilled = false;
+        let motionKilled = false;
 
+        /* 1 ── Scroll progress bar (GPU-only transform) ──────────────── */
+        function initProgress(): void {
+          const bar = document.querySelector<HTMLElement>('.scroll-progress');
+          if (!bar) return;
+          gsap.set(bar, { transformOrigin: 'left center', scaleX: 0 });
+          gsap.to(bar, {
+            scaleX: 1,
+            ease: 'none',
+            scrollTrigger: {
+              start: 0,
+              end: () => ScrollTrigger.maxScroll(window),
+              scrub: 0.3,
+            },
+          });
+        }
+
+        /* 2 ── Hero masked line reveals, on load ─────────────────────── */
+        function initHeroReveal(): void {
+          const lines = Array.from(document.querySelectorAll<HTMLElement>('[data-hero-reveal]'));
+          if (lines.length === 0) return;
+
+          if (REDUCED.matches) {
+            // Never leave a hero line hidden under reduced motion.
+            lines.forEach((el) => gsap.set(el, { clearProps: 'transform,opacity' }));
+            return;
+          }
+
+          gsap.set(lines, { autoAlpha: 0, yPercent: 110 });
+          const tl = gsap.timeline({ delay: 0.05 });
+          lines.forEach((el, i) => {
+            tl.to(el, { autoAlpha: 1, yPercent: 0, duration: 0.6, ease: 'power3.out', clearProps: 'transform,opacity', onStart: () => gsap.set(el, { transformOrigin: 'left' }) }, i * 0.08);
+          });
+          // Failsafe: if a flaky timeline never completes, force the lines
+          // visible. Clearing finished props is a harmless no-op.
+          window.setTimeout(() => {
+            lines.forEach((el) => gsap.set(el, { autoAlpha: 1, clearProps: 'transform,opacity' }));
+          }, 2500);
+        }
+
+        /* 3 ── Below-the-fold reveals: single + stagger groups ───────── */
         function initReveal(): void {
-          if (revealKilled) return;
-          const targets = Array.from(document.querySelectorAll<HTMLElement>('[data-reveal]'));
-          if (targets.length === 0) return;
+          if (motionKilled) return;
+          const singles = Array.from(document.querySelectorAll<HTMLElement>('[data-reveal]'));
+          const groups = Array.from(document.querySelectorAll<HTMLElement>('[data-stagger-group]'));
+          if (singles.length === 0 && groups.length === 0) return;
 
-          const forceShow = (el: HTMLElement): void => {
-            gsap.set(el, { clearProps: 'transform,opacity' });
-          };
-
-          for (const el of targets) {
-            // Sections already on screen at first paint (e.g. a tall desktop
-            // viewport) animate in immediately; below-the-fold ones wait for
-            // the 88% scroll trigger.
+          for (const el of singles) {
+            // Sections already on screen at first paint animate in
+            // immediately; below-the-fold ones wait for the 88% trigger.
             const aboveFold = el.getBoundingClientRect().top < window.innerHeight;
             gsap.fromTo(
               el,
@@ -118,8 +186,8 @@ const links: Array<Record<string, string>> = [
               {
                 opacity: 1,
                 y: 0,
-                duration: 0.55,
-                ease: 'power2.out',
+                duration: 0.6,
+                ease: 'power3.out',
                 clearProps: 'transform,opacity',
                 ...(aboveFold
                   ? { delay: 0.05 }
@@ -132,27 +200,91 @@ const links: Array<Record<string, string>> = [
                     }),
               },
             );
-            // Safety net: no section may stay invisible if scroll events
-            // misbehave. (Clearing props on an already-finished section is a
-            // harmless no-op.)
-            window.setTimeout(() => forceShow(el), 2500);
+            window.setTimeout(() => gsap.set(el, { clearProps: 'transform,opacity' }), 2500);
           }
+
+          for (const group of groups) {
+            const children = Array.from(group.children) as HTMLElement[];
+            const aboveFold = group.getBoundingClientRect().top < window.innerHeight;
+            gsap.fromTo(
+              children,
+              { opacity: 0, y: 14 },
+              {
+                opacity: 1,
+                y: 0,
+                duration: 0.55,
+                ease: 'power3.out',
+                stagger: 0.08,
+                clearProps: 'transform,opacity',
+                ...(aboveFold
+                  ? { delay: 0.05 }
+                  : {
+                      scrollTrigger: {
+                        trigger: group,
+                        start: 'top 85%',
+                        once: true,
+                      },
+                    }),
+              },
+            );
+            window.setTimeout(() => {
+              children.forEach((c) => gsap.set(c, { clearProps: 'transform,opacity' }));
+            }, 2500);
+          }
+
           ScrollTrigger.refresh();
         }
 
-        function killReveal(): void {
-          revealKilled = true;
-          const targets = Array.from(document.querySelectorAll<HTMLElement>('[data-reveal]'));
-          // Kill every ScrollTrigger whose trigger is one of our reveal sections.
-          for (const st of ScrollTrigger.getAll()) {
-            if (targets.includes(st.trigger as HTMLElement)) st.kill();
-          }
-          for (const el of targets) {
-            gsap.killTweensOf(el);
-            gsap.set(el, { clearProps: 'transform,opacity' });
+        /* 4 ── Rolling odometer counters ─────────────────────────────── */
+        function initCounters(): void {
+          const counters = Array.from(document.querySelectorAll<HTMLElement>('[data-count-to]'));
+          if (counters.length === 0) return;
+
+          for (const el of counters) {
+            const target = Number(el.dataset.countTo ?? NaN);
+            if (!Number.isFinite(target)) continue;
+            const decimals = Number(el.dataset.decimals ?? 0);
+            const prefix = el.dataset.prefix ?? '';
+            const suffix = el.dataset.suffix ?? '';
+            const fmt = (v: number): string =>
+              `${prefix}${v.toLocaleString('en-US', { minimumFractionDigits: decimals, maximumFractionDigits: decimals })}${suffix}`;
+
+            if (REDUCED.matches) {
+              // Instant final value — never animate numbers under reduced motion.
+              el.textContent = fmt(target);
+              continue;
+            }
+
+            const state = { v: 0 };
+            gsap.to(state, {
+              v: target,
+              duration: 1.4,
+              ease: 'power3.out',
+              scrollTrigger: {
+                trigger: el,
+                start: 'top 88%',
+                once: true,
+              },
+              snap: { v: decimals > 0 ? 0 : 1 },
+              onUpdate: () => {
+                el.textContent = fmt(state.v);
+              },
+              onComplete: () => {
+                el.textContent = fmt(target);
+              },
+            });
           }
         }
 
+        /* 5 ── Theme-change hook for Canvas components ───────────────── */
+        // Listeners receive the resolved mode and may re-read CSS variables
+        // (getComputedStyle on :root / .instrument-chassis) to re-render.
+        function dispatchThemeChange(): void {
+          const mode: 'dark' | 'paper' = document.documentElement.getAttribute('data-theme') === 'dark' ? 'dark' : 'paper';
+          window.dispatchEvent(new CustomEvent<{ mode: 'dark' | 'paper' }>('castor:theme-change', { detail: { mode } }));
+        }
+
+        /* ── Lenis smooth scroll + ScrollTrigger proxy ───────────────── */
         function init(): void {
           const instance = new Lenis({
             autoRaf: false, // driven by GSAP ticker below
@@ -183,9 +315,35 @@ const links: Array<Record<string, string>> = [
           ScrollTrigger.refresh();
           lenis = instance;
 
-          // Reveal only rides on top of the Lenis virtual scroller, so it is
-          // initialized here (and skipped entirely under reduced motion).
+          initProgress();
+          initHeroReveal();
           initReveal();
+          initCounters();
+          dispatchThemeChange();
+        }
+
+        function killAll(): void {
+          motionKilled = true;
+          const targets = Array.from(
+            document.querySelectorAll<HTMLElement>(
+              '[data-reveal], [data-stagger-group], [data-stagger-group] > *, [data-hero-reveal], .scroll-progress, [data-count-to]',
+            ),
+          );
+          for (const st of ScrollTrigger.getAll()) st.kill();
+          for (const el of targets) {
+            gsap.killTweensOf(el);
+            gsap.set(el, { clearProps: 'transform,opacity' });
+          }
+          // Counters always end on their final value.
+          for (const el of document.querySelectorAll<HTMLElement>('[data-count-to]')) {
+            const target = Number(el.dataset.countTo ?? NaN);
+            if (Number.isFinite(target)) {
+              const decimals = Number(el.dataset.decimals ?? 0);
+              const prefix = el.dataset.prefix ?? '';
+              const suffix = el.dataset.suffix ?? '';
+              el.textContent = `${prefix}${target.toLocaleString('en-US', { minimumFractionDigits: decimals, maximumFractionDigits: decimals })}${suffix}`;
+            }
+          }
         }
 
         function destroy(): void {
@@ -193,10 +351,7 @@ const links: Array<Record<string, string>> = [
             lenis.destroy();
             lenis = null;
           }
-          gsap.globalTimeline.getChildren(true, true, true).forEach((t) => {
-            if (t.scrollTrigger) t.scrollTrigger.kill();
-          });
-          killReveal();
+          killAll();
           ScrollTrigger.refresh();
         }
 
@@ -209,6 +364,11 @@ const links: Array<Record<string, string>> = [
         };
         REDUCED.addEventListener('change', onPref);
         onPref();
+
+        // Web fonts shift metrics on load; re-measure triggers once they settle.
+        if (document.fonts && typeof document.fonts.ready?.then === 'function') {
+          document.fonts.ready.then(() => ScrollTrigger.refresh()).catch(() => {});
+        }
       }
     </script>
   </body>

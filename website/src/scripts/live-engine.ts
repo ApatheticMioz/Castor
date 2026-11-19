@@ -1,15 +1,19 @@
 /*
- * Castor — Live Engine Stage
- * Canvas 2D hardware oscilloscope + synchronized live MCP protocol trace.
+ * Castor — Live Engine Stage (embedded dark OLED hardware bench)
  *
- * Render discipline (anti-slop): 1px hairline gridlines, 1.5px crisp
- * vector strokes, a subtle cobalt gradient fill strictly beneath the
- * prefill trace inside the instrument viewport, and a crisp vertical
- * scanhead marker with a live readout tag. No glows, no filters.
+ *  - Canvas 2D oscilloscope: dual-trace cobalt prefill + amber decode/MTP
+ *    bursts, scanhead callout. DPR capped at 2, IntersectionObserver
+ *    auto-pause offscreen, one rich static frame under reduced motion.
+ *  - Live 48-block VRAM KV-cache memory matrix animating with the mode:
+ *    reused-prefix (cobalt) / active-decode (amber) / free cells.
+ *  - Upgraded MCP protocol console: smooth line streaming with a live
+ *    character-by-character typing effect on the newest line plus a
+ *    blinking amber block cursor on that single active line only.
+ *  - REPLAY restarts a fresh streaming dispatch burst; PAUSE/RESUME
+ *    freezes the simulation clock.
  *
- *  - devicePixelRatio capped at 2.
- *  - rAF loop auto-paused when scrolled offscreen (IntersectionObserver).
- *  - prefers-reduced-motion: one deterministic rich static frame, zero loop.
+ * CRITICAL INVARIANT: every `const` / `let` table and function declaration
+ * in this module lives ABOVE `boot()`, which is wired at the very bottom.
  */
 
 (() => {
@@ -40,11 +44,18 @@
   const CLOUD_COST_PER_TOKEN = 2.18e-6; // blended counterfactual $/token
   const COBALT = '#3B82F6';
   const AMBER = '#F97316';
-  const INK_MUTED = '#646d7D';
+  const BONE = '#F3F5F8';
+  const INK_MUTED = '#646D7D';
   const GRID = 'rgba(255,255,255,0.06)';
   const GRID_STRONG = 'rgba(255,255,255,0.1)';
   const MONO = '"IBM Plex Mono", ui-monospace, monospace';
-  const MODE_SEED: Record<Mode, number> = { warm: 20261119, mtp: 1938427, swarm: 418021 };
+  const KV_CELLS = 48; // VRAM KV-cache memory matrix width
+  // Console typing runs on a 16 ms quantum (≈55 chars/s).
+  const MODE_SEED: Record<Mode, number> = {
+    warm: 20261119,
+    mtp: 1938427,
+    swarm: 418021,
+  };
   const MODE_LABEL: Record<Mode, string> = {
     warm: 'WARM KV PREFILL',
     mtp: 'MTP SPECULATIVE DECODE',
@@ -181,34 +192,34 @@
 
   const TRACE: Record<Mode, TraceLine[]> = {
     warm: [
-      ['[CLOUD → MCP]', 'text-cloud', 'castor_coworker(session: "auth-refactor", cwd: ".")'],
-      ['[DGI GATE]', 'text-ink-muted', 'logP(OVERLOADED) − logP(ADMIT) = −2.41 → ADMIT (warm bypass)'],
-      ['[LOCAL:3090]', 'text-local', 'search_code("verify_token") → 4 files · 94.1% KV prefix hit'],
-      ['[KV POOL]', 'text-cloud', 'prefix match 93.7% · TTFT 3.22 s · 150K pool · no recompute'],
-      ['[CLOUD → MCP]', 'text-cloud', 'castor_coworker(session: "auth-refactor", cwd: ".")'],
-      ['[DGI GATE]', 'text-ink-muted', 'logP(OVERLOADED) − logP(ADMIT) = −2.41 → ADMIT (warm bypass)'],
-      ['[LOCAL:3090]', 'text-local', 'search_code("verify_token") → 4 files · 94.1% KV prefix hit'],
-      ['[KV POOL]', 'text-cloud', 'prefix match 93.7% · TTFT 3.22 s · 150K pool · no recompute'],
+      ['[CLOUD → MCP]', 't-cloud', 'castor_coworker(session: "auth-refactor", cwd: ".")'],
+      ['[DGI GATE]', 't-muted', 'logP(OVERLOADED) − logP(ADMIT) = −2.41 → ADMIT (warm bypass)'],
+      ['[LOCAL:3090]', 't-local', 'search_code("verify_token") → 4 files · 94.1% KV prefix hit'],
+      ['[KV POOL]', 't-cloud', 'prefix match 93.7% · TTFT 3.22 s · 150K pool · no recompute'],
+      ['[CLOUD → MCP]', 't-cloud', 'castor_coworker(session: "auth-refactor", cwd: ".")'],
+      ['[DGI GATE]', 't-muted', 'logP(OVERLOADED) − logP(ADMIT) = −2.41 → ADMIT (warm bypass)'],
+      ['[LOCAL:3090]', 't-local', 'search_code("verify_token") → 4 files · 94.1% KV prefix hit'],
+      ['[KV POOL]', 't-cloud', 'prefix match 93.7% · TTFT 3.22 s · 150K pool · no recompute'],
     ],
     mtp: [
-      ['[CLOUD → MCP]', 'text-cloud', 'castor_coworker(session: "auth-refactor", cwd: ".")'],
-      ['[MTP DRAFT]', 'text-local', 'draft 4 → accept 3.45 tok/step · 70.5% acceptance'],
-      ['[LOCAL:3090]', 'text-local', 'decode burst 139.7 tok/s · spec window +40.9%'],
-      ['[MTP DRAFT]', 'text-local', 'draft 4 → accept 3.45 tok/step · 70.5% acceptance'],
-      ['[CLOUD → MCP]', 'text-cloud', 'castor_coworker(session: "auth-refactor", cwd: ".")'],
-      ['[MTP DRAFT]', 'text-local', 'draft 4 → accept 3.45 tok/step · 70.5% acceptance'],
-      ['[LOCAL:3090]', 'text-local', 'decode burst 139.7 tok/s · spec window +40.9%'],
-      ['[MTP DRAFT]', 'text-local', 'draft 4 → accept 3.45 tok/step · 70.5% acceptance'],
+      ['[CLOUD → MCP]', 't-cloud', 'castor_coworker(session: "auth-refactor", cwd: ".")'],
+      ['[MTP DRAFT]', 't-local', 'draft 4 → accept 3.45 tok/step · 70.5% acceptance'],
+      ['[LOCAL:3090]', 't-local', 'decode burst 139.7 tok/s · spec window +40.9%'],
+      ['[MTP DRAFT]', 't-local', 'draft 4 → accept 3.45 tok/step · 70.5% acceptance'],
+      ['[CLOUD → MCP]', 't-cloud', 'castor_coworker(session: "auth-refactor", cwd: ".")'],
+      ['[MTP DRAFT]', 't-local', 'draft 4 → accept 3.45 tok/step · 70.5% acceptance'],
+      ['[LOCAL:3090]', 't-local', 'decode burst 139.7 tok/s · spec window +40.9%'],
+      ['[MTP DRAFT]', 't-local', 'draft 4 → accept 3.45 tok/step · 70.5% acceptance'],
     ],
     swarm: [
-      ['[CLOUD → MCP]', 'text-cloud', 'castor_coworker(session: "auth-refactor", cwd: ".")'],
-      ['[SLOTS]', 'text-ink', 'O_EXCL slots 4/4 · token budget 150K · 90% soft ceiling'],
-      ['[LOCAL:3090]', 'text-local', 'slot #2 stall 0.4 s · zero-invalidation recovery'],
-      ['[KV POOL]', 'text-cloud', 'shared prefix · 4 sessions · 150K aggregate pool'],
-      ['[CLOUD → MCP]', 'text-cloud', 'castor_coworker(session: "auth-refactor", cwd: ".")'],
-      ['[SLOTS]', 'text-ink', 'O_EXCL slots 4/4 · token budget 150K · 90% soft ceiling'],
-      ['[LOCAL:3090]', 'text-local', 'slot #3 stall 0.4 s · zero-invalidation recovery'],
-      ['[KV POOL]', 'text-cloud', 'shared prefix · 4 sessions · 150K aggregate pool'],
+      ['[CLOUD → MCP]', 't-cloud', 'castor_coworker(session: "auth-refactor", cwd: ".")'],
+      ['[SLOTS]', 't-ink', 'O_EXCL slots 4/4 · token budget 150K · 90% soft ceiling'],
+      ['[LOCAL:3090]', 't-local', 'slot #2 stall 0.4 s · zero-invalidation recovery'],
+      ['[KV POOL]', 't-cloud', 'shared prefix · 4 sessions · 150K aggregate pool'],
+      ['[CLOUD → MCP]', 't-cloud', 'castor_coworker(session: "auth-refactor", cwd: ".")'],
+      ['[SLOTS]', 't-ink', 'O_EXCL slots 4/4 · token budget 150K · 90% soft ceiling'],
+      ['[LOCAL:3090]', 't-local', 'slot #3 stall 0.4 s · zero-invalidation recovery'],
+      ['[KV POOL]', 't-cloud', 'shared prefix · 4 sessions · 150K aggregate pool'],
     ],
   };
 
@@ -370,7 +381,7 @@
     ctx.strokeRect(bx + 0.5, tagY - 8.5, boxW - 1, 17);
     ctx.fillStyle = COBALT;
     ctx.fillRect(bx, tagY - 9, 2, 18);
-    ctx.fillStyle = '#F3F5F8';
+    ctx.fillStyle = BONE;
     ctx.textAlign = 'left';
     ctx.textBaseline = 'middle';
     ctx.fillText(tagText, bx + 8, tagY);
@@ -382,27 +393,142 @@
     ctx.fillText(MODE_LABEL[s.mode], right, bottom - 3);
   }
 
-  /* ── Console streaming ───────────────────────────────────────────── */
+  /* ── Console streaming (char-by-char typed, blinking block cursor) ── */
 
-  function appendConsole(consoleEl: HTMLElement, lines: TraceLine[]): void {
-    const frag = document.createDocumentFragment();
-    for (const [tag, cls, text] of lines) {
-      const row = document.createElement('span');
-      row.className = 'flex gap-2';
-      const tagSpan = document.createElement('span');
-      tagSpan.className = `shrink-0 ${cls}`;
-      tagSpan.textContent = tag;
-      const txt = document.createElement('span');
-      txt.className = 'min-w-0 overflow-hidden text-ellipsis whitespace-nowrap text-ink-secondary';
-      txt.textContent = text;
-      row.append(tagSpan, txt);
-      frag.append(row);
+  interface PendingLine {
+    full: string;
+    shown: number;
+    row: HTMLElement;
+    textSpan: HTMLElement;
+    cursor: HTMLElement;
+  }
+
+  function makeRow(tag: string, cls: string): [HTMLElement, HTMLElement, HTMLElement] {
+    const row = document.createElement('span');
+    row.className = 'flex gap-2 overflow-hidden';
+    const tagSpan = document.createElement('span');
+    tagSpan.className = `shrink-0 ${cls}`;
+    tagSpan.textContent = tag;
+    const txt = document.createElement('span');
+    txt.className = 'min-w-0 overflow-hidden text-ellipsis whitespace-nowrap text-[#949BA8]';
+    const cursor = document.createElement('span');
+    cursor.className = 'c-cursor';
+    cursor.textContent = '▌';
+    row.append(tagSpan, txt, cursor);
+    return [row, txt, cursor];
+  }
+
+  function queueLine(q: PendingLine[], lines: TraceLine[], consoleEl: HTMLElement): void {
+    const [tag, cls, text] = lines[Math.floor(Math.random() * lines.length)];
+    const [row, textSpan, cursor] = makeRow(tag, cls);
+    q.push({ full: text, shown: 0, row, textSpan, cursor });
+    consoleEl.append(row);
+    while (consoleEl.children.length > 5) consoleEl.firstChild?.remove();
+  }
+
+  /**
+   * The amber ▌ block cursor belongs to exactly ONE line: the newest pending
+   * (still-typing) line. Older lines render clean — no stacked cursors.
+   */
+  function setActiveCursor(q: PendingLine[]): void {
+    for (const p of q) p.cursor.style.display = 'none';
+    const active = q[q.length - 1];
+    if (active && active.shown < active.full.length) active.cursor.style.display = 'inline';
+  }
+
+  /** Advance the active (newest) typed line; returns true when a new line
+   *  should be queued. Only the newest line ever shows the cursor. */
+  function typeStep(q: PendingLine[], chars: number): boolean {
+    if (q.length === 0) return true;
+    const active = q[q.length - 1];
+    if (active.shown < active.full.length) {
+      active.shown = Math.min(active.full.length, active.shown + chars);
+      active.textSpan.textContent = active.full.slice(0, active.shown);
+      if (active.shown >= active.full.length) setActiveCursor(q);
+      return false;
     }
-    consoleEl.append(frag);
-    // Keep the visible 5-line window.
-    while (consoleEl.children.length > 5) {
-      consoleEl.firstChild?.remove();
+    // Done with this line: commit it, pop, request next.
+    q.pop();
+    return true;
+  }
+
+  /* ── 48-cell KV-cache memory matrix (10 Hz) ─────────────────────── */
+
+  interface KvFrame {
+    reused: number; // cobalt cells from the left
+    active: number[]; // amber cell indices (active decode)
+  }
+
+  function kvFrame(mode: Mode, s: Sim): KvFrame {
+    if (mode === 'warm') {
+      // 93.7% of the 150K pool is a reused prefix; the trailing edge is
+      // the small active-decode region.
+      const reused = Math.round(
+        (s.kv / 100) * KV_CELLS + (s.rng() - 0.5) * 1.4,
+      );
+      const clamped = Math.max(0, Math.min(KV_CELLS - 3, reused));
+      const tail = KV_CELLS - 3;
+      const active: number[] = [];
+      for (let i = Math.max(clamped, tail); i < KV_CELLS; i++) active.push(i);
+      return { reused: clamped, active };
     }
+    if (mode === 'mtp') {
+      // MTP: reused prefix plus surging amber speculative-decode bursts.
+      const reused = Math.round(92.6 * (KV_CELLS / 100));
+      const burst = s.mtpActive ? 6 + Math.floor(s.rng() * 10) : 3;
+      const active: number[] = [];
+      for (let i = 0; i < Math.min(burst, KV_CELLS - reused); i++) {
+        active.push(reused + i);
+      }
+      return { reused, active };
+    }
+    // Swarm is handled by swarmKvFrame() (4 segmented concurrent bands).
+    return { reused: 0, active: [] };
+  }
+
+  /** Apply a KV frame to the 48 LED cells. */
+  function paintKv(cells: HTMLElement[], frame: KvFrame): void {
+    cells.forEach((c, i) => {
+      let state: '' | 'is-cobalt' | 'is-amber' = '';
+      if (i < frame.reused) state = 'is-cobalt';
+      else if (frame.active.includes(i)) state = 'is-amber';
+      c.classList.remove('is-cobalt', 'is-amber');
+      if (state) c.classList.add(state);
+    });
+  }
+
+  function swarmKvFrame(s: Sim): { reusedSet: Set<number>; active: number[] } {
+    const band = Math.floor(KV_CELLS / 4);
+    const active: number[] = [];
+    const reusedSet = new Set<number>();
+    for (let b = 0; b < 4; b++) {
+      const stalled = s.stallLeft > 0 && s.stallSlot === b;
+      const base = Math.round(band * (stalled ? 0.45 : 0.88 + s.rng() * 0.06));
+      for (let i = 0; i < base; i++) reusedSet.add(b * band + i);
+      const head = Math.min(band - 1, base + (stalled ? 1 : 2));
+      for (let i = base; i < head; i++) active.push(b * band + i);
+    }
+    return { reusedSet, active };
+  }
+
+  function updateKv(
+    cells: HTMLElement[],
+    mode: Mode,
+    s: Sim,
+  ): void {
+    if (mode === 'swarm') {
+      const f = swarmKvFrame(s);
+      cells.forEach((c, i) => {
+        let state: '' | 'is-cobalt' | 'is-amber' = '';
+        if (f.reusedSet.has(i)) state = 'is-cobalt';
+        else if (f.active.includes(i)) state = 'is-amber';
+        c.classList.remove('is-cobalt', 'is-amber');
+        if (state) c.classList.add(state);
+      });
+      return;
+    }
+    const f = kvFrame(mode, s);
+    paintKv(cells, f);
   }
 
   /* ── Boot ────────────────────────────────────────────────────────── */
@@ -411,8 +537,12 @@
     const canvas = root.querySelector<HTMLCanvasElement>('#engine-scope');
     const consoleEl = root.querySelector<HTMLElement>('#engine-console');
     const pauseBtn = root.querySelector<HTMLButtonElement>('#engine-pause');
+    const replayBtn = root.querySelector<HTMLButtonElement>('#engine-replay');
     const modeBtns = Array.from(
       root.querySelectorAll<HTMLButtonElement>('[data-mode]'),
+    );
+    const kvCells = Array.from(
+      root.querySelectorAll<HTMLElement>('#engine-kv-blocks .les-kv'),
     );
     if (!canvas || !consoleEl || !pauseBtn) return;
     const scope: HTMLCanvasElement = canvas;
@@ -450,31 +580,77 @@
       if (readout.cost) readout.cost.textContent = `$${sim.cost.toFixed(3)}`;
     }
 
-    /* Mode switch: restart sim + script, update aria + pressed state */
-    let lineAcc = 0;
+    /* Console: 5-line window, char-by-char typing on the newest line */
+    const pending: PendingLine[] = [];
+    let typeAcc = 0; // ms accumulator → chars
+    function queueNext(): void {
+      const lines = TRACE[mode];
+      const i = Math.floor(Math.random() * lines.length);
+      queueLine(pending, [lines[i]], consoleBox);
+      setActiveCursor(pending);
+    }
+    function seedConsole(): void {
+      consoleBox.replaceChildren();
+      pending.length = 0;
+      const lines = TRACE[mode];
+      if (reduced) {
+        // Steady 5 full lines, no animation, no cursor.
+        for (let i = 0; i < 5; i++) {
+          const [tag, cls, text] = lines[i % lines.length];
+          const [row, txt, cursor] = makeRow(tag, cls);
+          txt.textContent = text;
+          cursor.style.display = 'none';
+          consoleBox.append(row);
+        }
+      } else {
+        for (let i = 0; i < 4; i++) {
+          const [tag, cls, text] = lines[i % lines.length];
+          const [row, txt, cursor] = makeRow(tag, cls);
+          txt.textContent = text; // already-typed history
+          cursor.style.display = 'none';
+          consoleBox.append(row);
+        }
+        queueNext(); // newest line starts typing
+        typeAcc = 0;
+      }
+    }
+    function stepConsole(dt: number): void {
+      if (reduced || paused) return;
+      typeAcc += dt;
+      while (typeAcc >= 16) {
+        typeAcc -= 16; // ~55 chars/s at 16 ms quantum
+        if (typeStep(pending, 1)) {
+          // current line finished → queue the next one
+          queueNext();
+        }
+      }
+    }
+
+    /* Mode switch: restart sim + script, update aria-selected */
     function setMode(next: Mode): void {
       if (next === mode) return;
       mode = next;
       sim = makeSim(mode, reduced);
       trace.length = 0;
-      lineAcc = 0;
       consoleBox.replaceChildren();
+      pending.length = 0;
       for (const b of modeBtns) {
-        const on = b.dataset.mode === next;
-        b.setAttribute('aria-selected', String(on));
-        b.classList.toggle('is-active', on);
+        b.setAttribute('aria-selected', String(b.dataset.mode === next));
       }
-      if (reduced) drawStaticFrame();
-      else seedConsole();
+      if (reduced) {
+        drawStaticFrame();
+      } else {
+        seedConsole();
+      }
+      updateKv(kvCells, mode, sim);
       updateReadout();
     }
 
     for (const b of modeBtns) {
-      b.addEventListener('click', () => {
-        setMode(b.dataset.mode as Mode);
-      });
+      b.addEventListener('click', () => setMode(b.dataset.mode as Mode));
     }
 
+    /* Pause / resume hardware key */
     pauseBtn?.addEventListener('click', () => {
       paused = !paused;
       pauseBtn.setAttribute('aria-pressed', String(paused));
@@ -485,7 +661,6 @@
         rl.style.display = paused ? 'inline' : 'none';
       }
       if (paused) {
-        // Freeze frame: cancel the loop; a fresh frame stays on canvas.
         cancelAnimationFrame(rafId);
       } else if (!reduced) {
         lastTs = 0;
@@ -493,21 +668,24 @@
       }
     });
 
-    /* ── Trace streaming (mode-synced, ~2.1 s per line) ────────────── */
-
-    let cursor = 0;
-    function streamTrace(): void {
-      const lines = TRACE[mode];
-      const [tag, cls, text] = lines[cursor % lines.length];
-      appendConsole(consoleBox, [[tag, cls, text]]);
-      cursor += 1;
-    }
-    function seedConsole(): void {
-      const lines = TRACE[mode];
-      appendConsole(consoleBox, lines.slice(0, 5));
-      cursor = 5;
-      lineAcc = 0;
-    }
+    /* Replay: fresh streaming dispatch burst (new sim + fresh console) */
+    replayBtn?.addEventListener('click', () => {
+      sim = makeSim(mode, reduced);
+      trace.length = 0;
+      if (reduced) {
+        drawStaticFrame();
+      } else {
+        seedConsole();
+        if (paused) {
+          // stay paused but show a fresh frozen frame
+          drawFrame(0.55);
+        } else if (lastTs === 0 && !visible) {
+          lastTs = 0;
+        }
+      }
+      updateKv(kvCells, mode, sim);
+      updateReadout();
+    });
 
     /* ── Main loop (20 Hz sim ticks, rAF-paced) ────────────────────── */
 
@@ -535,25 +713,21 @@
         });
         if (trace.length > WINDOW) trace.shift();
         stepped = true;
-
-        // Console pacing (~2.1 s per line) shares the sim clock.
-        lineAcc += TICK_MS;
-        if (lineAcc >= 2100) {
-          lineAcc -= 2100;
-          streamTrace();
-        }
       }
 
-      // 10 Hz DOM readout updates.
+      // 10 Hz DOM readout + KV matrix updates.
       let needReadout = false;
       while (readoutAcc >= 100) {
         readoutAcc -= 100;
         updateReadout();
+        if (kvCells.length) updateKv(kvCells, mode, sim);
         needReadout = true;
       }
 
+      stepConsole(dt);
+
       if (stepped || needReadout) {
-        drawFrame(((ts % 4200) / 4200));
+        drawFrame((ts % 4200) / 4200);
       }
     }
 
@@ -603,6 +777,7 @@
       // Seed console to a steady 5 lines.
       consoleBox.replaceChildren();
       seedConsole();
+      updateKv(kvCells, mode, sim);
       drawFrame(0.62);
     }
 
@@ -628,6 +803,7 @@
 
     sizeCanvas();
     seedConsole();
+    updateKv(kvCells, mode, sim);
     if (reduced) {
       drawStaticFrame();
     } else {

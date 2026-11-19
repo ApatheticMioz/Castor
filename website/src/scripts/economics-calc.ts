@@ -122,3 +122,25 @@ export function fmtPayback(months: number | null): string {
 export function fmtTokensM(m: number): string {
   return m >= 1000 ? `${(m / 1000).toFixed(2)}B` : `${Math.round(m)}M`;
 }
+
+/* ── Cross-component conversion hook ──────────────────────────────────
+ * The economics instrument publishes its live state on `window` so
+ * downstream conversion surfaces (DeploymentTiers mailto bodies) can
+ * personalize themselves with the visitor's actual workload and savings.
+ * Emitted on every state change (preset click, slider input, model
+ * select, cache toggle) and once at hydration to cover the SSR default.
+ */
+
+export interface EconomicsUpdateDetail {
+  modelName: string;
+  teamSize: number;
+  monthlyTokensM: number;
+  annualSavingsFmt: string;
+  hybridMonthlyFmt: string;
+}
+
+export const ECONOMICS_UPDATE_EVENT = 'castor:economics-update';
+
+export function dispatchEconomicsUpdate(detail: EconomicsUpdateDetail): void {
+  window.dispatchEvent(new CustomEvent<EconomicsUpdateDetail>(ECONOMICS_UPDATE_EVENT, { detail }));
+}

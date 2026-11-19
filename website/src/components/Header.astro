@@ -1,6 +1,6 @@
 ---
 const NAV_LINKS: Array<{ href: string; label: string }> = [
-  { href: '#telemetry', label: 'Telemetry' },
+  { href: '#telemetry', label: 'Benchmarks' },
   { href: '#architecture', label: 'Architecture' },
   { href: '#security', label: 'Sandbox' },
   { href: '#economics', label: 'Economics' },
@@ -14,10 +14,19 @@ const GITHUB_URL = 'https://github.com/ApatheticMioz/Castor';
 const base = import.meta.env.BASE_URL.replace(/\/$/, '');
 ---
 
+<!--
+  Sticky translucent Swiss-paper bar. h-14 lives ONLY on the inner row —
+  never on <header> — so the mobile drawer below it can grow freely
+  without ever being clipped by a fixed-height ancestor.
+-->
 <header
-  class="sticky top-0 z-50 border-b border-hairline bg-[rgba(6,7,9,0.88)] backdrop-blur-[10px]"
+  class="sticky top-0 z-50 border-b border-hairline bg-[color-mix(in_srgb,var(--bg-ground)_90%,transparent)] backdrop-blur-md"
 >
-  <div class="mx-auto flex h-14 max-w-[1360px] items-center gap-4 px-4 sm:px-6 lg:px-8">
+  <div class="relative mx-auto flex h-14 max-w-[1360px] items-center gap-4 px-4 sm:px-6 lg:px-8">
+    <!-- Scroll progress: 2px International Orange reading bar, flush on the
+         bottom edge of the bar row (driven by GSAP in the layout script). -->
+    <div class="scroll-progress" aria-hidden="true"></div>
+
     <!-- Brand -->
     <a href={`${base || '/'}`} class="flex shrink-0 items-center gap-2.5" aria-label="Castor Technologies home">
       <img
@@ -37,7 +46,7 @@ const base = import.meta.env.BASE_URL.replace(/\/$/, '');
       >
     </a>
 
-    <!-- Center nav (md+) -->
+    <!-- Center nav (md+): crisp high-contrast links -->
     <nav aria-label="Primary" class="ml-auto hidden items-center gap-7 md:flex">
       {NAV_LINKS.map((link) => (
         <a
@@ -51,64 +60,85 @@ const base = import.meta.env.BASE_URL.replace(/\/$/, '');
 
     <!-- Right cluster -->
     <div class="ml-auto flex items-center gap-2.5 md:ml-0">
+      <!-- Theme switch: moon in paper mode (→ dark), sun in obsidian mode (→ paper) -->
       <button
         type="button"
-        id="cli-copy"
-        class="tactile-key tactile-key--local hidden items-center gap-2.5 px-3 py-1.5 sm:flex"
+        id="theme-toggle"
+        class="tactile-key flex h-9 w-9 shrink-0 items-center justify-center"
+        aria-label="Toggle Light/Obsidian theme"
+      >
+        <svg
+          id="theme-icon-moon"
+          width="16"
+          height="16"
+          viewBox="0 0 16 16"
+          fill="none"
+          stroke="currentColor"
+          stroke-width="1.4"
+          stroke-linecap="round"
+          stroke-linejoin="round"
+          class="text-ink"
+          aria-hidden="true"
+        >
+          <path d="M13.5 9.8A6 6 0 1 1 6.2 2.5a5 5 0 0 0 7.3 7.3Z" />
+        </svg>
+        <svg
+          id="theme-icon-sun"
+          width="16"
+          height="16"
+          viewBox="0 0 16 16"
+          fill="none"
+          stroke="currentColor"
+          stroke-width="1.4"
+          stroke-linecap="round"
+          class="text-ink"
+          style="display: none;"
+          aria-hidden="true"
+        >
+          <circle cx="8" cy="8" r="3" />
+          <path d="M8 1.5v1.5M8 13v1.5M1.5 8H3M13 8h1.5M3.4 3.4l1 1M11.6 11.6l1 1M12.6 3.4l-1 1M4.4 11.6l-1 1" />
+        </svg>
+      </button>
+
+      <!-- Primary CTA: copies the universal install command -->
+      <button
+        type="button"
+        id="header-copy"
+        class="tactile-btn tactile-btn--primary hidden sm:inline-flex"
         aria-label="Copy install command"
       >
-        <span class="whitespace-nowrap font-mono text-[12px] text-ink"
-          >npx -y mcp-castor install</span
-        >
-        <span class="text-local" aria-hidden="true">
-          <svg
-            width="13"
-            height="13"
-            viewBox="0 0 16 16"
-            fill="none"
-            stroke="currentColor"
-            stroke-width="1.5"
-            class="inline-block"
-          >
-            <rect x="5.5" y="5.5" width="8.5" height="8.5" />
-            <path d="M10.5 5.5v-3h-8v8h3" />
-          </svg>
-        </span>
-        <span
-          class="text-ok"
-          aria-hidden="true"
-          style="display: none;"
-        >
-          <svg width="13" height="13" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.8">
-            <path d="M3 8.5 6.5 12 13 4.5" />
-          </svg>
+        <span data-copy-label>COPY INSTALL</span>
+        <span data-copy-done class="whitespace-nowrap" style="display: none;">
+          COPIED ✓
         </span>
       </button>
 
+      <!-- GitHub: hidden on tiny xs, lives inside the drawer on mobile -->
       <a
         href={GITHUB_URL}
-        class="tactile-key hidden items-center gap-2 px-3 py-1.5 sm:flex"
+        target="_blank"
+        rel="noreferrer"
+        class="tactile-btn tactile-btn--secondary hidden sm:inline-flex"
       >
         <svg
           width="14"
           height="14"
           viewBox="0 0 16 16"
           fill="currentColor"
-          class="text-ink"
           aria-hidden="true"
         >
           <path
             d="M8 0C3.58 0 0 3.58 0 8c0 3.54 2.29 6.53 5.47 7.59.4.07.55-.17.55-.38 0-.19-.01-.82-.01-1.49-2.01.37-2.53-.49-2.69-.94-.09-.23-.48-.94-.82-1.13-.28-.15-.68-.52-.01-.53.63-.01 1.08.58 1.23.82.72 1.21 1.89.87 2.36.66.07-.52.28-.87.51-1.07-1.78-.2-3.64-.89-3.64-3.95 0-.87.31-1.59.82-2.15-.08-.2-.36-1.02.08-2.12 0 0 .67-.21 2.2.82.64-.18 1.32-.27 2-.27s1.36.09 2 .27c1.53-1.04 2.2-.82 2.2-.82.44 1.1.16 1.92.08 2.12.51.56.82 1.27.82 2.15 0 3.07-1.87 3.75-3.65 3.95.29.25.54.73.54 1.48 0 1.07-.01 1.93-.01 2.2 0 .21.15.46.55.38A8.01 8.01 0 0 0 16 8c0-4.42-3.58-8-8-8Z"
           />
         </svg>
-        <span class="font-mono text-[12px] text-ink-secondary">GitHub</span>
+        <span>GitHub</span>
       </a>
 
       <!-- Mobile hamburger -->
       <button
         type="button"
         id="nav-toggle"
-        class="tactile-key flex h-9 w-9 items-center justify-center md:hidden"
+        class="tactile-key flex h-9 w-9 shrink-0 items-center justify-center md:hidden"
         aria-expanded="false"
         aria-controls="mobile-nav"
         aria-label="Toggle navigation menu"
@@ -129,12 +159,9 @@ const base = import.meta.env.BASE_URL.replace(/\/$/, '');
     </div>
   </div>
 
-  <!-- Mobile dropdown nav: renders crisply below the 56px header bar -->
-  <div
-    id="mobile-nav"
-    class="relative z-50 border-b border-[var(--border-strong)] bg-[#0B0D11] md:hidden"
-    hidden
-  >
+  <!-- Mobile drawer: theme-aware surfaces only (bg-surface / border-strong
+       resolve per data-theme) — zero hardcoded hex anywhere in this file. -->
+  <div id="mobile-nav" class="relative z-50 border-b border-strong bg-surface md:hidden" hidden>
     <nav aria-label="Mobile" class="flex flex-col">
       {NAV_LINKS.map((link) => (
         <a
@@ -146,39 +173,62 @@ const base = import.meta.env.BASE_URL.replace(/\/$/, '');
         </a>
       ))}
     </nav>
+    <div class="flex items-center gap-2.5 border-t border-hairline px-4 py-3">
+      <button
+        type="button"
+        id="drawer-copy"
+        class="tactile-btn tactile-btn--primary"
+        aria-label="Copy install command"
+      >
+        <span data-copy-label>COPY INSTALL</span>
+        <span data-copy-done class="whitespace-nowrap" style="display: none;">
+          COPIED ✓
+        </span>
+      </button>
+      <a
+        href={GITHUB_URL}
+        target="_blank"
+        rel="noreferrer"
+        class="tactile-btn tactile-btn--secondary"
+        data-close-nav
+      >
+        GitHub
+      </a>
+    </div>
   </div>
 </header>
 
 <script>
-  // CLI chip: copies the full install command with a crisp checkmark state.
+  // ── Header copy buttons (bar CTA + drawer CTA) ──────────────────────
   (() => {
-    const btn = document.getElementById('cli-copy');
-    if (!btn) return;
     const COPY = 'npx -y mcp-castor install --client all';
-    const [iconCopy, iconCheck] =
-      btn.querySelectorAll<HTMLSpanElement>('span[aria-hidden]');
-    let timer = 0;
+    const timer: Record<string, number> = {};
 
-    btn.addEventListener('click', async () => {
-      try {
-        await navigator.clipboard.writeText(COPY);
-      } catch {
-        // Clipboard API unavailable (e.g. non-secure context): degrade silently.
-        return;
-      }
-      iconCopy.style.display = 'none';
-      iconCheck.style.display = 'inline-block';
-      btn.setAttribute('aria-label', 'Copied');
-      window.clearTimeout(timer);
-      timer = window.setTimeout(() => {
-        iconCopy.style.display = 'inline-block';
-        iconCheck.style.display = 'none';
-        btn.setAttribute('aria-label', 'Copy install command');
-      }, 1800);
-    });
+    for (const btn of document.querySelectorAll<HTMLButtonElement>('#header-copy, #drawer-copy')) {
+      const label = btn.querySelector<HTMLSpanElement>('[data-copy-label]');
+      const done = btn.querySelector<HTMLSpanElement>('[data-copy-done]');
+      if (!label || !done) continue;
+
+      const show = (copied: boolean) => {
+        label.style.display = copied ? 'none' : 'inline';
+        done.style.display = copied ? 'inline' : 'none';
+        btn.setAttribute('aria-label', copied ? 'Copied' : 'Copy install command');
+      };
+
+      btn.addEventListener('click', async () => {
+        try {
+          await navigator.clipboard.writeText(COPY);
+        } catch {
+          /* non-secure context — degrade silently */
+        }
+        show(true);
+        window.clearTimeout(timer[btn.id]);
+        timer[btn.id] = window.setTimeout(() => show(false), 1800);
+      });
+    }
   })();
 
-  // Mobile hamburger toggle.
+  // ── Mobile hamburger: open/close, Escape, link-click close ──────────
   (() => {
     const toggle = document.getElementById('nav-toggle');
     const panel = document.getElementById('mobile-nav');
@@ -194,7 +244,55 @@ const base = import.meta.env.BASE_URL.replace(/\/$/, '');
       a.addEventListener('click', () => set(false)),
     );
     document.addEventListener('keydown', (e) => {
-      if (e.key === 'Escape' && !panel.hidden) set(false);
+      if (e.key === 'Escape' && !panel.hidden) {
+        set(false);
+        toggle.focus();
+      }
     });
+  })();
+
+  // ── Theme switch: paper ↔ obsidian ───────────────────────────────────
+  // Mirrors the layout's pre-paint restore exactly:
+  //   'paper' → <html> without data-theme, theme-color #F5F4F0
+  //   'dark'  → <html data-theme="dark">,     theme-color #07090D
+  // and re-broadcasts 'castor:theme-change' so embedded OLED canvases can
+  // re-read CSS variables if they care (the instrument surface itself is
+  // hardware-constant and unaffected).
+  (() => {
+    const btn = document.getElementById('theme-toggle');
+    const moon = document.getElementById('theme-icon-moon') as SVGElement | null;
+    const sun = document.getElementById('theme-icon-sun') as SVGElement | null;
+    if (!btn || !moon || !sun) return;
+
+    const isDark = () =>
+      document.documentElement.getAttribute('data-theme') === 'dark';
+
+    const syncIcons = () => {
+      const dark = isDark();
+      moon.style.display = dark ? 'none' : 'block';
+      sun.style.display = dark ? 'block' : 'none';
+    };
+
+    const setMode = (mode: 'dark' | 'paper') => {
+      const root = document.documentElement;
+      if (mode === 'dark') root.setAttribute('data-theme', 'dark');
+      else root.removeAttribute('data-theme');
+      try {
+        localStorage.setItem('castor-theme', mode);
+      } catch {
+        /* storage unavailable — theme still applies for this session */
+      }
+      const meta = document.querySelector('meta[name="theme-color"]');
+      if (meta) meta.setAttribute('content', mode === 'dark' ? '#07090D' : '#F5F4F0');
+      syncIcons();
+      window.dispatchEvent(
+        new CustomEvent('castor:theme-change', { detail: { mode } }),
+      );
+    };
+
+    btn.addEventListener('click', () => setMode(isDark() ? 'paper' : 'dark'));
+    // Stay in sync if anything else flips the theme.
+    window.addEventListener('castor:theme-change', syncIcons);
+    syncIcons();
   })();
 </script>
