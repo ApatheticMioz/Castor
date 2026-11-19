@@ -32,9 +32,9 @@ castor_kill_stale() {
 # script's own location (lib.sh lives in scripts/wsl/, so its grandparent is
 # the repo root) so the checkout is portable with no hardcoded drive letters.
 castor_resolve_dirs() {
-  local script_dir
-  script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-  ECOSYSTEM_ROOT="$(cd "${script_dir}/../.." && pwd)"
+  local script_path
+  script_path="$(readlink -f "${BASH_SOURCE[0]}")"
+  ECOSYSTEM_ROOT="$(cd "$(dirname "$script_path")/../.." && pwd)"
   QWEN_SERVING_DIR="${QWEN_SERVING_DIR:-$HOME/qwen-serving}"
   cd "$QWEN_SERVING_DIR" || return 1
 }
@@ -46,6 +46,6 @@ castor_spawn_proxy() {
   local castor_bin="${ECOSYSTEM_ROOT}/target/release/castor"
   [ -f "$castor_bin" ] || castor_bin="${ECOSYSTEM_ROOT}/target/debug/castor"
   if [ -f "$castor_bin" ]; then
-    setsid "$castor_bin" proxy < /dev/null > "$CASTOR_PROXY_LOG" 2>&1 &
+    CASTOR_VISION="${CASTOR_VISION:-${VISION:-0}}" setsid "$castor_bin" proxy < /dev/null > "$CASTOR_PROXY_LOG" 2>&1 &
   fi
 }

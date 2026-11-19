@@ -2,10 +2,9 @@
 # vLLM + DFlash2 + KVarN, CTX=huge: 245,760 context.
 # Serves the 1:1 Symmetric Uncensored Qwen3.8-27B (AutoRound) via HyperQwen on port 18020.
 set -e
-pkill -9 -f 'vllm serve' 2>/dev/null || true
-pkill -9 -f EngineCore 2>/dev/null || true
-sleep 3
-cd ~/qwen-serving
+source "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")/lib.sh"
+castor_kill_stale
+castor_resolve_dirs
 
 # Point to the uncensored model directory
 export MODEL="${MODEL:-$HOME/qwen-uncensored/model}"
@@ -27,14 +26,5 @@ if [ -z "${EXTRA_ARGS:-}" ]; then
 fi
 
 # Universal Stateful UTF-8 & SSE Stream Sanitizer Proxy (port 18022 -> 18020)
-SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-ECOSYSTEM_ROOT="$(cd "${SCRIPT_DIR}/../.." && pwd)"
-CASTOR_BIN="${ECOSYSTEM_ROOT}/target/release/castor"
-if [ ! -f "$CASTOR_BIN" ]; then
-  CASTOR_BIN="${ECOSYSTEM_ROOT}/target/debug/castor"
-fi
-if [ -f "$CASTOR_BIN" ]; then
-  pkill -9 -f 'castor proxy' 2>/dev/null || true
-  setsid "$CASTOR_BIN" proxy < /dev/null > /tmp/stream_proxy.log 2>&1 &
-fi
+castor_spawn_proxy
 exec bash single-user/start_qwen.sh

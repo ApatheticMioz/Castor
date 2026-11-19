@@ -4,7 +4,7 @@
 # Measured Upstream: 280.9 tok/s aggregate @ C4 (~70 tok/s per stream)
 set -e
 # Common setup: kill stale vLLM/EngineCore, resolve dirs, spawn `castor proxy`.
-source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/lib.sh"
+source "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")/lib.sh"
 castor_kill_stale
 castor_resolve_dirs
 
