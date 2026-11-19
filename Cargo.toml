@@ -4,8 +4,8 @@ version = "1.5.0"
 edition = "2024"
 license = "AGPL-3.0-only"
 description = "Castor: Rust MCP toolchain, proxy, and evo engine"
-repository = "https://github.com/ApatheticMioz/Castor"
-homepage = "https://github.com/ApatheticMioz/Castor#readme"
+repository = "https://github.com/usecastor/castor"
+homepage = "https://usecastor.github.io"
 keywords = ["mcp", "model-context-protocol", "agent-harness", "rust", "pair-programming"]
 categories = ["development-tools", "command-line-utilities", "asynchronous"]
 

@@ -143,4 +143,4 @@ That's it. For engine profiles, manual MCP config, and per-engine notes, see **[
 
 **[AGPL-3.0](LICENSE)** open source. Network-deployed modifications must publish their source.
 
-**Commercial dual-licensing** is available for proprietary embedding without copyleft obligations. Contact [`ApatheticMioz@gmail.com`](mailto:ApatheticMioz@gmail.com).
+**Commercial dual-licensing** is available for proprietary embedding without copyleft obligations. Contact [`m.abdullah.ali.2523@gmail.com`](mailto:m.abdullah.ali.2523@gmail.com).

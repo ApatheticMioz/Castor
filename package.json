@@ -15,12 +15,12 @@
   ],
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/ApatheticMioz/Castor.git"
+    "url": "git+https://github.com/usecastor/castor.git"
   },
   "bugs": {
-    "url": "https://github.com/ApatheticMioz/Castor/issues"
+    "url": "https://github.com/usecastor/castor/issues"
   },
-  "homepage": "https://github.com/ApatheticMioz/Castor#readme",
+  "homepage": "https://usecastor.github.io",
   "keywords": [
     "mcp",
     "model-context-protocol",
