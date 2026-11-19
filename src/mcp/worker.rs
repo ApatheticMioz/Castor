@@ -317,38 +317,48 @@ pub async fn run_job_with_engine(
     // 3. Acquire execution slot (token-budgeted). The pool's total budget is
     //    `max_context`: the unified admission rule caps the *sum* of every
     //    live lease's context tokens at that budget, so concurrent streams
-    //    never overcommit the engine's aggregate KV window. (There is no
-    //    separate static per-slot overhead — each lease's own context
-    //    footprint is its full cost, tracked per turn via
-    //    `update_context_tokens`.)
+    //    never overcommit the engine's aggregate KV window. Include built-in
+    //    tool schemas in the pre-slot `/tokenize` count so Turn-1 admission
+    //    and resume watermarking match `run_session`.
     let sem = TaskSemaphore::new(state, max_slots).with_token_budget(max_ctx);
+    let builtin_tools = crate::tools::builtin_tool_schemas();
 
-    // Include any resumed-history tokens so the slot's initial budget reflects
-    // the true working set (prefix + history + new prompt). Prefer the engine's
-    // exact `/tokenize` count when available; fall back to local sizing only for
-    // offline/non-vLLM engines.
     let initial_tokens = {
         let mut init_msgs = vec![runner::messages::msg("system", &system_prompt)];
-        let mut has_history = false;
         if let Some(history) = runner::context::load_messages(state, &spec.session_id)
             && !history.is_empty()
-            && runner::context::should_resume(&history, &spec.prompt, max_ctx as usize)
         {
-            init_msgs.extend(history);
-            has_history = true;
+            let mut candidate = Vec::with_capacity(1 + history.len() + 1);
+            candidate.push(runner::messages::msg("system", &system_prompt));
+            candidate.extend(history.iter().cloned());
+            candidate.push(runner::messages::msg("user", &spec.prompt));
+            let fits_watermark = if max_ctx > 0 {
+                if let Some(exact) = engine.count_tokens(&candidate, &builtin_tools).await {
+                    exact <= runner::context::watermark_tokens(max_ctx as usize)
+                } else {
+                    runner::context::should_resume(&history, &spec.prompt, max_ctx as usize)
+                }
+            } else {
+                true
+            };
+            if fits_watermark {
+                init_msgs.extend(history);
+            }
         }
         init_msgs.push(runner::messages::msg("user", &spec.prompt));
-        if let Some(exact) = engine.count_tokens(&init_msgs, &[]).await {
+        if let Some(exact) = engine.count_tokens(&init_msgs, &builtin_tools).await {
             exact.min(u32::MAX as usize) as u32
         } else {
+            let has_history = init_msgs.len() > 2;
             let resumed_tokens = if has_history {
                 runner::context::resumed_history_tokens(state, &spec.session_id, Some(max_ctx))
             } else {
                 0
             };
-            let prompt_tokens = runner::context::uncounted_tail_tokens(&[
-                runner::messages::msg("user", &spec.prompt),
-            ]) as u32;
+            let prompt_tokens = runner::context::uncounted_tail_tokens(&[runner::messages::msg(
+                "user",
+                &spec.prompt,
+            )]) as u32;
             prompt_tokens.saturating_add(resumed_tokens)
         }
     };
@@ -469,17 +479,14 @@ pub async fn run_job_with_engine(
             } else {
                 TaskStatus::Failed
             };
-            let reason = if terminal_status == TaskStatus::Failed && session_res.final_text.is_empty() {
-                format!("[Task ended with status: {}]", session_res.status)
-            } else {
-                session_res.final_text.clone()
-            };
+            let reason =
+                if terminal_status == TaskStatus::Failed && session_res.final_text.is_empty() {
+                    format!("[Task ended with status: {}]", session_res.status)
+                } else {
+                    session_res.final_text.clone()
+                };
             let _ = registry
-                .transition(
-                    &spec.task_id,
-                    terminal_status,
-                    Some(reason),
-                )
+                .transition(&spec.task_id, terminal_status, Some(reason))
                 .await;
             let guard = shared_lease.lock().unwrap();
             let _ = sem.release(&guard);
@@ -880,7 +887,10 @@ mod tests {
             .find("Security & Authority:")
             .expect("invariant present");
         let p_workspace = prompt.find("[Workspace]").expect("workspace present");
-        assert!(p_inv < p_workspace, "invariant must sit in the static block, before [Workspace]");
+        assert!(
+            p_inv < p_workspace,
+            "invariant must sit in the static block, before [Workspace]"
+        );
     }
 
     #[tokio::test]

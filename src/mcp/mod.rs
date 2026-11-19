@@ -256,7 +256,7 @@ impl CastorMcpServer {
         let cwd = params.cwd.trim().to_string();
         if cwd.is_empty() {
             return CallToolResult::error(vec![ContentBlock::text(
-                "Missing required parameter: cwd (working directory must be an explicit path)"
+                "Missing required parameter: cwd (working directory must be an explicit path)",
             )]);
         }
 
@@ -574,7 +574,8 @@ impl CastorMcpServer {
                 }
             }
             "stats" => {
-                let stats = crate::telemetry::rollup::derive_stats(state.root(), &Default::default());
+                let stats =
+                    crate::telemetry::rollup::derive_stats(state.root(), &Default::default());
                 let text = format!(
                     "# Castor Telemetry Stats\n\
                      - total_prompt_tokens: {}\n\
@@ -1011,7 +1012,9 @@ mod tests {
                 .collect::<Vec<_>>()
         });
         assert!(
-            required.as_ref().is_some_and(|r| r.contains(&"prompt") && r.contains(&"cwd")),
+            required
+                .as_ref()
+                .is_some_and(|r| r.contains(&"prompt") && r.contains(&"cwd")),
             "coworker schema must require `prompt` and `cwd`, got {required:?}"
         );
 
@@ -1053,8 +1056,22 @@ mod tests {
         tokio::process::ChildStdin,
     ) {
         let ext = std::env::consts::EXE_SUFFIX;
-        let bin = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        let mut bin = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
             .join(format!("target/debug/castor{ext}"));
+        if let Ok(exe) = std::env::current_exe() {
+            for ancestor in exe.ancestors().skip(1) {
+                let candidate = ancestor.join(format!("castor{ext}"));
+                if candidate.is_file() {
+                    bin = candidate;
+                    break;
+                }
+                let debug_candidate = ancestor.join("debug").join(format!("castor{ext}"));
+                if debug_candidate.is_file() {
+                    bin = debug_candidate;
+                    break;
+                }
+            }
+        }
         let mut cmd = tokio::process::Command::new(&bin);
         cmd.args(args);
         cmd.stdin(std::process::Stdio::piped());
