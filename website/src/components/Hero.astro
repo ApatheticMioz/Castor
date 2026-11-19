@@ -1,0 +1,189 @@
+---
+import LiveEngineStage from './LiveEngineStage.astro';
+import { LEDGER_76DAY, formatUsd } from '../data/telemetry';
+
+const GITHUB_URL = 'https://github.com/ApatheticMioz/Castor';
+
+const ledgerCells: Array<{
+  value: string;
+  label: string;
+  accent: string;
+  sub: string;
+}> = [
+  {
+    value: LEDGER_76DAY.totalTokensDisplay,
+    label: 'TOKENS PROCESSED (76D)',
+    accent: 'text-ink',
+    sub: `${LEDGER_76DAY.windowStart} → ${LEDGER_76DAY.windowEnd} · castor stats`,
+  },
+  {
+    value: `${LEDGER_76DAY.cacheHitPct}%`,
+    label: 'KV PREFIX CACHE HIT',
+    accent: 'text-cloud',
+    sub: `${LEDGER_76DAY.cachedTokensDisplay} cached of ${LEDGER_76DAY.promptTokensDisplay} prompt`,
+  },
+  {
+    value: '$5,703',
+    label: 'NET SAVED VS CLOUD',
+    accent: 'text-ok',
+    sub: `${LEDGER_76DAY.netSavingsPct}% vs ${formatUsd(LEDGER_76DAY.cloudCounterfactualUsd)} API counterfactual`,
+  },
+];
+---
+
+<section class="mx-auto max-w-[1360px] px-4 pb-16 pt-10 sm:px-6 lg:px-8 lg:pb-24 lg:pt-16">
+  <div class="grid grid-cols-1 items-start gap-8 lg:grid-cols-12 lg:gap-10">
+    <!-- Left column: headline, subhead, installer, ledger -->
+    <div class="lg:col-span-5">
+      <p
+        class="font-mono text-[11px] uppercase tracking-[0.14em] text-ink-muted"
+      >
+        RUST MCP MICROKERNEL · AGPL-3.0 · LOCAL SILICON PEER
+      </p>
+
+      <h1
+        class="mt-4 font-display text-[clamp(2.5rem,5vw,4.25rem)] font-bold leading-[0.98] tracking-[-0.035em] text-ink"
+      >
+        Keep your frontier model. Stop paying it to read files.
+      </h1>
+
+      <p
+        class="mt-5 max-w-[46ch] font-sans text-[16px] leading-[1.6] text-ink-secondary sm:text-[17px]"
+      >
+        Castor pairs your cloud Lead Architect (Claude Opus 5.5, Fable 5.2,
+        Gemini 4 Neon, GPT-6.2 Astra) with
+        <code
+          class="rounded-[3px] border border-hairline bg-recessed px-1.5 py-0.5 font-mono text-[0.85em] text-ink"
+          >Qwen3.8-27B</code
+        >
+        running locally on your GPU — offloading file exploration, AST edits,
+        and test loops at near-zero marginal cost inside a 5-layer sandbox.
+      </p>
+
+      <!-- Tactile command-line installer -->
+      <div
+        class="tactile-key mt-6 flex w-full items-start gap-3 px-4 py-3"
+      >
+        <span class="shrink-0 pt-0.5 font-mono text-[15px] leading-snug text-local" aria-hidden="true"
+          >$</span
+        >
+        <code
+          id="hero-cmd"
+          class="min-w-0 flex-1 whitespace-normal font-mono text-[11px] leading-snug text-ink [scrollbar-width:none] [&::-webkit-scrollbar]:hidden sm:text-[13px]"
+          >npx -y mcp-castor install <span class="whitespace-nowrap">--client all</span></code
+        >
+        <button
+          type="button"
+          id="hero-copy"
+          class="tactile-key tactile-key--local relative shrink-0 px-3.5 py-1.5 font-mono text-[12px] text-ink"
+          aria-label="Copy install command"
+        >
+          <span data-copy-label>COPY</span>
+          <span data-copy-done class="text-ok" style="display: none;">
+            COPIED
+          </span>
+          <svg
+            data-copy-check
+            class="absolute -top-2 -right-2"
+            style="display: none;"
+            width="16"
+            height="16"
+            viewBox="0 0 16 16"
+            fill="var(--bg-ground)"
+            aria-hidden="true"
+          >
+            <path
+              d="M3 8.5 6.5 12 13 4.5"
+              fill="none"
+              stroke="var(--signal-ok)"
+              stroke-width="1.8"
+              stroke-linecap="square"
+            />
+          </svg>
+        </button>
+      </div>
+
+      <!-- Secondary inline row -->
+      <div class="mt-4 flex flex-wrap items-center gap-x-6 gap-y-2">
+        <a
+          href={GITHUB_URL}
+          class="font-mono text-[13px] text-ink-secondary transition-colors duration-150 hover:text-local"
+        >
+          View on GitHub →
+        </a>
+        <a
+          href="#deploy"
+          class="font-mono text-[13px] text-ink-secondary transition-colors duration-150 hover:text-local"
+        >
+          Enterprise Air-Gap Pilot →
+        </a>
+      </div>
+
+      <!-- Live ledger strip (3-cell 1px-gap spec grid, sourced from LEDGER_76DAY) -->
+      <div class="spec-grid mt-8 grid-cols-3">
+        {ledgerCells.map((cell) => (
+          <div class="p-3">
+            <p
+              class={`tabular font-display text-xl font-bold tracking-tight sm:text-[1.6rem] ${cell.accent}`}
+            >
+              {cell.value}
+            </p>
+            <p
+              class="mt-1 font-mono text-[10px] uppercase tracking-[0.1em] leading-[1.4] text-ink-muted"
+            >
+              {cell.label}
+            </p>
+            <p class="tabular mt-1 font-mono text-[10px] leading-[1.4] text-ink-secondary">
+              {cell.sub}
+            </p>
+          </div>
+        ))}
+      </div>
+    </div>
+
+    <!-- Right column: alive hardware instrument -->
+    <div class="lg:col-span-7">
+      <LiveEngineStage />
+    </div>
+  </div>
+
+  <script>
+    // Copy-to-clipboard for the hero installer bar.
+    (() => {
+      const btn = document.getElementById('hero-copy');
+      const code = document.getElementById('hero-cmd');
+      if (!btn || !code) return;
+
+      const label = btn.querySelector<HTMLSpanElement>('[data-copy-label]');
+      const done = btn.querySelector<HTMLSpanElement>('[data-copy-done]');
+      const check = btn.querySelector<SVGElement>('[data-copy-check]');
+      let timer = 0;
+
+      const show = (copied: boolean) => {
+        if (!label || !done || !check) return;
+        label.style.display = copied ? 'none' : 'inline';
+        done.style.display = copied ? 'inline' : 'none';
+        check.style.display = copied ? 'block' : 'none';
+        btn.setAttribute('aria-label', copied ? 'Copied' : 'Copy install command');
+      };
+
+      btn.addEventListener('click', async () => {
+        const text = code.textContent ?? '';
+        try {
+          await navigator.clipboard.writeText(text);
+        } catch {
+          // Non-secure context: transient select for manual copy.
+          const range = document.createRange();
+          range.selectNodeContents(code);
+          const sel = window.getSelection();
+          sel?.removeAllRanges();
+          sel?.addRange(range);
+          window.setTimeout(() => sel?.removeAllRanges(), 2000);
+        }
+        show(true);
+        window.clearTimeout(timer);
+        timer = window.setTimeout(() => show(false), 2000);
+      });
+    })();
+  </script>
+</section>

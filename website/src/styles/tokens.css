@@ -1,0 +1,38 @@
+/*
+ * Castor — Design Tokens
+ * Obsidian Hardware Instrument Chassis
+ * Ground truth: November 19, 2026
+ */
+:root {
+  /* ── Chassis surfaces ─────────────────────────────── */
+  --bg-ground: #060709;
+  --bg-recessed: #0b0d11;
+  --bg-raised: #11141b;
+  --bg-elevated: #171b24;
+
+  /* ── Borders ──────────────────────────────────────── */
+  --border-hairline: rgba(255, 255, 255, 0.08);
+  --border-strong: rgba(255, 255, 255, 0.16);
+  --border-active: rgba(255, 255, 255, 0.28);
+
+  /* ── Ink ──────────────────────────────────────────── */
+  --ink-primary: #f3f5f8;
+  --ink-secondary: #949ba8;
+  --ink-muted: #646d7d;
+
+  /* ── Signals ──────────────────────────────────────── */
+  --signal-local: #f97316; /* Amber — local silicon / RTX 3090 / speculative decode / primary CTA */
+  --signal-local-dim: rgba(249, 115, 22, 0.14);
+  --signal-cloud: #3b82f6; /* Cobalt — cloud lead architect / MCP bridge / prefix cache hit */
+  --signal-cloud-dim: rgba(59, 130, 246, 0.14);
+  --signal-ok: #22c55e; /* Technical PASS / exit 0 only */
+  --signal-block: #ef4444; /* Security refusal indicator only */
+
+  /* ── Typography (bound to Tailwind v4 @theme in global.css) ── */
+  --font-display: 'Archivo Variable', system-ui, sans-serif;
+  --font-sans: 'IBM Plex Sans', system-ui, sans-serif;
+  --font-mono: 'IBM Plex Mono', ui-monospace, monospace;
+
+  /* ── Metric system: 1px hairline gap grid ─────────── */
+  --gap-hairline: 1px;
+}

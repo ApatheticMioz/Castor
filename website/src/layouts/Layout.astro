@@ -1,0 +1,215 @@
+---
+// Fontsource — latin subsets only. The full per-weight bundles (400.css …
+// 700.css) ship Cyrillic / Cyrillic-ext / Greek / Vietnamese woff2 files
+// (≈4.3 MB across IBM Plex Sans + Mono) that a Latin-only English site never
+// renders. Importing the `<subset>-<weight>.css` files keeps dist/ to the
+// handful of woff2 files the browser can actually match. Archivo is a
+// variable font: `wght.css` carries its vietnamese / latin-ext / latin
+// @font-face blocks, of which only `latin` is downloadable on this page.
+import '@fontsource-variable/archivo/wght.css';
+import '@fontsource/ibm-plex-sans/latin-400.css';
+import '@fontsource/ibm-plex-sans/latin-500.css';
+import '@fontsource/ibm-plex-sans/latin-600.css';
+import '@fontsource/ibm-plex-sans/latin-700.css';
+import '@fontsource/ibm-plex-mono/latin-400.css';
+import '@fontsource/ibm-plex-mono/latin-500.css';
+import '@fontsource/ibm-plex-mono/latin-600.css';
+import '../styles/global.css';
+
+interface Props {
+  title: string;
+  description: string;
+}
+
+const { title, description } = Astro.props;
+// Deployment base path: '/' on Vercel, '/Castor' on GitHub Pages.
+// BASE_URL is injected by Astro from `base` in astro.config.mjs; stripping the
+// trailing slash keeps `${base}/assets/...` free of double slashes at both
+// targets.
+const base = import.meta.env.BASE_URL.replace(/\/$/, '');
+const siteRoot = Astro.site ? new URL('', Astro.site) : new URL('http://localhost');
+const canonical = new URL(Astro.url.pathname, siteRoot).href;
+// OG image absolute URL: site origin + deployment base + asset path.
+const ogImage = `${new URL(Astro.site!).href.replace(/\/$/, '')}${base}/assets/pure1_dioscuri_dyad.svg`;
+
+const meta: Array<Record<string, string>> = [
+  { name: 'description', content: description },
+  { name: 'theme-color', content: '#060709' },
+  { property: 'og:type', content: 'website' },
+  { property: 'og:site_name', content: 'Castor Technologies' },
+  { property: 'og:title', content: title },
+  { property: 'og:description', content: description },
+  { property: 'og:url', content: canonical },
+  { property: 'og:image', content: ogImage },
+  { name: 'twitter:card', content: 'summary' },
+  { name: 'twitter:title', content: title },
+  { name: 'twitter:description', content: description },
+];
+
+const links: Array<Record<string, string>> = [
+  { rel: 'icon', type: 'image/svg+xml', href: `${base}/assets/favicon.svg` },
+];
+---
+
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta name="generator" content={Astro.generator} />
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>{title}</title>
+    <link rel="canonical" href={canonical} />
+    {meta.map((m) => <meta {...m} />)}
+    {links.map((l) => <link {...l} />)}
+  </head>
+  <body>
+    <!-- Keyboard-accessible skip link (WCAG 2.4.1): hidden until it receives
+         keyboard focus, then it jumps past the sticky header to main content. -->
+    <a
+      href="#main-content"
+      class="sr-only focus:not-sr-only focus:fixed focus:left-4 focus:top-4 focus:z-[60] focus:border focus:border-hairline focus:bg-raised focus:px-4 focus:py-2 focus:font-mono focus:text-xs focus:text-ink focus:outline focus:outline-2 focus:outline-[var(--border-active)]"
+    >
+      Skip to content
+    </a>
+    <slot />
+    <script>
+      // Lenis smooth scroll + GSAP ScrollTrigger, plus a restrained
+      // below-the-fold entrance reveal for sections marked `data-reveal`.
+      // Bundled by Vite (content-hashed), executed after DOM parse.
+      // Hard safety nets:
+      //   · `prefers-reduced-motion: reduce` → no Lenis, no reveal; every
+      //     section stays at opacity 1 (nothing is ever pre-hidden).
+      //   · Above-the-fold content (Header, Hero, first sections) is never
+      //     animated, so the LCP paint is instant.
+      //   · Every reveal tween clears its transform/opacity props on
+      //     completion and a 2.5 s safety timer force-shows any section that
+      //     a flaky mobile scroll event never triggered.
+      import Lenis from 'lenis';
+      import gsap from 'gsap';
+      import { ScrollTrigger } from 'gsap/ScrollTrigger';
+      gsap.registerPlugin(ScrollTrigger);
+
+      // All browser work is wrapped in an SSR guard so the module is safe to
+      // evaluate during Astro's static build (no `window` / `matchMedia` on
+      // the server); the Lenis + ScrollTrigger wiring then runs on the
+      // client after DOM parse.
+      if (typeof window !== 'undefined') {
+        const REDUCED = matchMedia('(prefers-reduced-motion: reduce)');
+        let lenis: Lenis | null = null;
+        let revealKilled = false;
+
+        function initReveal(): void {
+          if (revealKilled) return;
+          const targets = Array.from(document.querySelectorAll<HTMLElement>('[data-reveal]'));
+          if (targets.length === 0) return;
+
+          const forceShow = (el: HTMLElement): void => {
+            gsap.set(el, { clearProps: 'transform,opacity' });
+          };
+
+          for (const el of targets) {
+            // Sections already on screen at first paint (e.g. a tall desktop
+            // viewport) animate in immediately; below-the-fold ones wait for
+            // the 88% scroll trigger.
+            const aboveFold = el.getBoundingClientRect().top < window.innerHeight;
+            gsap.fromTo(
+              el,
+              { opacity: 0, y: 14 },
+              {
+                opacity: 1,
+                y: 0,
+                duration: 0.55,
+                ease: 'power2.out',
+                clearProps: 'transform,opacity',
+                ...(aboveFold
+                  ? { delay: 0.05 }
+                  : {
+                      scrollTrigger: {
+                        trigger: el,
+                        start: 'top 88%',
+                        once: true,
+                      },
+                    }),
+              },
+            );
+            // Safety net: no section may stay invisible if scroll events
+            // misbehave. (Clearing props on an already-finished section is a
+            // harmless no-op.)
+            window.setTimeout(() => forceShow(el), 2500);
+          }
+          ScrollTrigger.refresh();
+        }
+
+        function killReveal(): void {
+          revealKilled = true;
+          const targets = Array.from(document.querySelectorAll<HTMLElement>('[data-reveal]'));
+          // Kill every ScrollTrigger whose trigger is one of our reveal sections.
+          for (const st of ScrollTrigger.getAll()) {
+            if (targets.includes(st.trigger as HTMLElement)) st.kill();
+          }
+          for (const el of targets) {
+            gsap.killTweensOf(el);
+            gsap.set(el, { clearProps: 'transform,opacity' });
+          }
+        }
+
+        function init(): void {
+          const instance = new Lenis({
+            autoRaf: false, // driven by GSAP ticker below
+            duration: 1.15,
+            easing: (t: number) => Math.min(1, 1.001 - Math.pow(2, -10 * t)),
+            smoothWheel: true,
+            respectReducedMotion: true,
+          });
+
+          // Drive Lenis's animation loop from GSAP's ticker for unified timing.
+          gsap.ticker.add((time: number) => {
+            instance.raf(time * 1000);
+          });
+          gsap.ticker.lagSmoothing(0);
+
+          // Tell ScrollTrigger to read/write through Lenis's virtual scroll.
+          // GetterSetterNumFunc: called without args = getter, with value = setter.
+          ScrollTrigger.scrollerProxy(window, {
+            scrollTop(value?: number) {
+              if (value === undefined) return instance.scroll;
+              instance.scrollTo(value, { immediate: true, force: true });
+            },
+          });
+
+          ScrollTrigger.addEventListener('refresh', () => {
+            instance.resize();
+          });
+          ScrollTrigger.refresh();
+          lenis = instance;
+
+          // Reveal only rides on top of the Lenis virtual scroller, so it is
+          // initialized here (and skipped entirely under reduced motion).
+          initReveal();
+        }
+
+        function destroy(): void {
+          if (lenis) {
+            lenis.destroy();
+            lenis = null;
+          }
+          gsap.globalTimeline.getChildren(true, true, true).forEach((t) => {
+            if (t.scrollTrigger) t.scrollTrigger.kill();
+          });
+          killReveal();
+          ScrollTrigger.refresh();
+        }
+
+        const onPref = (): void => {
+          if (REDUCED.matches) {
+            destroy();
+          } else if (!lenis) {
+            init();
+          }
+        };
+        REDUCED.addEventListener('change', onPref);
+        onPref();
+      }
+    </script>
+  </body>
+</html>

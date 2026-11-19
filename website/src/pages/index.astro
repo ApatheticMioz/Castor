@@ -1,0 +1,37 @@
+---
+import Layout from '../layouts/Layout.astro';
+import Header from '../components/Header.astro';
+import Hero from '../components/Hero.astro';
+import SpecLedger from '../components/SpecLedger.astro';
+import ArchitectureMap from '../components/ArchitectureMap.astro';
+import SecuritySandbox from '../components/SecuritySandbox.astro';
+import EconomicsCalc from '../components/EconomicsCalc.astro';
+import DeploymentTiers from '../components/DeploymentTiers.astro';
+import QuickstartFooter from '../components/QuickstartFooter.astro';
+---
+
+<Layout
+  title="Castor — Sovereign Zero-Egress Autonomous Coding Infrastructure"
+  description="Run autonomous AI coding agents on your private GPU: 2.62B tokens over 76 days at 93.7% prefix-cache hit, 99.84% net savings versus cloud API counterfactual."
+>
+  <Header />
+  <main id="main-content" class="min-h-screen bg-ground">
+    <!-- Above the fold: paints at opacity 1 immediately (instant LCP), no reveal. -->
+    <Hero />
+
+    <!--
+      Below-the-fold sections. Each carries `data-reveal` (GSAP ScrollTrigger
+      entrance: opacity 0→1, y 14→0, 0.55 s power2.out at top 88%, once, with a
+      2.5 s force-show safety net) and `scroll-mt-16` so sticky-header anchor
+      links land cleanly below the 56 px bar. The hairline rules are the
+      sections' own `border-y border-hairline` — crisp 1 px dividers with no
+      doubled borders between adjacent blocks.
+    -->
+    <SpecLedger data-reveal />
+    <ArchitectureMap data-reveal />
+    <SecuritySandbox data-reveal />
+    <EconomicsCalc data-reveal />
+    <DeploymentTiers data-reveal />
+  </main>
+  <QuickstartFooter />
+</Layout>

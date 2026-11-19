@@ -1,0 +1,200 @@
+---
+const NAV_LINKS: Array<{ href: string; label: string }> = [
+  { href: '#telemetry', label: 'Telemetry' },
+  { href: '#architecture', label: 'Architecture' },
+  { href: '#security', label: 'Sandbox' },
+  { href: '#economics', label: 'Economics' },
+  { href: '#deploy', label: 'Deploy' },
+];
+
+const GITHUB_URL = 'https://github.com/ApatheticMioz/Castor';
+// Deployment base path: '/' on Vercel, '/Castor' on GitHub Pages (Astro's
+// BASE_URL mirrors `base` in astro.config.mjs; trailing slash stripped so
+// `${base}/assets/...` never emits a double slash).
+const base = import.meta.env.BASE_URL.replace(/\/$/, '');
+---
+
+<header
+  class="sticky top-0 z-50 border-b border-hairline bg-[rgba(6,7,9,0.88)] backdrop-blur-[10px]"
+>
+  <div class="mx-auto flex h-14 max-w-[1360px] items-center gap-4 px-4 sm:px-6 lg:px-8">
+    <!-- Brand -->
+    <a href={`${base || '/'}`} class="flex shrink-0 items-center gap-2.5" aria-label="Castor Technologies home">
+      <img
+        src={`${base}/assets/logo.svg`}
+        alt=""
+        width="28"
+        height="28"
+        class="h-7 w-7"
+        loading="eager"
+        decoding="async"
+      />
+      <span class="font-display text-lg font-bold leading-none tracking-[-0.03em] text-ink"
+        >CASTOR</span
+      >
+      <span class="hidden font-mono text-[11px] tracking-[0.14em] text-ink-muted xl:inline"
+        >v1.5.0 · RUST MICROKERNEL</span
+      >
+    </a>
+
+    <!-- Center nav (md+) -->
+    <nav aria-label="Primary" class="ml-auto hidden items-center gap-7 md:flex">
+      {NAV_LINKS.map((link) => (
+        <a
+          href={link.href}
+          class="font-mono text-[12px] uppercase tracking-[0.12em] text-ink-secondary transition-colors duration-150 hover:text-ink"
+        >
+          {link.label}
+        </a>
+      ))}
+    </nav>
+
+    <!-- Right cluster -->
+    <div class="ml-auto flex items-center gap-2.5 md:ml-0">
+      <button
+        type="button"
+        id="cli-copy"
+        class="tactile-key tactile-key--local hidden items-center gap-2.5 px-3 py-1.5 sm:flex"
+        aria-label="Copy install command"
+      >
+        <span class="whitespace-nowrap font-mono text-[12px] text-ink"
+          >npx -y mcp-castor install</span
+        >
+        <span class="text-local" aria-hidden="true">
+          <svg
+            width="13"
+            height="13"
+            viewBox="0 0 16 16"
+            fill="none"
+            stroke="currentColor"
+            stroke-width="1.5"
+            class="inline-block"
+          >
+            <rect x="5.5" y="5.5" width="8.5" height="8.5" />
+            <path d="M10.5 5.5v-3h-8v8h3" />
+          </svg>
+        </span>
+        <span
+          class="text-ok"
+          aria-hidden="true"
+          style="display: none;"
+        >
+          <svg width="13" height="13" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.8">
+            <path d="M3 8.5 6.5 12 13 4.5" />
+          </svg>
+        </span>
+      </button>
+
+      <a
+        href={GITHUB_URL}
+        class="tactile-key hidden items-center gap-2 px-3 py-1.5 sm:flex"
+      >
+        <svg
+          width="14"
+          height="14"
+          viewBox="0 0 16 16"
+          fill="currentColor"
+          class="text-ink"
+          aria-hidden="true"
+        >
+          <path
+            d="M8 0C3.58 0 0 3.58 0 8c0 3.54 2.29 6.53 5.47 7.59.4.07.55-.17.55-.38 0-.19-.01-.82-.01-1.49-2.01.37-2.53-.49-2.69-.94-.09-.23-.48-.94-.82-1.13-.28-.15-.68-.52-.01-.53.63-.01 1.08.58 1.23.82.72 1.21 1.89.87 2.36.66.07-.52.28-.87.51-1.07-1.78-.2-3.64-.89-3.64-3.95 0-.87.31-1.59.82-2.15-.08-.2-.36-1.02.08-2.12 0 0 .67-.21 2.2.82.64-.18 1.32-.27 2-.27s1.36.09 2 .27c1.53-1.04 2.2-.82 2.2-.82.44 1.1.16 1.92.08 2.12.51.56.82 1.27.82 2.15 0 3.07-1.87 3.75-3.65 3.95.29.25.54.73.54 1.48 0 1.07-.01 1.93-.01 2.2 0 .21.15.46.55.38A8.01 8.01 0 0 0 16 8c0-4.42-3.58-8-8-8Z"
+          />
+        </svg>
+        <span class="font-mono text-[12px] text-ink-secondary">GitHub</span>
+      </a>
+
+      <!-- Mobile hamburger -->
+      <button
+        type="button"
+        id="nav-toggle"
+        class="tactile-key flex h-9 w-9 items-center justify-center md:hidden"
+        aria-expanded="false"
+        aria-controls="mobile-nav"
+        aria-label="Toggle navigation menu"
+      >
+        <svg
+          width="16"
+          height="16"
+          viewBox="0 0 16 16"
+          fill="none"
+          stroke="currentColor"
+          stroke-width="1.5"
+          class="text-ink"
+          aria-hidden="true"
+        >
+          <path d="M2 4h12M2 8h12M2 12h12" />
+        </svg>
+      </button>
+    </div>
+  </div>
+
+  <!-- Mobile dropdown nav: renders crisply below the 56px header bar -->
+  <div
+    id="mobile-nav"
+    class="relative z-50 border-b border-[var(--border-strong)] bg-[#0B0D11] md:hidden"
+    hidden
+  >
+    <nav aria-label="Mobile" class="flex flex-col">
+      {NAV_LINKS.map((link) => (
+        <a
+          href={link.href}
+          class="border-t border-hairline px-4 py-3 font-mono text-[13px] uppercase tracking-[0.12em] text-ink-secondary transition-colors hover:text-ink"
+          data-close-nav
+        >
+          {link.label}
+        </a>
+      ))}
+    </nav>
+  </div>
+</header>
+
+<script>
+  // CLI chip: copies the full install command with a crisp checkmark state.
+  (() => {
+    const btn = document.getElementById('cli-copy');
+    if (!btn) return;
+    const COPY = 'npx -y mcp-castor install --client all';
+    const [iconCopy, iconCheck] =
+      btn.querySelectorAll<HTMLSpanElement>('span[aria-hidden]');
+    let timer = 0;
+
+    btn.addEventListener('click', async () => {
+      try {
+        await navigator.clipboard.writeText(COPY);
+      } catch {
+        // Clipboard API unavailable (e.g. non-secure context): degrade silently.
+        return;
+      }
+      iconCopy.style.display = 'none';
+      iconCheck.style.display = 'inline-block';
+      btn.setAttribute('aria-label', 'Copied');
+      window.clearTimeout(timer);
+      timer = window.setTimeout(() => {
+        iconCopy.style.display = 'inline-block';
+        iconCheck.style.display = 'none';
+        btn.setAttribute('aria-label', 'Copy install command');
+      }, 1800);
+    });
+  })();
+
+  // Mobile hamburger toggle.
+  (() => {
+    const toggle = document.getElementById('nav-toggle');
+    const panel = document.getElementById('mobile-nav');
+    if (!toggle || !panel) return;
+
+    const set = (open: boolean) => {
+      panel.hidden = !open;
+      toggle.setAttribute('aria-expanded', String(open));
+    };
+
+    toggle.addEventListener('click', () => set(panel.hidden));
+    panel.querySelectorAll('a[data-close-nav]').forEach((a) =>
+      a.addEventListener('click', () => set(false)),
+    );
+    document.addEventListener('keydown', (e) => {
+      if (e.key === 'Escape' && !panel.hidden) set(false);
+    });
+  })();
+</script>

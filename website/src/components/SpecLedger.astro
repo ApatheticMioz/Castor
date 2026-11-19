@@ -1,0 +1,334 @@
+---
+import {
+  LEDGER_76DAY,
+  HARDWARE_SNAPSHOT,
+  VRAM_TIERS,
+  QWEN38_BENCHMARKS,
+  QWEN38_MODEL_CARD_DATE,
+  QWEN38_LICENSE,
+  formatInt,
+} from '../data/telemetry';
+
+const L = LEDGER_76DAY;
+const H = HARDWARE_SNAPSHOT;
+
+/** Tool execution distribution strip — shares of 63,901 sandboxed tool calls. */
+const TOOL_SHARE: Array<{ name: string; pct: number }> = [
+  { name: 'bash', pct: 44.0 },
+  { name: 'read_file', pct: 23.8 },
+  { name: 'edit_file', pct: 11.9 },
+  { name: 'search_code', pct: 7.0 },
+  { name: 'write_file', pct: 3.3 },
+  { name: 'list_dir', pct: 3.1 },
+  { name: 'web / other', pct: 6.9 },
+];
+const TOOL_MAX_PCT = Math.max(...TOOL_SHARE.map((t) => t.pct));
+
+const TABS = [
+  { id: 'ledger', label: '76-Day Production Ledger' },
+  { id: 'live', label: 'Live vLLM 0.33.0 & Qwen3.8-27B' },
+  { id: 'tiers', label: 'VRAM Hardware Tiers (8–24 GB)' },
+] as const;
+
+/** Ledger 76-day 8-cell grid rows: [kicker, value, sub, accent?]. */
+const ledgerRows: Array<[string, string, string, string]> = [
+  [
+    'Total Tokens Processed',
+    formatInt(L.totalTokens),
+    `${L.promptTokensDisplay} prompt · ${L.completionTokensDisplay} output`,
+    '',
+  ],
+  [
+    'KV Prefix Cache Hit',
+    `${L.cacheHitPct}%`,
+    `${L.cachedTokensDisplay} cached prompt tokens`,
+    'cloud',
+  ],
+  [
+    'Nov Effective Prefill Avg',
+    `${formatInt(L.novPrefillAvgTps)} tok/s`,
+    `p95 ${formatInt(L.novPrefillP95Tps)} · max ${formatInt(L.novPrefillMaxTps)}`,
+    '',
+  ],
+  [
+    'Nov Decode p50',
+    `${L.novDecodeP50Tps} tok/s`,
+    `p95 ${L.novDecodeP95Tps} · max ${L.novDecodeMaxTps} · peak ${formatInt(L.peakSpecBurstTps)} DFlash2 burst`,
+    'local',
+  ],
+  [
+    'Autonomous Turns',
+    formatInt(L.turns),
+    `${formatInt(L.sessions)} sessions · ${L.gpuComputeDisplay} GPU compute`,
+    '',
+  ],
+  [
+    'Sandboxed Tool Calls',
+    formatInt(L.toolCalls),
+    `${L.toolSuccessPct}% success · ${L.surgicalEditRatio}× surgical edit ratio`,
+    '',
+  ],
+  [
+    'Net Savings vs Cloud',
+    `$${L.netSavingsUsd.toLocaleString('en-US', { minimumFractionDigits: 2 })}`,
+    `$${L.cloudCounterfactualUsd.toLocaleString('en-US', { minimumFractionDigits: 2 })} Sonnet-tier vs $${L.electricityUsd} power · ${L.netSavingsPct}%`,
+    'ok',
+  ],
+  [
+    'Live RTX 3090 VRAM',
+    `${formatInt(H.gpu.vramUsedMiB)} MiB`,
+    `${formatInt(H.gpu.vramTotalMiB)} MiB total · ${H.gpu.powerDrawW} W · ${H.gpu.tempC} °C`,
+    'local',
+  ],
+];
+
+const accentClass: Record<string, string> = {
+  '': 'text-ink',
+  cloud: 'text-cloud',
+  local: 'text-local',
+  ok: 'text-ok',
+};
+
+/** Live snapshot 8-cell grid rows. */
+const liveRows: Array<[string, string, string]> = [
+  ['Live Prefix Hit (vLLM /metrics)', '92.6%', 'per-request, Nov 19 live'],
+  ['MTP Draft Acceptance', '70.5%', 'across 16,589 drafts'],
+  ['Mean Tokens per Draft', '3.45', 'MTP acceptance length'],
+  ['Avg Time to First Token', '3.22 s', 'live /metrics'],
+  ['KV Pool', '150,000', 'tokens · max_model_len'],
+  ['Model', 'Qwen3.8-27B-W4A16-AutoRound-fast', `${QWEN38_LICENSE} · card ${QWEN38_MODEL_CARD_DATE}`],
+  ['GPU (nvidia-smi)', 'RTX 3090 · 23,869 / 24,576 MiB', `${H.gpu.powerDrawW} W · ${H.gpu.tempC} °C`],
+  ['Driver / Engine', '616.92 · vLLM 0.33.0', `snapshot ${H.asOf}`],
+];
+
+/** Qwen3.8-27B vendor benchmark bars, descending. */
+const qwenBars: Array<{ suite: string; score: number }> = [...QWEN38_BENCHMARKS].sort(
+  (a, b) => b.score - a.score,
+);
+---
+
+<section id="telemetry" data-reveal class="scroll-mt-16 border-y border-hairline bg-recessed/40">
+  <!-- Architectural bar -->
+  <div class="border-b border-hairline">
+    <div class="mx-auto max-w-6xl px-4 py-5 sm:px-6">
+      <div class="flex flex-col gap-1">
+        <h2 class="font-display text-2xl font-bold tracking-tight text-ink sm:text-3xl">
+          Measured Silicon. Zero Marketing Math.
+        </h2>
+        <p class="font-mono text-xs text-ink-muted">
+          Source: <span class="text-ink-secondary">./target/release/castor stats</span> · Sep 4 –
+          Nov 19, 2026 · 1× RTX 3090
+        </p>
+      </div>
+    </div>
+  </div>
+
+  <!-- 3-tab hardware switcher -->
+  <div class="mx-auto max-w-6xl px-4 py-6 sm:px-6">
+    <div
+      role="tablist"
+      aria-label="Hardware telemetry views"
+      class="spec-grid grid-cols-1 md:grid-cols-3"
+    >
+      {TABS.map((t, i) => (
+        <button
+          type="button"
+          role="tab"
+          id={`tab-${t.id}`}
+          aria-controls={`panel-${t.id}`}
+          aria-selected={i === 0 ? 'true' : 'false'}
+          tabindex={i === 0 ? '0' : '-1'}
+          class={`sl-tab px-4 py-3 text-left ${i === 0 ? 'is-active' : ''}`}
+        >
+          {t.label}
+        </button>
+      ))}
+    </div>
+
+    <!-- Tab 1 · 76-day production ledger -->
+    <div
+      role="tabpanel"
+      id="panel-ledger"
+      aria-labelledby="tab-ledger"
+      class="sl-panel mt-6"
+    >
+      <div class="spec-grid grid-cols-2 lg:grid-cols-4">
+        {ledgerRows.map((row, i) => (
+          <div class={`p-4 ${i % 2 === 1 ? 'cell-recessed' : ''}`}>
+            <p class="font-mono text-[11px] uppercase tracking-widest text-ink-muted">{row[0]}</p>
+            <p class={`tabular mt-2 break-words font-display text-[clamp(1.0rem,4.1vw,1.65rem)] font-bold leading-none tracking-tight ${accentClass[row[3]]}`}>
+              {row[1]}
+            </p>
+            <p class="tabular mt-1 font-mono text-[11px] leading-relaxed text-ink-secondary">
+              {row[2]}
+            </p>
+          </div>
+        ))}
+      </div>
+
+      <!-- Tool execution distribution strip -->
+      <div class="mt-px border border-hairline bg-ground p-4">
+        <p class="font-mono text-[11px] uppercase tracking-widest text-ink-muted">
+          Tool Execution Distribution · 63,901 sandboxed calls
+        </p>
+        <div class="mt-3 space-y-2">
+          {TOOL_SHARE.map((t) => (
+            <div class="flex items-center gap-3">
+              <span class="tabular w-28 shrink-0 text-right font-mono text-[11px] text-ink-secondary sm:w-36">
+                {t.name}
+              </span>
+              <span class="h-1 flex-1 bg-raised">
+                <span
+                  class="block h-1 bg-local"
+                  style={`width:${(t.pct / TOOL_MAX_PCT) * 100}%`}
+                ></span>
+              </span>
+              <span class="tabular w-12 shrink-0 text-right font-mono text-[11px] text-ink">
+                {t.pct.toFixed(1)}%
+              </span>
+            </div>
+          ))}
+        </div>
+      </div>
+    </div>
+
+    <!-- Tab 2 · Live vLLM 0.33.0 & Qwen3.8-27B -->
+    <div
+      role="tabpanel"
+      id="panel-live"
+      aria-labelledby="tab-live"
+      hidden
+      class="sl-panel mt-6"
+    >
+      <div class="spec-grid grid-cols-2 lg:grid-cols-4">
+        {liveRows.map((row, i) => (
+          <div class={`p-4 ${i % 2 === 1 ? 'cell-recessed' : ''}`}>
+            <p class="font-mono text-[11px] uppercase tracking-widest text-ink-muted">{row[0]}</p>
+            <p
+              class={`tabular mt-2 break-words font-display text-[clamp(0.9rem,4.1vw,1.375rem)] font-bold leading-tight tracking-tight ${
+                i === 0
+                  ? 'text-cloud'
+                  : i === 1 || i === 2
+                    ? 'text-local'
+                    : 'text-ink'
+              }`}
+            >
+              {row[1]}
+            </p>
+            <p class="tabular mt-1 font-mono text-[11px] leading-relaxed text-ink-secondary">
+              {row[2]}
+            </p>
+          </div>
+        ))}
+      </div>
+
+      <!-- Qwen3.8-27B benchmark bar panel -->
+      <div class="mt-px border border-hairline bg-ground p-4">
+        <div class="flex flex-wrap items-baseline justify-between gap-2">
+          <p class="font-mono text-[11px] uppercase tracking-widest text-ink-muted">
+            Qwen3.8-27B · Verified Vendor Benchmarks
+          </p>
+          <p class="font-mono text-[11px] text-ink-muted">
+            Hugging Face official model card · {QWEN38_MODEL_CARD_DATE} · {QWEN38_LICENSE}
+          </p>
+        </div>
+        <div class="mt-3 space-y-2">
+          {qwenBars.map((b) => (
+            <div class="flex items-center gap-3">
+              <span class="tabular w-28 shrink-0 text-right font-mono text-[11px] text-ink-secondary sm:w-36">
+                {b.suite}
+              </span>
+              <span class="h-1 flex-1 bg-raised">
+                <span class="block h-1 bg-cloud" style={`width:${b.score}%`}></span>
+              </span>
+              <span class="tabular w-12 shrink-0 text-right font-mono text-[11px] text-ink">
+                {b.score.toFixed(1)}
+              </span>
+            </div>
+          ))}
+        </div>
+      </div>
+    </div>
+
+    <!-- Tab 3 · VRAM hardware tiers -->
+    <div role="tabpanel" id="panel-tiers" aria-labelledby="tab-tiers" hidden class="sl-panel mt-6">
+      <div class="spec-grid">
+        <div class="col-span-2 bg-ground px-4 py-3 lg:col-span-4">
+          <div class="grid grid-cols-2 gap-x-4 font-mono text-[11px] uppercase tracking-widest text-ink-muted lg:grid-cols-4">
+            <span>VRAM Tier</span>
+            <span>Engine</span>
+            <span>Context</span>
+            <span>Decode</span>
+          </div>
+        </div>
+        {VRAM_TIERS.map((t) => (
+          <div class={`col-span-2 px-4 py-3 lg:col-span-4 ${t.highlight ? 'cell-raised' : ''}`}>
+            <div
+              class={`grid grid-cols-2 gap-x-4 lg:grid-cols-4 ${
+                t.highlight ? 'border-l-2 border-l-[var(--signal-local)] pl-3' : ''
+              }`}
+            >
+              <p class={`font-mono text-sm ${t.highlight ? 'font-semibold text-local' : 'text-ink'}`}>
+                {t.vram}
+              </p>
+              <p class="font-mono text-xs leading-relaxed text-ink-secondary">{t.engine}</p>
+              <p class="tabular font-mono text-xs leading-relaxed text-ink-secondary">
+                {t.context}
+              </p>
+              <p class="tabular font-mono text-xs leading-relaxed text-ink-secondary">
+                {t.decode}
+              </p>
+            </div>
+          </div>
+        ))}
+      </div>
+      <p class="mt-3 font-mono text-[11px] text-ink-muted">
+        Consumer laptop to 24 GB workstation: the same zero-egress microkernel, from
+        <span class="text-ink-secondary"> llama.cpp + Ternary-Bonsai / DFlash2 </span>
+        up to
+        <span class="text-ink-secondary"> vLLM 0.33.0 MTP Swarm</span>.
+      </p>
+    </div>
+  </div>
+</section>
+
+<style>
+  /* 3-tab hardware switchbank: one raised tab with a 2px top signal bar. */
+  .sl-tab {
+    position: relative;
+    font-family: var(--font-mono);
+    font-size: 12px;
+    letter-spacing: 0.08em;
+    text-transform: uppercase;
+    background: var(--bg-recessed);
+    color: var(--ink-muted);
+    border: 0;
+    transition: background-color 120ms linear, color 120ms linear;
+  }
+  .sl-tab:hover {
+    color: var(--ink-secondary);
+  }
+  .sl-tab.is-active {
+    background: var(--bg-raised);
+    color: var(--ink-primary);
+  }
+  .sl-tab.is-active::before {
+    content: '';
+    position: absolute;
+    top: 0;
+    left: 0;
+    right: 0;
+    height: 2px;
+    background: var(--signal-cloud);
+  }
+  [id='tab-live'].is-active::before {
+    background: var(--signal-local);
+  }
+  @media (prefers-reduced-motion: reduce) {
+    .sl-tab {
+      transition: none;
+    }
+  }
+</style>
+
+<script src="../scripts/spec-ledger.ts"></script>

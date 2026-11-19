@@ -1,0 +1,236 @@
+---
+import { SUBSYSTEMS, renderSubsystemDetail } from '../scripts/architecture-map';
+
+const initial = SUBSYSTEMS[0];
+
+/** Schematic node positions on the 720×560 drafting board (3 × 2 grid).
+ *  Node width is 190; centers land on the bus drop points (150 / 360 / 570)
+ *  so labels stay ≥ 14px inside each rectangle on desktop and mobile. */
+const grid = [
+  ['mcp', 'MCP Stdio (3 Tools)', 55, 196],
+  ['dgi', 'DGI Logit Gate', 265, 196],
+  ['sem', 'Lease Semaphore', 475, 196],
+  ['wait', 'Zero-Turn :18021', 55, 300],
+  ['proxy', 'SSE Proxy :18022', 265, 300],
+  ['runner', 'In-Process Runner', 475, 300],
+] as const;
+
+const nodeSub: Record<string, string> = {
+  mcp: 'stdio · JSON-RPC',
+  dgi: 'Δz > 1.5 reject',
+  sem: 'O_EXCL · 90% ceiling',
+  wait: '500 ms long-poll',
+  proxy: '40× / 768-char breaker',
+  runner: 'stall retry · same effort',
+};
+---
+
+<section id="architecture" data-reveal class="scroll-mt-16 border-y border-hairline bg-ground">
+  <!-- Section header -->
+  <div class="border-b border-hairline">
+    <div class="mx-auto max-w-6xl px-4 py-5 sm:px-6">
+      <h2 class="font-display text-2xl font-bold tracking-tight text-ink sm:text-3xl">
+        One Rust Microkernel. Two Distinct Intelligence Tiers.
+      </h2>
+      <p class="mt-1 font-mono text-xs text-ink-muted">
+        Cloud lead architect ↔ Rust microkernel ↔ local peer silicon · 6 subsystems, all
+        loopback-bound · verified against <span class="text-ink-secondary">src/</span>
+      </p>
+    </div>
+  </div>
+
+  <div class="mx-auto max-w-6xl px-4 py-6 sm:px-6">
+    <!-- Dual-agent schematic: 12-col, 1px hairline gap -->
+    <div
+      class="grid grid-cols-1 gap-px border border-[var(--border-hairline)] bg-[var(--border-hairline)] lg:grid-cols-12"
+    >
+      <!-- Left · schematic drafting board -->
+      <div
+        class="cell-recessed p-4 lg:col-span-7"
+        style="background-image: radial-gradient(circle, rgba(255, 255, 255, 0.04) 1px, transparent 1px); background-size: 24px 24px;"
+      >
+        <!-- SVG circuit schematic (responsive) -->
+        <svg
+          viewBox="0 0 720 560"
+          class="block h-auto w-full"
+          role="img"
+          aria-label="Castor microkernel schematic: cloud lead architect over the 6-subsystem Rust microkernel over local peer silicon"
+        >
+          <style>
+            .am-bus {
+              fill: none;
+              stroke: rgba(255, 255, 255, 0.22);
+              stroke-width: 1;
+            }
+            .am-pulse {
+              fill: none;
+              stroke-width: 1;
+              stroke-dasharray: 4 12;
+              animation: am-pulse-flow 1.6s linear infinite;
+            }
+            .am-pulse-cloud {
+              stroke: var(--signal-cloud);
+            }
+            .am-pulse-local {
+              stroke: var(--signal-local);
+            }
+            @keyframes am-pulse-flow {
+              to {
+                stroke-dashoffset: -32;
+              }
+            }
+            @media (prefers-reduced-motion: reduce) {
+              .am-pulse {
+                animation: none;
+              }
+            }
+            .am-node {
+              cursor: pointer;
+              outline: none;
+            }
+            .am-node rect {
+              fill: var(--bg-raised);
+              stroke: var(--border-strong);
+              transition: stroke 120ms linear, fill 120ms linear;
+            }
+            .am-node:hover rect,
+            .am-node:focus-visible rect {
+              stroke: var(--border-active);
+            }
+            .am-node.is-active rect {
+              fill: var(--bg-elevated);
+              stroke: var(--signal-local);
+            }
+            .am-node text {
+              font-family: var(--font-mono);
+              font-size: 11px;
+              fill: var(--ink-secondary);
+            }
+            .am-node.is-active text {
+              fill: var(--ink-primary);
+            }
+            .am-tier text {
+              font-family: var(--font-mono);
+            }
+          </style>
+
+          <!-- ── Cloud tier (Cobalt) ─────────────────────────────── -->
+          <g class="am-tier">
+            <rect
+              x="160"
+              y="16"
+              width="400"
+              height="76"
+              fill="var(--bg-recessed)"
+              stroke="rgba(59, 130, 246, 0.45)"
+            />
+            <text x="176" y="44" fill="var(--signal-cloud)" font-size="13" font-weight="600">
+              CLOUD LEAD ARCHITECT
+            </text>
+            <text x="176" y="66" fill="var(--ink-muted)" font-size="11">
+              Claude Opus 5.5 · Fable 5.2 · Gemini 4 · GPT-6.2
+            </text>
+            <text x="176" y="82" fill="var(--ink-muted)" font-size="10">
+              reasoning tier · dispatch decisions · zero local state
+            </text>
+          </g>
+
+          <!-- ── Bus: cloud → microkernel ────────────────────────── -->
+          <path class="am-bus" d="M 360 92 V 120" />
+          <path class="am-pulse am-pulse-cloud" d="M 360 92 V 120" />
+          <path class="am-bus" d="M 150 120 H 570" />
+          <path class="am-bus" d="M 150 120 V 168" />
+          <path class="am-bus" d="M 360 120 V 168" />
+          <path class="am-bus" d="M 570 120 V 168" />
+          <path class="am-pulse am-pulse-cloud" d="M 150 120 V 168" />
+          <path class="am-pulse am-pulse-cloud" d="M 360 120 V 168" />
+          <path class="am-pulse am-pulse-cloud" d="M 570 120 V 168" />
+
+          <!-- ── Microkernel chassis ─────────────────────────────── -->
+          <g class="am-tier">
+            <rect
+              x="48"
+              y="132"
+              width="624"
+              height="296"
+              fill="rgba(6, 7, 9, 0.55)"
+              stroke="var(--border-strong)"
+            />
+            <text x="60" y="152" fill="var(--ink-primary)" font-size="13" font-weight="600">
+              CASTOR RUST MICROKERNEL
+            </text>
+            <text x="60" y="168" fill="var(--ink-muted)" font-size="10">
+              zero-egress · stdio + loopback only · deterministic refusals
+            </text>
+          </g>
+
+          <!-- ── 6 subsystem nodes (3 × 2 grid) ──────────────────── -->
+          {grid.map(([id, label, x, y]) => (
+            <g class="am-node" data-id={id} role="button" tabindex="0" aria-pressed="false">
+              <rect x={x} y={y} width="190" height="56" />
+              <text x={x + 95} y={y + 25} text-anchor="middle">{label}</text>
+              <text x={x + 95} y={y + 43} text-anchor="middle" fill="var(--ink-muted)" font-size="9.5">
+                {nodeSub[id]}
+              </text>
+            </g>
+          ))}
+
+          <!-- ── Bus: microkernel → local ────────────────────────── -->
+          <path class="am-bus" d="M 150 428 V 468" />
+          <path class="am-bus" d="M 360 428 V 468" />
+          <path class="am-bus" d="M 570 428 V 468" />
+          <path class="am-bus" d="M 150 448 H 570" />
+          <path class="am-pulse am-pulse-local" d="M 150 448 H 360 V 468" />
+          <path class="am-pulse am-pulse-local" d="M 570 448 H 360" />
+
+          <!-- ── Local tier (Amber) ──────────────────────────────── -->
+          <g class="am-tier">
+            <rect
+              x="160"
+              y="468"
+              width="400"
+              height="76"
+              fill="var(--bg-recessed)"
+              stroke="rgba(249, 115, 22, 0.45)"
+            />
+            <text x="176" y="496" fill="var(--signal-local)" font-size="13" font-weight="600">
+              LOCAL PEER SILICON
+            </text>
+            <text x="176" y="518" fill="var(--ink-muted)" font-size="11">
+              Qwen3.8-27B · Ternary-Bonsai · vLLM / llama.cpp / Ollama
+            </text>
+            <text x="176" y="534" fill="var(--ink-muted)" font-size="10">
+              8–24 GB VRAM tiers · MTP speculative decode · zero egress
+            </text>
+          </g>
+        </svg>
+
+        <!-- Tactile rectangular hardware selectors (mobile-friendly) -->
+        <div class="mt-4 grid grid-cols-1 gap-2 sm:grid-cols-3">
+          {SUBSYSTEMS.map((s) => (
+            <button
+              type="button"
+              class="am-select tactile-key px-3 py-2 text-left font-mono text-[11px] text-ink-secondary"
+              data-id={s.id}
+              aria-pressed="false"
+            >
+              {s.name}
+            </button>
+          ))}
+        </div>
+      </div>
+
+      <!-- Right · Live Subsystem Inspector -->
+      <div class="flex flex-col border-l-0 border-t border-hairline lg:col-span-5 lg:border-l lg:border-t-0">
+        <div class="flex-1 p-4">
+          <p class="font-mono text-[11px] uppercase tracking-widest text-ink-muted">
+            Live Subsystem Inspector
+          </p>
+          <div id="am-detail" class="mt-3" set:html={renderSubsystemDetail(initial)}></div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <script src="../scripts/architecture-map.ts"></script>
+</section>

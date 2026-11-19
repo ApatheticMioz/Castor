@@ -1,0 +1,183 @@
+---
+/**
+ * Castor — 60-Second CLI Quickstart + Industrial Footer
+ * Terminal block uses hand-authored CSS syntax classes only (zero runtime
+ * highlighter). Copy buttons are real clipboard writes with visible feedback.
+ */
+import { ARCHITECTURE } from '../data/telemetry';
+
+const GITHUB = ARCHITECTURE.links.github;
+const NPM = ARCHITECTURE.links.npm;
+const EMAIL = 'ApatheticMioz@gmail.com';
+// Deployment base path: '/' on Vercel, '/Castor' on GitHub Pages.
+const base = import.meta.env.BASE_URL.replace(/\/$/, '');
+
+const commands: Array<{ comment: string; cmd: string }> = [
+  {
+    comment: '# 1. Install & register MCP tools with Claude Code / Antigravity',
+    cmd: 'npx -y mcp-castor install --client all',
+  },
+  {
+    comment: '# 2. Verify your local serving engine (vLLM / llama.cpp / Ollama)',
+    cmd: 'castor server status',
+  },
+  {
+    comment: '# 3. Inspect live token throughput, KV cache hit rate, and savings',
+    cmd: 'castor stats',
+  },
+];
+
+const midLinks = [
+  { label: 'GitHub', href: GITHUB },
+  { label: 'npm (mcp-castor)', href: NPM },
+  { label: 'Architecture Docs', href: `${GITHUB}/tree/main/docs` },
+  { label: 'Engine Profiles', href: `${GITHUB}/blob/main/docs/engine-profiles.md` },
+  { label: 'Commercial Deployments', href: `${GITHUB}/blob/main/docs/commercial-deployments.md` },
+  { label: `Contact (${EMAIL})`, href: `mailto:${EMAIL}` },
+];
+---
+
+<section class="mx-auto max-w-6xl px-6 py-16">
+  <header class="mb-8">
+    <p class="font-mono text-[11px] uppercase tracking-widest text-ink-muted">
+      {`// quickstart`} · sixty seconds from zero to telemetry
+    </p>
+    <h2 class="mt-3 font-display text-3xl font-bold tracking-tight text-ink md:text-4xl">
+      Run it. Watch it. Verify it.
+    </h2>
+  </header>
+
+  <div class="border border-hairline bg-ground">
+    <div class="flex items-center justify-between border-b border-hairline bg-recessed px-4 py-2">
+      <span class="font-mono text-[11px] uppercase tracking-widest text-ink-muted">
+        bash · castor-cli
+      </span>
+      <button
+        type="button"
+        class="tactile-key px-3 py-1 font-mono text-[10px] uppercase tracking-widest text-ink-secondary hover:text-ink"
+        data-copy-all
+      >
+        copy all
+      </button>
+    </div>
+
+    <div class="p-4 md:p-6">
+      <ol class="space-y-4">
+        {commands.map((c) => (
+          <li class="group relative">
+            <p class="font-mono text-xs text-ink-muted md:text-sm">
+              <span class="text-ink-muted">{c.comment}</span>
+            </p>
+            <div class="mt-1 flex items-center gap-3">
+              <code class="flex-1 overflow-x-auto whitespace-nowrap font-mono text-xs text-ink md:text-sm">
+                <span class="text-local">$</span>
+                <span class="text-ink">{c.cmd}</span>
+              </code>
+              <button
+                type="button"
+                class="tactile-key shrink-0 px-2.5 py-1 font-mono text-[10px] uppercase tracking-widest text-ink-muted hover:text-ink"
+                data-copy={c.cmd}
+                aria-label={`Copy command: ${c.cmd}`}
+              >
+                copy
+              </button>
+            </div>
+          </li>
+        ))}
+      </ol>
+    </div>
+  </div>
+
+  <p class="mt-4 overflow-x-auto whitespace-nowrap font-mono text-[11px] tracking-wider text-ink-muted">
+    COMPATIBLE CLIENTS: CLAUDE CODE · ANTIGRAVITY · CURSOR · ANY MCP HOST
+    <span class="mx-3 text-hairline">|</span>
+    ENGINES: vLLM · llama.cpp · SGLANG · OLLAMA · LM STUDIO
+  </p>
+</section>
+
+<footer class="border-t border-hairline bg-recessed">
+  <div class="mx-auto flex max-w-6xl flex-col gap-8 px-6 py-10 lg:flex-row lg:items-start lg:justify-between">
+    <div class="flex items-center gap-3">
+      <img
+        src={`${base}/assets/logo.svg`}
+        alt="Castor"
+        width="24"
+        height="24"
+        class="h-6 w-6"
+        loading="lazy"
+        decoding="async"
+      />
+      <div>
+        <p class="font-display text-sm font-bold tracking-tight text-ink">CASTOR</p>
+        <p class="font-mono text-[11px] text-ink-muted">
+          Rust Agent Microkernel · v1.5.0 · GNU AGPL-3.0
+        </p>
+      </div>
+    </div>
+
+    <nav aria-label="Footer" class="flex flex-wrap gap-x-5 gap-y-2">
+      {midLinks.map((l) => (
+        <a
+          href={l.href}
+          class="font-mono text-[11px] text-ink-secondary underline decoration-hairline underline-offset-4 hover:text-ink"
+        >
+          {l.label}
+        </a>
+      ))}
+    </nav>
+
+    <p class="font-mono text-[11px] leading-relaxed text-ink-muted">
+      TELEMETRY SNAPSHOT: 2026-11-19
+      <br />
+      ZERO TRACKERS · ZERO COOKIES
+    </p>
+  </div>
+</footer>
+
+<script>
+  // Real clipboard writes, real inline feedback. No modals, no fake success,
+  // and no deprecated clipboard path: on non-secure contexts the button
+  // reports the manual-copy fallback instead.
+  const hintDefault = 'copy';
+
+  function writeClipboard(text: string): Promise<boolean> {
+    if (navigator.clipboard?.writeText) {
+      return navigator.clipboard.writeText(text).then(() => true, () => false);
+    }
+    return Promise.resolve(false);
+  }
+
+  function flash(btn: HTMLButtonElement, label: string, ok: boolean) {
+    btn.textContent = ok ? `${label} ✓` : 'select & copy manually';
+    btn.classList.toggle('text-ok', ok);
+    window.setTimeout(() => {
+      btn.textContent = label;
+      btn.classList.remove('text-ok');
+    }, 2000);
+  }
+
+  for (const btn of Array.from(document.querySelectorAll<HTMLButtonElement>('[data-copy]'))) {
+    btn.addEventListener('click', () => {
+      const cmd = btn.dataset.copy ?? '';
+      writeClipboard(cmd).then((ok) => flash(btn, hintDefault, ok));
+    });
+  }
+
+  const allBtn = document.querySelector<HTMLButtonElement>('[data-copy-all]');
+  if (allBtn) {
+    allBtn.addEventListener('click', () => {
+      // Copy all three commands with their comments for full context.
+      const full = Array.from(
+        document.querySelectorAll<HTMLButtonElement>('[data-copy]'),
+      )
+        .map((b) => {
+          const comment = b.closest('li')?.querySelector('p')?.textContent?.trim();
+          const cmd = b.dataset.copy ?? '';
+          return comment ? `${comment}\n${cmd}` : cmd;
+        })
+        .filter(Boolean)
+        .join('\n');
+      writeClipboard(full).then((ok) => flash(allBtn, 'copy all', ok));
+    });
+  }
+</script>

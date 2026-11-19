@@ -1,0 +1,210 @@
+---
+import { HARDWARE_SNAPSHOT, formatInt } from '../data/telemetry';
+
+const { gpu } = HARDWARE_SNAPSHOT;
+const MODES: Array<{ id: string; label: string; sub: string }> = [
+  { id: 'warm', label: 'Warm KV Prefill', sub: '93.7% hit' },
+  { id: 'mtp', label: 'MTP Speculative Decode', sub: '70.5% accept' },
+  { id: 'swarm', label: '4× Swarm Concurrency', sub: 'MAX_SEQS=4' },
+];
+---
+
+<div
+  id="live-engine"
+  class="border border-border-strong bg-recessed"
+  role="region"
+  aria-label="Live simulation: Qwen3.8-27B on RTX 3090"
+>
+  <!-- Instrument header -->
+  <div
+    class="flex items-center gap-3 border-b border-hairline px-3 py-2.5 sm:px-4"
+  >
+    <span class="relative flex h-1.5 w-1.5 shrink-0" aria-hidden="true">
+      <span
+        class="live-led absolute inset-0 animate-pulse bg-ok"
+      ></span>
+    </span>
+    <p
+      class="min-w-0 flex-1 truncate font-mono text-[11px] uppercase tracking-[0.12em] text-ink-secondary"
+    >
+      LIVE SIMULATION · RTX 3090 (24 GB) · vLLM 0.33.0 · QWEN3.8-27B-W4A16
+    </p>
+    <button
+      type="button"
+      id="engine-pause"
+      aria-pressed="false"
+      class="tactile-key shrink-0 px-2.5 py-1 font-mono text-[11px] uppercase tracking-[0.1em] text-ink-secondary"
+    >
+      <span data-pause-label>PAUSE</span>
+      <span data-resume-label class="text-local" style="display: none;">RESUME</span>
+    </button>
+  </div>
+
+  <!-- Mode selector keys: 1px-gap hairline bar, crisp active/recessed states -->
+  <div class="spec-grid grid-cols-1 sm:grid-cols-3" role="tablist" aria-label="Simulation mode">
+    {MODES.map((m, i) => (
+      <button
+        type="button"
+        id={`mode-${m.id}`}
+        role="tab"
+        aria-selected={i === 0 ? 'true' : 'false'}
+        class={`les-mode ${i === 0 ? 'is-active mode--warm' : ''} ${i === 1 ? 'mode--mtp' : ''} ${i === 2 ? 'mode--swarm' : ''}`}
+        data-mode={m.id}
+      >
+        <span class="block font-mono text-[12px] uppercase tracking-[0.08em]">
+          {m.label}
+        </span>
+        <span class="mt-0.5 block font-mono text-[10px] text-ink-muted">
+          {m.sub}
+        </span>
+      </button>
+    ))}
+  </div>
+
+  <!-- Live telemetry readout: 4-cell 1px-gap spec grid -->
+  <div class="spec-grid grid-cols-2 gap-y-0 lg:grid-cols-4">
+    <div class="p-3">
+      <p class="font-mono text-[10px] uppercase tracking-[0.1em] text-ink-muted">
+        PREFILL VELOCITY
+      </p>
+      <p class="tabular mt-1 font-display text-lg font-bold leading-none text-cloud sm:text-xl">
+        <span id="td-prefill">0</span>
+        <span class="ml-1 font-mono text-[10px] font-normal text-ink-muted">tok/s</span>
+      </p>
+    </div>
+    <div class="p-3">
+      <p class="font-mono text-[10px] uppercase tracking-[0.1em] text-ink-muted">
+        DECODE RATE
+      </p>
+      <p class="tabular mt-1 font-display text-lg font-bold leading-none text-local sm:text-xl">
+        <span id="td-decode">0.0</span>
+        <span class="ml-1 font-mono text-[10px] font-normal text-ink-muted">tok/s</span>
+      </p>
+    </div>
+    <div class="p-3">
+      <p class="font-mono text-[10px] uppercase tracking-[0.1em] text-ink-muted">
+        KV CACHE HIT
+      </p>
+      <p class="tabular mt-1 font-display text-lg font-bold leading-none text-cloud sm:text-xl">
+        <span id="td-kvhit">0.0</span>
+        <span class="ml-1 font-mono text-[10px] font-normal text-ink-muted">%</span>
+      </p>
+    </div>
+    <div class="p-3">
+      <p class="font-mono text-[10px] uppercase tracking-[0.1em] text-ink-muted">
+        SESSION COST
+      </p>
+      <p class="tabular mt-1 font-mono text-sm leading-none text-ok">$0.000</p>
+      <p
+        class="tabular mt-1 font-mono text-[10px] leading-none text-ink-muted"
+      >
+        cloud cf <span id="td-cloudcost">$0.000</span>
+      </p>
+    </div>
+  </div>
+
+  <!-- Oscilloscope viewport: explicit non-zero height so getBoundingClientRect() is always valid -->
+  <div class="border-y border-hairline">
+    <div class="h-[200px] w-full sm:h-[240px]">
+      <canvas
+        id="engine-scope"
+        class="block h-full w-full"
+        aria-hidden="true"
+      ></canvas>
+    </div>
+  </div>
+
+  <!-- MCP protocol trace console -->
+  <div class="flex flex-col">
+    <div
+      class="overflow-hidden border-b border-hairline px-3 py-2 sm:px-4"
+      aria-label="MCP protocol trace"
+    >
+      <p
+        id="engine-console"
+        class="flex h-[105px] flex-col justify-end overflow-hidden font-mono text-[11px] leading-[21px] sm:text-[12px]"
+      ></p>
+    </div>
+
+    <!-- Hardware status bar (nvidia-smi snapshot, Nov 19 2026): wraps cleanly, zero scrollbar -->
+    <div class="flex flex-wrap items-center justify-between gap-x-3 gap-y-1 px-3 py-2 sm:px-4">
+      <p class="tabular shrink font-mono text-[10px] uppercase tracking-[0.08em] text-ink-secondary">
+        GPU: {formatInt(gpu.vramUsedMiB)} / {formatInt(gpu.vramTotalMiB)} MiB
+        <span class="text-ink-muted">· {gpu.powerDrawW} W · {gpu.tempC} °C</span>
+      </p>
+      <p class="tabular shrink font-mono text-[10px] uppercase tracking-[0.08em] text-ink-muted">
+        DRIVER {gpu.driver}
+      </p>
+    </div>
+  </div>
+</div>
+
+<style>
+  /* ── Mode keys: exactly one raised, the rest recessed ─────────────
+     Replaces the tactile-key treatment so an amber-bordered (MTP) tab
+     can never visually compete with a selected (Cobalt) tab. The active
+     tab shows a raised surface, high-contrast ink, and a 2px top accent
+     bar in its signal color; unselected tabs sit recessed with a muted
+     slate ink and a standard hairline border. */
+  .les-mode {
+    position: relative;
+    background: var(--bg-recessed);
+    border: 1px solid var(--border-hairline);
+    box-shadow: none;
+    padding: 10px 12px;
+    text-align: left;
+    color: var(--ink-muted);
+    transition: background-color 120ms linear, border-color 120ms linear,
+      color 120ms linear;
+  }
+  .les-mode:hover {
+    border-color: var(--border-strong);
+    color: var(--ink-secondary);
+  }
+  .les-mode.is-active {
+    background: var(--bg-raised);
+    border-color: var(--border-strong);
+    color: var(--ink-primary);
+  }
+  .les-mode.is-active > span {
+    color: var(--ink-primary);
+  }
+  .les-mode.is-active::before {
+    content: '';
+    position: absolute;
+    top: -1px;
+    left: -1px;
+    right: -1px;
+    height: 2px;
+  }
+  .les-mode.mode--warm.is-active {
+    border-color: var(--signal-cloud);
+  }
+  .les-mode.mode--warm.is-active::before {
+    background: var(--signal-cloud);
+  }
+  .les-mode.mode--mtp.is-active {
+    border-color: var(--signal-local);
+  }
+  .les-mode.mode--mtp.is-active::before {
+    background: var(--signal-local);
+  }
+  .les-mode.mode--swarm.is-active {
+    border-color: var(--ink-primary);
+  }
+  .les-mode.mode--swarm.is-active::before {
+    background: var(--ink-primary);
+  }
+
+  @media (prefers-reduced-motion: reduce) {
+    .live-led,
+    .les-mode {
+      animation: none !important;
+      transition: none !important;
+    }
+  }
+</style>
+
+<script>
+  import '../scripts/live-engine';
+</script>

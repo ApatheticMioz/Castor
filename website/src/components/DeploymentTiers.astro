@@ -1,0 +1,190 @@
+---
+/**
+ * Castor — Deployment Tiers (dual funnel: open core + regulated air-gap)
+ * No fake badges, no fake forms: real $0 / one-time / mailto CTAs only.
+ */
+import { ARCHITECTURE } from '../data/telemetry';
+
+const GITHUB = ARCHITECTURE.links.github;
+const EMAIL = 'ApatheticMioz@gmail.com';
+
+const tiers = [
+  {
+    key: 'core',
+    name: 'Castor Core',
+    price: '$0',
+    tag: 'AGPL-3.0 Open Source',
+    audience:
+      'Individual developers & open-source contributors pairing cloud leads with local GPUs (8 GB to 24 GB+).',
+    bullets: [
+      'Full Rust MCP microkernel (castor_coworker / task / server)',
+      '8 core + 2 AST tools + 27 tree-sitter grammars',
+      '5-layer sandbox & Linux Landlock enforcement',
+      'vLLM / llama.cpp / Ollama / SGLang engine profiles',
+      'Live castor stats telemetry (tokens, KV cache, savings)',
+    ],
+    cta: null,
+  },
+  {
+    key: 'sprint',
+    name: 'Turnkey Local Sprint',
+    price: '$1,500',
+    tag: 'One-Time · 48-Hour Setup',
+    audience:
+      'Engineering teams standing up dedicated local inference hardware without weeks of vLLM / CUDA / quantization tuning.',
+    bullets: [
+      'Custom vLLM 0.33 / llama.cpp + MTP/DFlash2 tuning for your GPUs (RTX 3090/4090/5090 or L40S/H100)',
+      'Team workspace sandbox & shell policy hardening',
+      'IDE onboarding: Claude Code, Antigravity, Cursor',
+      'Verified throughput benchmark handoff',
+    ],
+    cta: `mailto:${EMAIL}?subject=Castor%20Turnkey%20Local%20Sprint`,
+    ctaLabel: 'Request 48-Hour Sprint →',
+  },
+  {
+    key: 'enterprise',
+    name: 'Enterprise Air-Gap Pilot',
+    price: 'Custom',
+    tag: '10–50 Seats · Below Copilot Anchor',
+    audience:
+      'Fixed-scope compliance pilot (1–3 months, priced under Copilot\u2019s $19–$39/seat/mo anchor) for DIB, defense, finance, and healthcare enclaves where source code cannot touch external APIs.',
+    bullets: [
+      'Commercial dual-license (AGPL-3.0 opt-out)',
+      'Signed air-gapped binary with outbound web / paper tools compiled out',
+      'NIST 800-171 / CMMC Level 2 / ITAR / SCIF per-slice JSONL audit ledger',
+      'Dedicated deployment SLA & custom model qualification',
+    ],
+    cta: `mailto:${EMAIL}?subject=Castor%20Enterprise%20Air-Gap%20Pilot`,
+    ctaLabel: 'Scope an Air-Gap Pilot →',
+    secondary: `${GITHUB}/blob/main/docs/commercial-deployments.md`,
+  },
+];
+---
+
+<section id="deploy" data-reveal class="scroll-mt-16 mx-auto max-w-6xl px-6 py-16 md:py-24">
+  <header class="mb-8 max-w-3xl">
+    <p class="font-mono text-[11px] uppercase tracking-widest text-ink-muted">
+      {`// deploy`} · three real tiers · zero fake funnels
+    </p>
+    <h2 class="mt-3 font-display text-3xl font-bold tracking-tight text-ink md:text-4xl">
+      Open Core for Engineers. Air-Gap Compliance for Regulated Teams.
+    </h2>
+    <p class="mt-3 text-sm leading-relaxed text-ink-secondary">
+      Every path below is a real offer with a real contact — no drip forms,
+      no "book a demo" theater. If your team's code never leaves the enclave,
+      the math on the page above is the proposal.
+    </p>
+  </header>
+
+  <div class="spec-grid grid-cols-1 lg:grid-cols-3">
+    {tiers.map((t) => (
+      <article
+        class:list={['flex flex-col p-6', t.key === 'core' ? 'cell-recessed' : '']}
+      >
+        <header>
+          <p class="font-mono text-[11px] uppercase tracking-widest text-ink-muted">
+            {t.name}
+          </p>
+          <p class="tabular mt-2 font-display text-3xl font-bold text-ink">
+            {t.price}
+          </p>
+          <p class="mt-1 font-mono text-[11px] text-ink-secondary">{t.tag}</p>
+        </header>
+
+        <p class="mt-4 text-xs leading-relaxed text-ink-secondary">{t.audience}</p>
+
+        <ul class="mt-4 flex-1 space-y-2.5">
+          {t.bullets.map((b) => (
+            <li class="flex gap-2 text-xs leading-relaxed text-ink-secondary">
+              <span
+                class="mt-px shrink-0 font-mono text-[11px] text-local"
+                aria-hidden="true"
+              >▸</span>
+              <span>{b}</span>
+            </li>
+          ))}
+        </ul>
+
+        <footer class="mt-auto flex flex-col gap-3 pt-8">
+          {t.key === 'core' ? (
+            <>
+              <button
+                type="button"
+                class="tactile-key tactile-key--local flex w-full flex-col items-center justify-center px-3 py-3 text-center font-mono leading-snug text-ink hover:text-local"
+                data-copy={`npx -y mcp-castor install --client all`}
+              >
+                <span class="text-[11px] sm:text-xs">
+                  npx -y mcp-castor install --client all
+                </span>
+                <span
+                  class="mt-1 text-[10px] uppercase tracking-widest text-ink-muted"
+                >
+                  copy install command
+                </span>
+              </button>
+              <a
+                href={GITHUB}
+                class="text-center font-mono text-[11px] leading-relaxed break-all text-ink-secondary underline decoration-hairline underline-offset-4 hover:text-ink"
+              >
+                {GITHUB.replace('https://', '')}
+              </a>
+            </>
+          ) : (
+            <>
+              <a
+                href={t.cta}
+                class="tactile-key tactile-key--local inline-flex items-center justify-center px-3 py-3 text-center font-mono text-xs leading-snug text-ink hover:text-local"
+              >
+                {t.ctaLabel}
+              </a>
+              {t.secondary ? (
+                <a
+                  href={t.secondary}
+                  class="text-center font-mono text-[11px] leading-relaxed break-all text-ink-secondary underline decoration-hairline underline-offset-4 hover:text-ink"
+                >
+                  Commercial deployment docs →
+                </a>
+              ) : null}
+            </>
+          )}
+        </footer>
+      </article>
+    ))}
+  </div>
+
+  <p class="mt-4 font-mono text-[11px] text-ink-muted">
+    All commercial tiers are direct from the maintainer — no reseller, no
+    middleman. Questions: {EMAIL}.
+  </p>
+</section>
+
+<script>
+  // Tactile copy-to-clipboard for the install command. Uses the async
+  // Clipboard API where available; on non-secure contexts the hint degrades
+  // to a manual-copy instruction instead of any deprecated clipboard call.
+  const buttons = Array.from(document.querySelectorAll<HTMLButtonElement>('[data-copy]'));
+  for (const btn of buttons) {
+    const hint = btn.querySelector<HTMLSpanElement>('span:last-child');
+    btn.addEventListener('click', () => {
+      const cmd = btn.dataset.copy ?? '';
+      const done = (ok: boolean) => {
+        if (!hint) return;
+        hint.textContent = ok ? 'copied ✓' : 'select & copy manually';
+        hint.classList.toggle('text-local', ok);
+        window.clearTimeout((btn as { __copyTimer?: number }).__copyTimer ?? 0);
+        (btn as { __copyTimer?: number }).__copyTimer = window.setTimeout(() => {
+          hint.textContent = 'copy install command';
+          hint.classList.remove('text-local');
+        }, 2000);
+      };
+      if (navigator.clipboard?.writeText) {
+        navigator.clipboard.writeText(cmd).then(
+          () => done(true),
+          () => done(false),
+        );
+      } else {
+        done(false);
+      }
+    });
+  }
+</script>

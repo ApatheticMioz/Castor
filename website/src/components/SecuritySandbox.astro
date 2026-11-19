@@ -1,0 +1,263 @@
+---
+import {
+  PATH_LAYERS,
+  COMPANION_GATES,
+  VECTOR_CASES,
+  VECTOR_SUMMARY,
+} from '../scripts/security-sandbox';
+
+const S = VECTOR_SUMMARY;
+---
+
+<section id="security" data-reveal class="scroll-mt-16 border-y border-hairline bg-recessed/40">
+  <!-- Section header -->
+  <div class="border-b border-hairline">
+    <div class="mx-auto max-w-6xl px-4 py-5 sm:px-6">
+      <h2 class="font-display text-2xl font-bold tracking-tight text-ink sm:text-3xl">
+        Zero-Trust Workspace Containment. Verified Across 137 Attack Vectors.
+      </h2>
+      <p class="mt-1 font-mono text-xs text-ink-muted">
+        <span class="tabular">{S.blocked} blocked · {S.allowed} allowed</span> ·
+        deterministic refusals · source of record
+        <span class="text-ink-secondary"> {S.source}</span>
+      </p>
+    </div>
+  </div>
+
+  <div class="mx-auto max-w-6xl px-4 py-6 sm:px-6">
+    <div class="grid grid-cols-1 gap-px border border-[var(--border-hairline)] bg-[var(--border-hairline)] lg:grid-cols-12">
+      <!-- Left · The Defense-in-Depth Stack -->
+      <div class="cell-recessed p-4 lg:col-span-5">
+        <p class="font-mono text-[11px] uppercase tracking-widest text-ink-muted">
+          The Defense-in-Depth Stack · <span class="text-ink-secondary">src/tools/sandbox/mod.rs</span>
+        </p>
+
+        <!-- 5-layer vertical pipeline -->
+        <ol class="mt-3" aria-label="Five-layer path containment pipeline">
+          {PATH_LAYERS.map((l, i) => (
+            <li class="relative pl-10">
+              {i < PATH_LAYERS.length - 1 && (
+                <span
+                  class="absolute left-[15px] top-6 h-full w-px bg-[var(--border-hairline)]"
+                  aria-hidden="true"
+                ></span>
+              )}
+              <span
+                class="absolute left-0 top-0 flex h-8 w-8 items-center justify-center border border-[var(--border-strong)] bg-raised font-mono text-[11px] font-semibold text-ink"
+              >
+                {l.level}
+              </span>
+              <div class="pt-1">
+                <p class="font-mono text-xs text-ink">{l.fn}</p>
+                <p class="mt-0.5 font-mono text-[11px] leading-relaxed text-ink-secondary">
+                  {l.role}
+                </p>
+              </div>
+            </li>
+          ))}
+        </ol>
+
+        <!-- Hairline divider -->
+        <div class="my-5 border-t border-[var(--border-hairline)]" aria-hidden="true"></div>
+
+        <p class="font-mono text-[11px] uppercase tracking-widest text-ink-muted">
+          Companion Runtime Gates
+        </p>
+        <ul class="mt-3 space-y-3">
+          {COMPANION_GATES.map((g) => (
+            <li class="border-l-2 border-l-[var(--signal-local)] pl-3">
+              <p class="font-mono text-xs text-ink">{g.name}</p>
+              <p class="font-mono text-[10px] text-ink-muted">{g.coord}</p>
+              <p class="mt-1 font-mono text-[11px] leading-relaxed text-ink-secondary">
+                {g.desc}
+              </p>
+            </li>
+          ))}
+        </ul>
+
+        <!-- Air-gap transparency callout -->
+        <div class="mt-5 border border-[var(--border-strong)] bg-ground p-3">
+          <p class="font-mono text-[11px] uppercase tracking-widest text-ink-secondary">
+            Air-Gap Transparency
+          </p>
+          <p class="mt-2 font-mono text-[11px] leading-relaxed text-ink-secondary">
+            Core MCP + local execution communicate solely over <span class="text-ink">stdio</span>
+            and <span class="text-ink">loopback (127.0.0.1)</span>. The optional
+            <span class="text-ink"> web_search</span>,
+            <span class="text-ink"> web_fetch</span>, and
+            <span class="text-ink"> paper_lookup</span> tools are feature/config-gated and can be
+            compiled out entirely for strict air-gapped CMMC L2 / ITAR / SCIF deployments.
+          </p>
+        </div>
+      </div>
+
+      <!-- Right · Interactive Security Vector Probe -->
+      <div class="cell-recessed p-4 lg:col-span-7">
+        <div class="flex flex-wrap items-baseline justify-between gap-2">
+          <p class="font-mono text-[11px] uppercase tracking-widest text-ink-muted">
+            Interactive Security Vector Probe
+          </p>
+          <p class="tabular font-mono text-[11px] text-ink-secondary">
+            {S.total} vectors · <span class="text-block">{S.blocked} blocked</span> ·
+            <span class="text-ok"> {S.allowed} allowed</span>
+          </p>
+        </div>
+
+        <!-- Vector selectors -->
+        <div class="mt-3 space-y-2" role="list" aria-label="Security vector cases">
+          {VECTOR_CASES.map((v) => (
+            <button
+              type="button"
+              role="listitem"
+              data-vector-id={v.id}
+              class="tactile-key flex w-full items-center gap-3 px-3 py-2 text-left"
+            >
+              <span
+                class={`shrink-0 font-mono text-[10px] font-semibold ${
+                  v.verdict === 'blocked' ? 'text-block' : 'text-ok'
+                }`}
+              >
+                {v.verdict === 'blocked' ? 'BLOCK' : 'ALLOW'}
+              </span>
+              <span class="min-w-0 flex-1 truncate font-mono text-xs text-ink-secondary">
+                {v.input}
+              </span>
+            </button>
+          ))}
+        </div>
+
+        <!-- Trace panel -->
+        <div id="security-vector-probe" class="mt-4 border border-[var(--border-hairline)] bg-ground p-4">
+          <p class="font-mono text-[11px] uppercase tracking-widest text-ink-muted">
+            Layer-by-Layer Trace
+          </p>
+          <ol class="mt-3 space-y-1.5" aria-label="Containment layer trace">
+            <li
+              data-step="0"
+              class="ss-step flex items-center justify-between gap-3 border-b border-[var(--border-hairline)] pb-1.5 font-mono text-[11px] text-ink-secondary"
+            >
+              <span>L1 · resolve_workspace_root</span>
+              <span data-status class="tabular font-semibold">···</span>
+            </li>
+            <li
+              data-step="1"
+              class="ss-step flex items-center justify-between gap-3 border-b border-[var(--border-hairline)] pb-1.5 font-mono text-[11px] text-ink-secondary"
+            >
+              <span>L2 · verify_symlink_containment</span>
+              <span data-status class="tabular font-semibold">···</span>
+            </li>
+            <li
+              data-step="2"
+              class="ss-step flex items-center justify-between gap-3 border-b border-[var(--border-hairline)] pb-1.5 font-mono text-[11px] text-ink-secondary"
+            >
+              <span>L3 · refuse_out_of_tree</span>
+              <span data-status class="tabular font-semibold">···</span>
+            </li>
+            <li
+              data-step="3"
+              class="ss-step flex items-center justify-between gap-3 border-b border-[var(--border-hairline)] pb-1.5 font-mono text-[11px] text-ink-secondary"
+            >
+              <span>L4 · normalize_traversal</span>
+              <span data-status class="tabular font-semibold">···</span>
+            </li>
+            <li
+              data-step="4"
+              class="ss-step flex items-center justify-between gap-3 border-b border-[var(--border-hairline)] pb-1.5 font-mono text-[11px] text-ink-secondary"
+            >
+              <span>L5 · check_binary</span>
+              <span data-status class="tabular font-semibold">···</span>
+            </li>
+            <li
+              data-step="5"
+              class="ss-step flex items-center justify-between gap-3 font-mono text-[11px] text-ink-secondary"
+            >
+              <span>Runtime · Shell / AST gates</span>
+              <span data-status class="tabular font-semibold">···</span>
+            </li>
+          </ol>
+
+          <div class="mt-4 flex flex-wrap items-center gap-3">
+            <span
+              id="security-vector-verdict"
+              class="ss-verdict border px-3 py-1 font-mono text-[11px] font-semibold"
+            >
+              TRACING…
+            </span>
+            <span class="font-mono text-[11px] text-ink-muted">
+              tripped at <span id="security-vector-triplayer" class="text-ink-secondary">—</span>
+            </span>
+          </div>
+          <p
+            id="security-vector-struct"
+            class="mt-3 border-l-2 border-[var(--border-strong)] pl-3 font-mono text-[11px] leading-relaxed text-ink-secondary"
+          >
+            —
+          </p>
+          <p id="security-vector-source" class="mt-2 font-mono text-[10px] text-ink-muted">
+            —
+          </p>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <style>
+    #security .ss-step {
+      transition: opacity 140ms linear, border-color 140ms linear;
+    }
+    #security .ss-step[data-status] {
+      transition: color 140ms linear;
+    }
+    #security .ss-step.is-pending {
+      opacity: 0.4;
+    }
+    #security .ss-step.is-muted {
+      opacity: 0.35;
+    }
+    #security .ss-step.is-pass {
+      opacity: 1;
+      border-color: rgba(34, 197, 94, 0.25);
+    }
+    #security .ss-step.is-pass [data-status] {
+      color: var(--signal-ok);
+    }
+    #security .ss-step.is-allow {
+      opacity: 1;
+      border-color: rgba(34, 197, 94, 0.25);
+    }
+    #security .ss-step.is-allow [data-status] {
+      color: var(--signal-ok);
+    }
+    #security .ss-step.is-trip {
+      opacity: 1;
+      border-color: rgba(239, 68, 68, 0.5);
+      background: rgba(239, 68, 68, 0.06);
+    }
+    #security .ss-step.is-trip [data-status] {
+      color: var(--signal-block);
+    }
+    #security .ss-verdict {
+      border-color: var(--border-strong);
+      color: var(--ink-secondary);
+      transition: color 140ms linear, border-color 140ms linear, background 140ms linear;
+    }
+    #security .ss-verdict.is-blocked {
+      border-color: var(--signal-block);
+      color: var(--signal-block);
+      background: rgba(239, 68, 68, 0.1);
+    }
+    #security .ss-verdict.is-allowed {
+      border-color: var(--signal-ok);
+      color: var(--signal-ok);
+      background: rgba(34, 197, 94, 0.1);
+    }
+    @media (prefers-reduced-motion: reduce) {
+      #security .ss-step,
+      #security .ss-verdict {
+        transition: none;
+      }
+    }
+  </style>
+
+  <script src="../scripts/security-sandbox.ts"></script>
+</section>
