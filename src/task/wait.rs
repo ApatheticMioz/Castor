@@ -57,8 +57,8 @@ impl StatusServer {
     /// Acquire the singleton lock. Returns `true` if we own it, `false` if
     /// another live process holds it (caller should exit 0).
     pub fn try_acquire_lock(&self) -> bool {
-        let ttl = 30_000; // 30 s TTL; the server renews implicitly by holding.
-        match self.inner.locks.acquire("status", ttl) {
+        let ttl = 30_000; // 30 s TTL; liveness-checked against active holder pid.
+        match self.inner.locks.acquire_live("status", ttl) {
             Ok(AcquireResult::Acquired) => true,
             Ok(AcquireResult::HeldBy { .. }) => false,
             Err(e) => {
@@ -142,7 +142,10 @@ impl StatusServer {
             }
         }
         let listener = bound_listener.ok_or_else(|| {
-            std::io::Error::new(std::io::ErrorKind::AddrInUse, "all candidate status ports in use")
+            std::io::Error::new(
+                std::io::ErrorKind::AddrInUse,
+                "all candidate status ports in use",
+            )
         })?;
         let bound_addr = listener.local_addr()?;
         let bound_port = bound_addr.port();
@@ -849,8 +852,14 @@ mod tests {
             }
         }
 
-        assert_ne!(active_port, 0, "status server must bind to fallback port and write status.port");
-        assert_ne!(active_port, blocked_port, "status server must have fallen back away from blocked port");
+        assert_ne!(
+            active_port, 0,
+            "status server must bind to fallback port and write status.port"
+        );
+        assert_ne!(
+            active_port, blocked_port,
+            "status server must have fallen back away from blocked port"
+        );
 
         // Verify the server responds on the active port.
         let reg = server.inner.registry.clone();

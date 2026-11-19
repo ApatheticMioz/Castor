@@ -22,8 +22,11 @@ use std::fs::{self, File, OpenOptions};
 use std::io::{self, Write};
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
+use std::sync::atomic::{AtomicU64, Ordering};
 
 use thiserror::Error;
+
+static LOCK_TMP_SEQ: AtomicU64 = AtomicU64::new(0);
 
 /// The castor state directory and its typed sub-paths.
 #[derive(Debug, Clone)]
@@ -180,27 +183,50 @@ impl Locks {
     /// - A stale lock is atomically renamed to `<name>.lock.tombstone` (inert)
     ///   and a fresh O_EXCL is attempted; a raced loser fails cleanly.
     pub fn acquire(&self, name: &str, ttl_ms: u64) -> io::Result<AcquireResult> {
+        self.acquire_with(name, ttl_ms, false)
+    }
+
+    /// Acquire the exclusive lock `name`, additionally reclaiming any in-TTL
+    /// lock whose recorded `pid` is no longer alive (including Linux zombies).
+    ///
+    /// Used by long-lived singleton daemons (`proxy`, `status`) so a forced
+    /// restart after `SIGKILL` does not leave the service locked out until the
+    /// full TTL expires.
+    pub fn acquire_live(&self, name: &str, ttl_ms: u64) -> io::Result<AcquireResult> {
+        self.acquire_with(name, ttl_ms, true)
+    }
+
+    fn acquire_with(
+        &self,
+        name: &str,
+        ttl_ms: u64,
+        verify_pid_alive: bool,
+    ) -> io::Result<AcquireResult> {
         fs::create_dir_all(&self.dir)?;
         let path = self.path(name);
         let pid = std::process::id();
         let now = now_millis();
 
-        // 1. Fresh O_EXCL.
-        if let Ok(mut f) = OpenOptions::new().create_new(true).write(true).open(&path) {
-            write_lock(&mut f, pid, now, ttl_ms)?;
+        // 1. Fresh atomic create (staging file + hard_link avoids an empty 0-byte window).
+        if self.try_create_exclusive(name, &path, pid, now, ttl_ms)? {
             return Ok(AcquireResult::Acquired);
         }
 
-        // 2. Exists: reject if still within TTL.
-        if let Some(info) = read_lock(&path)?
-            && now.saturating_sub(info.held_at) < ttl_ms
+        let is_held = |info: &LockInfo| {
+            now.saturating_sub(info.held_at) < ttl_ms
+                && (!verify_pid_alive || crate::task::semaphore::pid_alive(info.pid))
+        };
+
+        // 2. Exists: reject if still active.
+        if let Some(info) = read_lock_stable(&path)
+            && is_held(&info)
         {
             return Ok(AcquireResult::HeldBy { pid: info.pid });
         }
 
-        // 3. Stale (or unreadable): re-verify, rename to tombstone, O_EXCL.
-        if let Some(info) = read_lock(&path)?
-            && now.saturating_sub(info.held_at) < ttl_ms
+        // 3. Stale (or unreadable): re-verify, rename to tombstone, exclusive create.
+        if let Some(info) = read_lock_stable(&path)
+            && is_held(&info)
         {
             return Ok(AcquireResult::HeldBy { pid: info.pid });
         }
@@ -214,16 +240,49 @@ impl Locks {
         }
         let _ = fs::rename(&path, &tombstone);
 
-        match OpenOptions::new().create_new(true).write(true).open(&path) {
-            Ok(mut f) => {
-                write_lock(&mut f, pid, now, ttl_ms)?;
-                Ok(AcquireResult::Acquired)
+        if self.try_create_exclusive(name, &path, pid, now, ttl_ms)? {
+            Ok(AcquireResult::Acquired)
+        } else {
+            // Raced loser: a competitor created a fresh lock in the gap.
+            let holder = read_lock_stable(&path).map(|i| i.pid).unwrap_or(0);
+            Ok(AcquireResult::HeldBy { pid: holder })
+        }
+    }
+
+    fn try_create_exclusive(
+        &self,
+        name: &str,
+        path: &Path,
+        pid: u32,
+        now: u64,
+        ttl_ms: u64,
+    ) -> io::Result<bool> {
+        let seq = LOCK_TMP_SEQ.fetch_add(1, Ordering::Relaxed);
+        let tmp = self.dir.join(format!(".{name}.lock.tmp.{pid}.{seq}"));
+        let mut f = OpenOptions::new().create_new(true).write(true).open(&tmp)?;
+        if let Err(err) = write_lock(&mut f, pid, now, ttl_ms) {
+            drop(f);
+            let _ = fs::remove_file(&tmp);
+            return Err(err);
+        }
+        drop(f);
+
+        let link_res = fs::hard_link(&tmp, path);
+        let _ = fs::remove_file(&tmp);
+        match link_res {
+            Ok(()) => Ok(true),
+            Err(e) if e.kind() == io::ErrorKind::AlreadyExists => Ok(false),
+            Err(e) if e.kind() == io::ErrorKind::Unsupported => {
+                match OpenOptions::new().create_new(true).write(true).open(path) {
+                    Ok(mut f) => {
+                        write_lock(&mut f, pid, now, ttl_ms)?;
+                        Ok(true)
+                    }
+                    Err(err) if err.kind() == io::ErrorKind::AlreadyExists => Ok(false),
+                    Err(err) => Err(err),
+                }
             }
-            Err(_) => {
-                // Raced loser: a competitor created a fresh lock in the gap.
-                let holder = read_lock(&path)?.map(|i| i.pid).unwrap_or(0);
-                Ok(AcquireResult::HeldBy { pid: holder })
-            }
+            Err(e) => Err(e),
         }
     }
 
@@ -290,6 +349,20 @@ fn read_lock(path: &Path) -> io::Result<Option<LockInfo>> {
         held_at,
         ttl_ms,
     }))
+}
+
+/// Read a lockfile cleanly, tolerating transient empty/partial reads during
+/// non-hardlink fallback creation and returning `None` for missing or
+/// persistently unreadable files.
+fn read_lock_stable(path: &Path) -> Option<LockInfo> {
+    for attempt in 0..5 {
+        match read_lock(path) {
+            Ok(info) => return info,
+            Err(_) if attempt < 4 => std::thread::sleep(std::time::Duration::from_millis(2)),
+            Err(_) => return None,
+        }
+    }
+    None
 }
 
 /// Serialize a lock payload to an open file.
@@ -432,6 +505,106 @@ mod tests {
         // original lock untouched
         let info = read_lock(&locks.path("x")).unwrap().unwrap();
         assert_eq!(info.pid, 424242);
+    }
+
+    #[test]
+    fn acquire_live_reclaims_dead_pid_within_ttl() {
+        let dir = tmp_dir();
+        let locks = Locks::new(&dir);
+        #[cfg(unix)]
+        let mut child = std::process::Command::new("true").spawn().unwrap();
+        #[cfg(windows)]
+        let mut child = std::process::Command::new("cmd")
+            .args(["/c", "exit", "0"])
+            .spawn()
+            .unwrap();
+        let dead_pid = child.id();
+        let _ = child.wait();
+
+        let now = now_millis();
+        write_lock_file(&locks.path("live_dead"), dead_pid, now, 60_000).unwrap();
+        assert_eq!(
+            locks.acquire_live("live_dead", 60_000).unwrap(),
+            AcquireResult::Acquired
+        );
+        let info = read_lock(&locks.path("live_dead")).unwrap().unwrap();
+        assert_eq!(info.pid, std::process::id());
+    }
+
+    #[test]
+    fn acquire_live_respects_live_pid_within_ttl() {
+        let dir = tmp_dir();
+        let locks = Locks::new(&dir);
+        assert_eq!(
+            locks.acquire_live("live_alive", 60_000).unwrap(),
+            AcquireResult::Acquired
+        );
+        assert_eq!(
+            locks.acquire_live("live_alive", 60_000).unwrap(),
+            AcquireResult::HeldBy {
+                pid: std::process::id()
+            }
+        );
+    }
+
+    #[test]
+    fn acquire_live_concurrent_contention_single_winner() {
+        let dir = tmp_dir();
+        let barrier = std::sync::Arc::new(std::sync::Barrier::new(16));
+        let mut handles = Vec::new();
+        for _ in 0..16 {
+            let b = barrier.clone();
+            let d = dir.clone();
+            handles.push(std::thread::spawn(move || {
+                let locks = Locks::new(&d);
+                b.wait();
+                locks.acquire_live("race_live", 60_000).unwrap()
+            }));
+        }
+        let outcomes: Vec<_> = handles.into_iter().map(|h| h.join().unwrap()).collect();
+        let winners = outcomes
+            .iter()
+            .filter(|r| matches!(r, AcquireResult::Acquired))
+            .count();
+        assert_eq!(winners, 1, "exactly one racer may acquire: {outcomes:?}");
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn acquire_live_reclaims_unreaped_linux_zombie() {
+        let dir = tmp_dir();
+        let locks = Locks::new(&dir);
+        let mut child = std::process::Command::new("true").spawn().unwrap();
+        let zombie_pid = child.id();
+        // Poll until the child enters State: Z (<defunct>) without waiting on it.
+        let status_path = format!("/proc/{zombie_pid}/status");
+        let mut became_zombie = false;
+        for _ in 0..400 {
+            if fs::read_to_string(&status_path)
+                .unwrap_or_default()
+                .lines()
+                .any(|l| {
+                    l.starts_with("State:")
+                        && l.trim_start_matches("State:").trim_start().starts_with('Z')
+                })
+            {
+                became_zombie = true;
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        }
+        assert!(
+            became_zombie,
+            "child {zombie_pid} did not enter State: Z within 2s"
+        );
+
+        let now = now_millis();
+        write_lock_file(&locks.path("zombie_live"), zombie_pid, now, 60_000).unwrap();
+        assert_eq!(
+            locks.acquire_live("zombie_live", 60_000).unwrap(),
+            AcquireResult::Acquired
+        );
+        let _ = child.wait();
     }
 
     #[test]
