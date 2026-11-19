@@ -1840,6 +1840,101 @@ async fn watchdog_timeout_retry_preserves_prefix_and_effort() {
     );
 }
 
+#[tokio::test]
+async fn watchdog_repetition_loop_retry_preserves_prefix_and_effort() {
+    struct LoopThenOkEngine {
+        efforts: tokio::sync::Mutex<Vec<Option<String>>>,
+        messages: tokio::sync::Mutex<Vec<Vec<Message>>>,
+    }
+    #[async_trait]
+    impl ChatEngine for LoopThenOkEngine {
+        async fn chat(
+            &self,
+            messages: &[Message],
+            _tools: &[ToolSchema],
+            _stream: bool,
+            effort: Option<&str>,
+        ) -> Result<Completion, EngineError> {
+            let first = self.efforts.lock().await.is_empty();
+            self.efforts.lock().await.push(effort.map(str::to_string));
+            self.messages.lock().await.push(messages.to_vec());
+            if first {
+                Err(EngineError::RepetitionLoop {
+                    kind: "pattern".into(),
+                    pattern: "Let me check ...".into(),
+                    count: 6,
+                })
+            } else {
+                Ok(ok_comp())
+            }
+        }
+    }
+
+    let state = tmp_state();
+    let logger = logger_for(&state);
+    let engine = LoopThenOkEngine {
+        efforts: tokio::sync::Mutex::new(Vec::new()),
+        messages: tokio::sync::Mutex::new(Vec::new()),
+    };
+    let res = chat_with_watchdog(&engine, &[], &[], Some("xhigh"), 0, 0, &logger, 1)
+        .await
+        .unwrap();
+    assert_eq!(res.finish_reason.as_deref(), Some("stop"));
+    let events = logger.read_all();
+    assert!(
+        events
+            .iter()
+            .any(|e| e["type"] == "turn_stall_retry" && e["reason"] == "repetition_loop"),
+        "expected repetition_loop stall event: {events:?}"
+    );
+    let efforts = engine.efforts.lock().await;
+    assert_eq!(
+        *efforts,
+        Vec::from([Some("xhigh".into()), Some("xhigh".into())])
+    );
+    let messages = engine.messages.lock().await;
+    assert_eq!(last_msg(&messages[1]), REPETITION_RETRY_NUDGE);
+}
+
+#[tokio::test]
+async fn watchdog_repetition_loop_persistent_failure_does_not_infinite_loop() {
+    struct AlwaysLoopEngine {
+        calls: std::sync::atomic::AtomicUsize,
+    }
+    #[async_trait]
+    impl ChatEngine for AlwaysLoopEngine {
+        async fn chat(
+            &self,
+            _messages: &[Message],
+            _tools: &[ToolSchema],
+            _stream: bool,
+            _effort: Option<&str>,
+        ) -> Result<Completion, EngineError> {
+            self.calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            Err(EngineError::RepetitionLoop {
+                kind: "pattern".into(),
+                pattern: "stuck".into(),
+                count: 6,
+            })
+        }
+    }
+
+    let state = tmp_state();
+    let logger = logger_for(&state);
+    let engine = AlwaysLoopEngine {
+        calls: std::sync::atomic::AtomicUsize::new(0),
+    };
+    let err = chat_with_watchdog(&engine, &[], &[], Some("xhigh"), 0, 0, &logger, 1)
+        .await
+        .unwrap_err();
+    assert!(matches!(err, EngineError::RepetitionLoop { .. }));
+    assert_eq!(
+        engine.calls.load(std::sync::atomic::Ordering::SeqCst),
+        2,
+        "must retry exactly once on repetition loop"
+    );
+}
+
 /// Finding 5 — true cooperative yield handoff, end-to-end (overcommit-only
 /// gate).
 ///

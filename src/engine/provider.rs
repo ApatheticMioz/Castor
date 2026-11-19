@@ -26,6 +26,12 @@ pub enum EngineError {
     Sse(String),
     #[error("malformed upstream response: {0}")]
     Malformed(String),
+    #[error("runaway {kind} repetition loop detected after {count} repeats of {pattern:?}")]
+    RepetitionLoop {
+        kind: String,
+        pattern: String,
+        count: usize,
+    },
     /// A replayed trace ran out of recorded responses before the runner
     /// finished. A clean, typed engine failure — never improvised content.
     #[error("trace exhausted: no more recorded responses")]
@@ -300,9 +306,7 @@ impl EngineClient {
             return None;
         }
         let val: Value = resp.json().await.ok()?;
-        val.get("count")
-            .and_then(Value::as_u64)
-            .map(|c| c as usize)
+        val.get("count").and_then(Value::as_u64).map(|c| c as usize)
     }
 
     async fn consume_stream(
@@ -321,6 +325,7 @@ impl EngineClient {
         let mut completion_tokens: Option<u64> = None;
         let mut reasoning_tokens: Option<u64> = None;
         let mut tool_calls: BTreeMap<usize, ToolCall> = BTreeMap::new();
+        let mut detector = crate::proxy::sanitize::RepetitionDetector::new();
 
         while let Some(chunk) = stream.next().await {
             let chunk = chunk.map_err(|e| EngineError::Sse(e.to_string()))?;
@@ -401,17 +406,33 @@ impl EngineClient {
                     };
                     if let Some(r) = delta
                         .get("reasoning_content")
-                        .or_else(|| delta.get("reasoning"))
                         .and_then(Value::as_str)
+                        .filter(|s| !s.is_empty())
+                        .or_else(|| {
+                            delta
+                                .get("reasoning")
+                                .and_then(Value::as_str)
+                                .filter(|s| !s.is_empty())
+                        })
                     {
-                        if !r.is_empty() && ttft.is_none() {
+                        if ttft.is_none() {
                             ttft = Some(t0.elapsed());
+                        }
+                        if let Some(rep) = detector.feed(r) {
+                            return Err(repetition_loop_err(rep));
                         }
                         reasoning_content.push_str(r);
                     }
-                    if let Some(c) = delta.get("content").and_then(Value::as_str) {
-                        if !c.is_empty() && ttft.is_none() {
+                    if let Some(c) = delta
+                        .get("content")
+                        .and_then(Value::as_str)
+                        .filter(|s| !s.is_empty())
+                    {
+                        if ttft.is_none() {
                             ttft = Some(t0.elapsed());
+                        }
+                        if let Some(rep) = detector.feed(c) {
+                            return Err(repetition_loop_err(rep));
                         }
                         content.push_str(c);
                     }
@@ -433,9 +454,14 @@ impl EngineClient {
                             {
                                 slot.name = name.to_string();
                             }
-                            if let Some(args) =
-                                fn_.and_then(|f| f.get("arguments")).and_then(Value::as_str)
+                            if let Some(args) = fn_
+                                .and_then(|f| f.get("arguments"))
+                                .and_then(Value::as_str)
+                                .filter(|s| !s.is_empty())
                             {
+                                if let Some(rep) = detector.feed(args) {
+                                    return Err(repetition_loop_err(rep));
+                                }
                                 slot.arguments.push_str(args);
                             }
                         }
@@ -537,9 +563,13 @@ impl EngineClient {
         };
         let reasoning_content = msg
             .get("reasoning_content")
-            .or_else(|| msg.get("reasoning"))
             .and_then(Value::as_str)
             .filter(|s| !s.trim().is_empty())
+            .or_else(|| {
+                msg.get("reasoning")
+                    .and_then(Value::as_str)
+                    .filter(|s| !s.trim().is_empty())
+            })
             .map(String::from);
         Ok(assemble(
             &content,
@@ -553,6 +583,15 @@ impl EngineClient {
             reasoning_tokens,
             t0,
         ))
+    }
+}
+
+fn repetition_loop_err(rep: crate::proxy::sanitize::Repetition) -> EngineError {
+    let preview: String = rep.pattern.chars().take(120).collect();
+    EngineError::RepetitionLoop {
+        kind: rep.r#type,
+        pattern: preview,
+        count: rep.count,
     }
 }
 
@@ -1407,5 +1446,103 @@ I will list the directory:
         cfg.engine_type = Some("llama.cpp".into());
         let llama_client = EngineClient::from_config(&cfg).unwrap();
         assert_eq!(llama_client.count_tokens(&msgs, &tools).await, None);
+    }
+
+    #[tokio::test]
+    async fn stream_aborts_on_sentence_repetition_loop() {
+        async fn loop_stream_handler() -> axum::response::Response {
+            let unit = "Let me check src/patchwork's CLI and m2_retrieval's estimate_tokens, and also verify the claims.\n\n";
+            let mut frames = Vec::new();
+            for _ in 0..12 {
+                frames.push(json!({"choices": [{"delta": {"content": unit}}]}).to_string());
+            }
+            frames.push("[DONE]".to_string());
+            let chunks: Vec<axum::body::Bytes> = frames
+                .into_iter()
+                .map(|f| axum::body::Bytes::from(format!("data: {f}\n\n")))
+                .collect();
+            Body::from_stream(stream::iter(chunks).map(Ok::<_, std::io::Error>)).into_response()
+        }
+
+        let app = Router::new().route("/chat/completions", post(loop_stream_handler));
+        let base = start(app).await;
+        let client = EngineClient::from_config(&test_config(&base)).unwrap();
+        let err = client.chat(&[msg()], &[], true, None).await.unwrap_err();
+        match err {
+            EngineError::RepetitionLoop { kind, count, .. } => {
+                assert_eq!(kind, "pattern");
+                assert!(count >= 6, "expected >=6 repeats, got {count}");
+            }
+            other => panic!("expected RepetitionLoop error, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn stream_aborts_on_reasoning_without_double_count_and_on_tool_calls() {
+        // 5 repeats with both `reasoning` and `reasoning_content` must NOT double-count into 10 repeats.
+        async fn non_double_count_handler() -> axum::response::Response {
+            let unit = "Carefully inspecting src/engine/provider.rs stream frame handling and repetition boundary threshold.";
+            let mut frames = Vec::new();
+            for _ in 0..5 {
+                frames.push(
+                    json!({"choices": [{"delta": {
+                        "content": "",
+                        "reasoning": unit,
+                        "reasoning_content": unit
+                    }}]})
+                    .to_string(),
+                );
+            }
+            frames.push(
+                json!({"choices": [{"delta": {"content": "done"}, "finish_reason": "stop"}]})
+                    .to_string(),
+            );
+            frames.push("[DONE]".to_string());
+            let chunks: Vec<axum::body::Bytes> = frames
+                .into_iter()
+                .map(|f| axum::body::Bytes::from(format!("data: {f}\n\n")))
+                .collect();
+            Body::from_stream(stream::iter(chunks).map(Ok::<_, std::io::Error>)).into_response()
+        }
+
+        let app_ok = Router::new().route("/chat/completions", post(non_double_count_handler));
+        let base_ok = start(app_ok).await;
+        let client_ok = EngineClient::from_config(&test_config(&base_ok)).unwrap();
+        let comp = client_ok.chat(&[msg()], &[], true, None).await.unwrap();
+        assert_eq!(comp.content, "done");
+
+        // Tool-call argument repetition loop must abort with RepetitionLoop.
+        async fn tool_loop_handler() -> axum::response::Response {
+            let unit = "{\"path\":\"src/proxy/sanitize_very_long_repeated_argument_payload_to_exceed_span.rs\"},";
+            let mut frames = Vec::new();
+            for _ in 0..12 {
+                frames.push(
+                    json!({"choices": [{"delta": {"tool_calls": [{
+                        "index": 0,
+                        "id": "call_1",
+                        "function": {"name": "read_file", "arguments": unit}
+                    }]}}]})
+                    .to_string(),
+                );
+            }
+            frames.push("[DONE]".to_string());
+            let chunks: Vec<axum::body::Bytes> = frames
+                .into_iter()
+                .map(|f| axum::body::Bytes::from(format!("data: {f}\n\n")))
+                .collect();
+            Body::from_stream(stream::iter(chunks).map(Ok::<_, std::io::Error>)).into_response()
+        }
+
+        let app_loop = Router::new().route("/chat/completions", post(tool_loop_handler));
+        let base_loop = start(app_loop).await;
+        let client_loop = EngineClient::from_config(&test_config(&base_loop)).unwrap();
+        let err = client_loop
+            .chat(&[msg()], &[], true, None)
+            .await
+            .unwrap_err();
+        assert!(
+            matches!(err, EngineError::RepetitionLoop { .. }),
+            "expected RepetitionLoop, got {err:?}"
+        );
     }
 }

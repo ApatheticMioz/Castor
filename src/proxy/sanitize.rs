@@ -26,8 +26,14 @@ const CODE_LIMIT: usize = 1000;
 const DIVIDER_LIMIT: usize = 250;
 const DEFAULT_LIMIT: usize = 100;
 const PATTERN_REPEAT_COUNT: usize = 40;
-/// Rolling window length for the multi-character pattern detector.
-const ROLLING_WINDOW: usize = 1500;
+/// Minimum consecutive repeats required even for long sentences/paragraphs.
+const MIN_PATTERN_REPEATS: usize = 6;
+/// Minimum repeated span (characters) targeted by the dynamic repeat rule.
+/// Short fragments clamp up to `PATTERN_REPEAT_COUNT` (40); longer sentences
+/// and blocks trigger proportionally earlier (`ceil(768 / unit_chars)`).
+const MIN_PATTERN_SPAN_CHARS: usize = 768;
+/// Maximum rolling tail retained for arbitrary-period suffix periodicity scans.
+const ROLLING_WINDOW_BYTES: usize = 16_384;
 
 /// A detected runaway-repetition event.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -43,13 +49,15 @@ pub struct Repetition {
 /// Stateful detector for runaway repetition in a streamed text stream.
 ///
 /// Feed chunks via [`RepetitionDetector::feed`]; it tracks the trailing
-/// single-character run and a rolling window of recent text for
-/// multi-character pattern loops.
+/// single-character run and a rolling tail window using linear-time Z-algorithm
+/// periodicity scanning across arbitrary pattern lengths.
 #[derive(Debug, Default)]
 pub struct RepetitionDetector {
     last_char: char,
     char_repeat_count: usize,
     rolling: String,
+    rev_buf: Vec<u8>,
+    z_buf: Vec<usize>,
 }
 
 impl RepetitionDetector {
@@ -65,6 +73,15 @@ impl RepetitionDetector {
         } else {
             DEFAULT_LIMIT
         }
+    }
+
+    /// Dynamic consecutive-repeat threshold for a repeating pattern of `unit_chars`
+    /// codepoints: stays at `PATTERN_REPEAT_COUNT` (40) for short fragments and scales
+    /// down to `MIN_PATTERN_REPEATS` (6) as unit length grows.
+    pub fn required_repeats(unit_chars: usize) -> usize {
+        MIN_PATTERN_SPAN_CHARS
+            .div_ceil(unit_chars.max(1))
+            .clamp(MIN_PATTERN_REPEATS, PATTERN_REPEAT_COUNT)
     }
 
     /// Feed a chunk of streamed text. Returns a [`Repetition`] when
@@ -91,51 +108,121 @@ impl RepetitionDetector {
             }
         }
 
-        // 2. Multi-character pattern repetition.
+        // 2. Arbitrary-period multi-character suffix repetition (Z-algorithm over
+        //    the reversed rolling tail; single O(N) pass across all unit lengths).
         self.rolling.push_str(text);
-        if self.rolling.len() > ROLLING_WINDOW {
-            let excess = self.rolling.len() - ROLLING_WINDOW;
-            let cut = self
-                .rolling
-                .char_indices()
-                .nth(excess)
-                .map(|(i, _)| i)
-                .unwrap_or(0);
-            self.rolling = self.rolling[cut..].to_string();
+        if self.rolling.len() > ROLLING_WINDOW_BYTES {
+            let mut cut = self.rolling.len() - ROLLING_WINDOW_BYTES;
+            while cut < self.rolling.len() && !self.rolling.is_char_boundary(cut) {
+                cut += 1;
+            }
+            self.rolling.drain(..cut);
         }
-        let len = self.rolling.len();
-        for unit_len in 4..=32 {
-            let needed = unit_len * PATTERN_REPEAT_COUNT;
-            if len < needed {
+
+        self.detect_periodic_suffix()
+    }
+
+    fn detect_periodic_suffix(&mut self) -> Option<Repetition> {
+        let bytes = self.rolling.as_bytes();
+        let n = bytes.len();
+        if n < 2 * MIN_PATTERN_REPEATS {
+            return None;
+        }
+
+        self.rev_buf.clear();
+        self.rev_buf.extend(bytes.iter().rev().copied());
+        self.z_buf.resize(n, 0);
+        self.z_buf[0] = n;
+        let (mut l, mut r) = (0usize, 0usize);
+        for i in 1..n {
+            let mut z = if i < r {
+                (r - i).min(self.z_buf[i - l])
+            } else {
+                0
+            };
+            while i + z < n && self.rev_buf[z] == self.rev_buf[i + z] {
+                z += 1;
+            }
+            self.z_buf[i] = z;
+            if i + z > r {
+                l = i;
+                r = i + z;
+            }
+        }
+
+        let max_period = n / MIN_PATTERN_REPEATS;
+        for p in 2..=max_period {
+            if self.z_buf[p] < p * (MIN_PATTERN_REPEATS - 1) {
                 continue;
             }
-            let unit = &self.rolling[len - unit_len..];
+            let unit_start = n - p;
+            if !self.rolling.is_char_boundary(unit_start) {
+                continue;
+            }
+            let unit = &self.rolling[unit_start..];
+            // Single-character runs are handled by step 1 with char-class limits
+            // (CODE_LIMIT/DIVIDER_LIMIT/DEFAULT_LIMIT), so skip homogeneous units here.
+            let mut chars = unit.chars();
+            let Some(first) = chars.next() else {
+                continue;
+            };
+            if !chars.any(|c| c != first) {
+                continue;
+            }
             let is_pure = unit
                 .chars()
                 .all(|c| CODE_REPEAT_CHARS.contains(&c) || DIVIDER_CHARS.contains(&c));
             if is_pure {
                 continue;
             }
-            let mut is_rep = true;
-            for r in 1..PATTERN_REPEAT_COUNT {
-                let seg_start = len - (r + 1) * unit_len;
-                let seg = &self.rolling[seg_start..len - r * unit_len];
-                if seg != unit {
-                    is_rep = false;
-                    break;
-                }
-            }
-            if is_rep {
+            let unit_chars = unit.chars().count();
+            let count = 1 + self.z_buf[p] / p;
+            if count >= Self::required_repeats(unit_chars) {
                 return Some(Repetition {
                     r#type: "pattern".to_string(),
                     pattern: unit.to_string(),
-                    count: PATTERN_REPEAT_COUNT,
+                    count,
                 });
             }
         }
 
         None
     }
+}
+
+/// Extract non-empty streamed text deltas (reasoning, content, tool-call arguments)
+/// from an OpenAI/vLLM SSE `choices[0].delta` object without letting an empty
+/// string mask sibling fields or double-counting `reasoning`/`reasoning_content`.
+pub(crate) fn extract_delta_fragments(delta: &serde_json::Value) -> Vec<&str> {
+    let mut out = Vec::new();
+    if let Some(r) = ["reasoning_content", "reasoning"].iter().find_map(|k| {
+        delta
+            .get(k)
+            .and_then(|v| v.as_str())
+            .filter(|s| !s.is_empty())
+    }) {
+        out.push(r);
+    }
+    if let Some(c) = delta
+        .get("content")
+        .and_then(|v| v.as_str())
+        .filter(|s| !s.is_empty())
+    {
+        out.push(c);
+    }
+    if let Some(tcs) = delta.get("tool_calls").and_then(|v| v.as_array()) {
+        for tc in tcs {
+            if let Some(args) = tc
+                .get("function")
+                .and_then(|f| f.get("arguments"))
+                .and_then(|v| v.as_str())
+                .filter(|s| !s.is_empty())
+            {
+                out.push(args);
+            }
+        }
+    }
+    out
 }
 
 // ---------------------------------------------------------------------------
@@ -326,39 +413,34 @@ impl SseSanitizer {
                     return Some(format!("event: error\ndata: {parsed}\n\n"));
                 }
 
-                // Repetition circuit breaker on delta content/reasoning.
+                // Repetition circuit breaker across reasoning, content, and tool arguments.
                 if let Some(delta) = parsed.pointer("/choices/0/delta") {
-                    let token_text = delta
-                        .get("content")
-                        .or_else(|| delta.get("reasoning"))
-                        .or_else(|| delta.get("reasoning_content"))
-                        .and_then(|v| v.as_str())
-                        .unwrap_or("");
-                    if !token_text.is_empty()
-                        && let Some(rep) = self.detector.feed(token_text)
-                    {
-                        self.done = true;
-                        let pattern_json = serde_json::to_string(&rep.pattern).unwrap_or_default();
-                        let marker = GUARD_MARKER_TEMPLATE
-                            .replace("${type}", &rep.r#type)
-                            .replace("${pattern}", &pattern_json);
-                        let model = self
-                            .last_model
-                            .as_deref()
-                            .or_else(|| parsed.get("model").and_then(|v| v.as_str()))
-                            .unwrap_or("unknown");
-                        let breaker = serde_json::json!({
-                            "id": "chatcmpl-repetition-breaker",
-                            "object": "chat.completion.chunk",
-                            "created": now_secs(),
-                            "model": model,
-                            "choices": [{
-                                "index": 0,
-                                "delta": { "content": marker },
-                                "finish_reason": "stop",
-                            }],
-                        });
-                        return Some(format!("data: {breaker}\n\ndata: [DONE]\n\n"));
+                    for token_text in extract_delta_fragments(delta) {
+                        if let Some(rep) = self.detector.feed(token_text) {
+                            self.done = true;
+                            let pattern_json =
+                                serde_json::to_string(&rep.pattern).unwrap_or_default();
+                            let marker = GUARD_MARKER_TEMPLATE
+                                .replace("${type}", &rep.r#type)
+                                .replace("${pattern}", &pattern_json);
+                            let model = self
+                                .last_model
+                                .as_deref()
+                                .or_else(|| parsed.get("model").and_then(|v| v.as_str()))
+                                .unwrap_or("unknown");
+                            let breaker = serde_json::json!({
+                                "id": "chatcmpl-repetition-breaker",
+                                "object": "chat.completion.chunk",
+                                "created": now_secs(),
+                                "model": model,
+                                "choices": [{
+                                    "index": 0,
+                                    "delta": { "content": marker },
+                                    "finish_reason": "stop",
+                                }],
+                            });
+                            return Some(format!("data: {breaker}\n\ndata: [DONE]\n\n"));
+                        }
                     }
                 }
             }
@@ -572,7 +654,10 @@ mod tests {
         assert!(out.contains(GUARD_MARKER_PREFIX), "got: {out}");
         assert!(out.contains("finish_reason"), "got: {out}");
         assert!(out.contains("[DONE]"), "breaker must append [DONE]: {out}");
-        assert!(out.contains("\"model\":\"unknown\""), "fallback model should be unknown: {out}");
+        assert!(
+            out.contains("\"model\":\"unknown\""),
+            "fallback model should be unknown: {out}"
+        );
     }
 
     #[test]
@@ -770,5 +855,156 @@ mod tests {
         let rep = result.unwrap();
         assert_eq!(rep.r#type, "pattern");
         assert_eq!(rep.count, PATTERN_REPEAT_COUNT);
+    }
+
+    #[test]
+    fn repetition_detector_long_sentence_loop_detected_dynamically() {
+        let mut d = RepetitionDetector::new();
+        let sentence = "\n \nLet me check src/patchwork's CLI and m2_retrieval's estimate_tokens, and also check the telemetry in the results json to verify the claims.";
+        assert!(sentence.len() > 32, "must exercise >32 byte periods");
+        let mut triggered = None;
+        for chunk in format!(
+            "preamble notes{sentence}{sentence}{sentence}{sentence}{sentence}{sentence}{sentence}"
+        )
+        .as_bytes()
+        .chunks(7)
+        {
+            let s = String::from_utf8_lossy(chunk);
+            if let Some(rep) = d.feed(&s) {
+                triggered = Some(rep);
+                break;
+            }
+        }
+        let rep = triggered.expect("long sentence loop must be caught quickly");
+        assert_eq!(rep.r#type, "pattern");
+        assert_eq!(rep.count, MIN_PATTERN_REPEATS);
+    }
+
+    #[test]
+    fn repetition_detector_homogeneous_runs_respect_char_class_limits() {
+        let mut d = RepetitionDetector::new();
+        // 99 'a's must not trigger early via 2-char "aa" pattern at count 40 (80 chars).
+        assert!(d.feed(&"a".repeat(99)).is_none());
+        let rep = d.feed("a").expect("100th 'a' must trip DEFAULT_LIMIT");
+        assert_eq!(rep.r#type, "character");
+        assert_eq!(rep.count, 100);
+    }
+
+    #[test]
+    fn extract_delta_fragments_does_not_let_empty_content_mask_reasoning() {
+        let delta = serde_json::json!({
+            "content": "",
+            "reasoning": "deliberating...",
+            "reasoning_content": "deliberating...",
+            "tool_calls": [{"index": 0, "function": {"arguments": "{\"a\":1}"}}]
+        });
+        assert_eq!(
+            extract_delta_fragments(&delta),
+            vec!["deliberating...", "{\"a\":1}"]
+        );
+    }
+
+    #[test]
+    fn repetition_detector_adversarial_utf8_and_scale_boundaries() {
+        // 4-char pattern: 39 repeats stay below PATTERN_REPEAT_COUNT (40); 40th triggers.
+        let mut d_short = RepetitionDetector::new();
+        assert!(d_short.feed(&"abcd".repeat(39)).is_none());
+        let rep = d_short
+            .feed("abcd")
+            .expect("40th short repeat must trigger");
+        assert_eq!(rep.count, PATTERN_REPEAT_COUNT);
+
+        // ~140-char mixed UTF-8 (CJK + emoji + ASCII): 5 repeats do not trigger; 6th does.
+        let unit = "Let me check 日本語ログ 🚀 src/proxy/sanitize.rs and verify the telemetry payload & KV metrics for turn completion cleanly without guessing!!";
+        assert!(unit.chars().count() > 128);
+        let mut d_long = RepetitionDetector::new();
+        for _ in 0..5 {
+            assert!(d_long.feed(unit).is_none());
+        }
+        // Stream the 6th copy in 1-char UTF-8 chunks; must trigger only on completion.
+        let chars: Vec<char> = unit.chars().collect();
+        let mut hit = None;
+        for (i, ch) in chars.iter().enumerate() {
+            let mut buf = [0u8; 4];
+            let s = ch.encode_utf8(&mut buf);
+            if let Some(r) = d_long.feed(s) {
+                hit = Some((i, r));
+                break;
+            }
+        }
+        let (idx, r) = hit.expect("6th long UTF-8 repeat must trigger on final codepoint");
+        assert_eq!(idx, chars.len() - 1);
+        assert_eq!(r.count, MIN_PATTERN_REPEATS);
+    }
+
+    #[test]
+    fn repetition_detector_no_false_positives_on_tables_diffs_and_large_stream() {
+        let mut d = RepetitionDetector::new();
+        let mut corpus = String::new();
+        corpus.push_str(&"| col1 | col2 |\n|------|------|\n".repeat(4));
+        corpus.push_str(&"|------|------|".repeat(30));
+        corpus.push_str("\n+++ b/src/main.rs\n");
+        corpus.push_str(&"+++++++++\n".repeat(80));
+        corpus.push_str(&"  ],\n".repeat(120));
+        for i in 0..450 {
+            corpus.push_str(&format!(
+                "pub fn helper_{i}(val: usize) -> usize {{ val.saturating_add({i}) }}\n"
+            ));
+        }
+        assert!(corpus.len() > 24_000);
+        for chunk in corpus.as_bytes().chunks(7) {
+            let s = String::from_utf8_lossy(chunk);
+            assert!(
+                d.feed(&s).is_none(),
+                "legitimate tables/diffs/code must not false-positive"
+            );
+        }
+    }
+
+    #[test]
+    fn sse_sanitizer_catches_tool_call_and_reasoning_only_loops() {
+        let unit = "Verifying src/proxy/sanitize.rs and src/engine/provider.rs repetition handling in turn stream.\n";
+        let frame_for_reason = format!(
+            "data: {}\n\n",
+            serde_json::json!({
+                "model": "qwen3.8-27b",
+                "choices": [{"delta": {"content": "", "reasoning": unit}}]
+            })
+        );
+        let mut san_r = SseSanitizer::new();
+        let mut tripped_r = false;
+        for _ in 0..10 {
+            for b in frame_for_reason.as_bytes().chunks(5) {
+                if san_r.feed(b).contains(GUARD_MARKER_PREFIX) {
+                    tripped_r = true;
+                    break;
+                }
+            }
+            if tripped_r {
+                break;
+            }
+        }
+        assert!(tripped_r, "empty content must not hide looping reasoning");
+
+        let arg_unit = "{\"path\":\"/workspace/a_very_long_file_name_kept_in_loop_for_detection_validation.rs\"},";
+        let frame_for_tool = format!(
+            "data: {}\n\n",
+            serde_json::json!({
+                "model": "qwen3.8-27b",
+                "choices": [{"delta": {"tool_calls": [{"index": 0, "function": {"arguments": arg_unit}}]}}]
+            })
+        );
+        let mut san_t = SseSanitizer::new();
+        let mut tripped_t = false;
+        for _ in 0..12 {
+            if san_t
+                .feed(frame_for_tool.as_bytes())
+                .contains(GUARD_MARKER_PREFIX)
+            {
+                tripped_t = true;
+                break;
+            }
+        }
+        assert!(tripped_t, "looping tool_call arguments must trip breaker");
     }
 }

@@ -205,8 +205,7 @@ pub async fn run_session(
 
         let active_tools: &[ToolSchema] = if break_after_turn { &[] } else { tools };
         accounted_msgs = messages.len();
-        let watchdog = wd_timeout > 0 || wd_max_reasoning > 0;
-        let completion = if watchdog {
+        let completion = {
             let primary = chat_with_watchdog(
                 engine,
                 &messages,
@@ -219,18 +218,6 @@ pub async fn run_session(
             )
             .await;
             match primary {
-                Ok(c) => c,
-                Err(crate::engine::EngineError::Sse(err)) => {
-                    tracing::warn!(
-                        "Transient SSE stream error on turn {turns}: {err}; retrying once"
-                    );
-                    tokio::time::sleep(std::time::Duration::from_millis(500)).await;
-                    engine.chat(&messages, active_tools, true, effort).await?
-                }
-                Err(err) => return Err(RunnerError::Engine(err)),
-            }
-        } else {
-            match engine.chat(&messages, active_tools, true, effort).await {
                 Ok(c) => c,
                 Err(crate::engine::EngineError::Sse(err)) => {
                     tracing::warn!(
